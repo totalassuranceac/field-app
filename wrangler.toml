@@ -1,0 +1,30 @@
+name = "total-assurance-fleet"
+main = "worker/index.ts"
+compatibility_date = "2025-02-24"
+compatibility_flags = ["nodejs_compat"]
+account_id = "f6da342467e60df683731c55dfc0e7b4"
+workers_dev = true
+
+[assets]
+directory = "./dist/client"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fleet_db"
+database_id = "9126adda-009e-4aff-8f78-dddf54be8ffa"
+preview_database_id = "9126adda-009e-4aff-8f78-dddf54be8ffa"
+
+# After enabling R2 in the Cloudflare dashboard:
+#   npx wrangler r2 bucket create fleet-receipts
+# then uncomment:
+# [[r2_buckets]]
+# binding = "RECEIPTS"
+# bucket_name = "fleet-receipts"
+# preview_bucket_name = "fleet-receipts-preview"
+
+[vars]
+APP_NAME = "Total Assurance Fleet"
+WORKSPACE_DOMAIN = ""
+GOOGLE_ALLOWED_EXTRA = ""

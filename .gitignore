@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.DS_Store
+*.log
+.env
+.vite/
+cookies*.txt
+*_resp.json
+login_page.html
+onestep_*.html
+vz_*.html
+vz_*.js
+vz_*.json
+auth_*.json
+tmp-*.js
+# live GPS dumps (may contain locations)
+onestep_devices_summary.json
+verizon_devices_summary.json
+verizon_vehicle_plots.json
+verizon_account_meta.json

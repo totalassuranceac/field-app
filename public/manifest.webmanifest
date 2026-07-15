@@ -1,0 +1,9 @@
+{
+  "name": "Total Assurance Fleet",
+  "short_name": "Fleet",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f3d2e",
+  "theme_color": "#0f3d2e",
+  "description": "Fuel, compliance, and repair tracking for Total Assurance fleet"
+}

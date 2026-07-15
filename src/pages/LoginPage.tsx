@@ -1,0 +1,82 @@
+import { FormEvent, useState } from "react";
+import { useAuth } from "../auth";
+
+export function LoginPage() {
+  const { login, googleEnabled } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const logoSrc = "/logo-light.png";
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      if (!username.trim() || !password) {
+        throw new Error("Enter your username and password.");
+      }
+      await login(username.trim(), password);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="login-page">
+      <div className="login-card">
+        <img className="login-logo" src={logoSrc} alt="Total Assurance A/C & Heating" />
+        <h1>Fleet Tracker</h1>
+        <p className="sub">Sign in with the credentials your admin created for you</p>
+        {error && (
+          <div className="error" style={{ marginBottom: "0.85rem" }}>
+            {error}
+          </div>
+        )}
+        <form className="form" onSubmit={onSubmit}>
+          <label>
+            Username or email
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              required
+              placeholder="your.name"
+              disabled={busy}
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+              disabled={busy}
+            />
+          </label>
+          <button className="btn" disabled={busy} type="submit">
+            {busy ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+        {googleEnabled && (
+          <>
+            <div className="muted" style={{ textAlign: "center", margin: "1rem 0 0.75rem" }}>
+              or
+            </div>
+            <a className="btn secondary" href="/api/auth/google" style={{ width: "100%" }}>
+              Continue with Google Workspace
+            </a>
+          </>
+        )}
+        <p className="muted" style={{ marginTop: "1rem", fontSize: "0.8rem", textAlign: "center" }}>
+          Forgot password? Contact your fleet admin — they can reset it in Settings/Admin.
+        </p>
+      </div>
+    </div>
+  );
+}

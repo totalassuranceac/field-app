@@ -1,0 +1,33 @@
+{
+  "name": "total-assurance-fleet",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "db:migrate:local": "wrangler d1 execute fleet_db --local --file=./schema.sql",
+    "db:migrate": "wrangler d1 execute fleet_db --remote --file=./schema.sql",
+    "db:seed:local": "wrangler d1 execute fleet_db --local --file=./seed.sql",
+    "db:seed:sheet:local": "wrangler d1 execute fleet_db --local --file=./seed_sheet.sql",
+    "db:migrate:sheet:local": "wrangler d1 execute fleet_db --local --file=./migrations/002_sheet_fields.sql",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.7.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0",
+    "wrangler": "^3.114.0"
+  }
+}
