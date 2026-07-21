@@ -262,24 +262,13 @@ export function roleLabel(role: Role | string | undefined): string {
 }
 
 /**
- * App name shown in the shell for each role.
- * Field = mobile techs; others are desk-oriented trackers.
+ * Product name in the shell / tab title.
+ * One app for field, warehouse, shop, and office — role is shown on the user card.
  */
-export function appBrandName(role: Role | string | undefined): string {
-  switch (role) {
-    case "driver":
-      return "Field App";
-    case "mechanic":
-      return "Shop Tracker";
-    case "warehouse":
-      return "Warehouse Tracker";
-    case "office":
-      return "Office Tracker";
-    case "admin":
-      return "Fleet Admin";
-    case "viewer":
-      return "Fleet Viewer";
-    default:
-      return "Fleet App";
-  }
+export function appBrandName(_role?: Role | string | undefined): string {
+  return "Field App";
 }
+
+/** Full product line under Total Assurance (login, PWA, docs). */
+export const APP_PRODUCT_NAME = "Field App";
+export const APP_COMPANY_LINE = "Total Assurance A/C & Heating";

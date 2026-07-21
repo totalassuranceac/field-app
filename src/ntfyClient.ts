@@ -64,7 +64,7 @@ export function buildIssuePush(opts: {
       (opts.description || "").trim().slice(0, 120) ||
         (opts.emergency ? "Needs help now — open the fleet app." : "New shop request."),
       opts.emergency
-        ? "Open Notifications / Repairs in Total Assurance Fleet ASAP."
+        ? "Open Notifications / Repairs in Field App ASAP."
         : "Open Repairs & shop board.",
     ]
       .filter(Boolean)

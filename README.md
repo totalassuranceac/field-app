@@ -1,8 +1,10 @@
-# Total Assurance Fleet Tracker
+# Field App · Total Assurance
 
-All-in-one fleet app for **fuel/mileage logging**, **vehicle compliance (yard walk)**, and **repair scheduling**, with dual auth (username/password + Google Workspace) and a full audit trail.
+One app for the whole team: **field techs**, **warehouse**, **shop**, and **office**.
 
-Built for **Cloudflare** (Workers + D1 + R2 + static assets) so it sits alongside the services you already pay for.
+Covers trucks & fuel, live map, repairs, inventory/parts, assets, warranties, handbook, and more — with dual auth (username/password + Google Workspace) and an audit trail.
+
+Built for **Cloudflare** (Workers + D1 + R2 + static assets).
 
 ## Features
 

@@ -1,4 +1,4 @@
-# Put Total Assurance Fleet on private GitHub
+# Put Field App on private GitHub
 
 Use a **private** repo so only people you invite can see the code.  
 **Do not** put GitHub passwords in chat or in scripts. Use a **Personal Access Token** or **GitHub Desktop**.
@@ -13,7 +13,7 @@ Use a **private** repo so only people you invite can see the code.
 3. Commit all current files with a message like:  
    `Total Assurance Fleet — production snapshot`
 4. **Publish repository**  
-   - Name: `fleet-tracker` (or `total-assurance-fleet`)  
+   - Name: `field-app` (or `fleet-tracker`)  
    - Keep **Keep this code private** checked  
    - Publish
 
@@ -43,7 +43,7 @@ https://git-scm.com/download/win — install, then **restart** the terminal.
 ### 2) Create a private empty repo on GitHub
 
 1. https://github.com/new  
-2. Name: `fleet-tracker`  
+2. Name: `field-app`  
 3. **Private**  
 4. **Do not** add README / .gitignore / license (you already have the project)  
 5. Create repository  
@@ -66,7 +66,7 @@ git status
 git commit -m "Total Assurance Fleet — production snapshot"
 
 git branch -M main
-git remote add origin https://github.com/<OWNER>/fleet-tracker.git
+git remote add origin https://github.com/<OWNER>/field-app.git
 git push -u origin main
 ```
 
@@ -125,8 +125,8 @@ Database and secrets usually already exist on the same Cloudflare Worker; you on
 ## Quick recovery later
 
 ```powershell
-git clone https://github.com/<OWNER>/fleet-tracker.git
-cd fleet-tracker
+git clone https://github.com/<OWNER>/field-app.git
+cd field-app
 npm install
 npx wrangler login
 npm run build

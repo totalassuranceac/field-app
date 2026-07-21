@@ -25,6 +25,6 @@ preview_database_id = "9126adda-009e-4aff-8f78-dddf54be8ffa"
 # preview_bucket_name = "fleet-receipts-preview"
 
 [vars]
-APP_NAME = "Total Assurance Fleet"
+APP_NAME = "Field App"
 WORKSPACE_DOMAIN = ""
 GOOGLE_ALLOWED_EXTRA = ""

@@ -727,7 +727,7 @@ export function AdminPage() {
                 → <strong>Login as Production Environment User</strong> with your ST admin login.
               </li>
               <li>
-                <strong>My Apps → + New App</strong> — name it e.g. “Total Assurance Fleet”. Add
+                <strong>My Apps → + New App</strong> — name it e.g. “Field App”. Add
                 your <strong>Tenant ID</strong>. Under API scopes enable at least{" "}
                 <strong>Pricebook → View</strong> (and Inventory View if listed). Save and copy the{" "}
                 <strong>Application Key</strong> (App Key).

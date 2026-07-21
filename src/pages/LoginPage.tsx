@@ -30,8 +30,12 @@ export function LoginPage() {
     <div className="login-page">
       <div className="login-card">
         <img className="login-logo" src={logoSrc} alt="Total Assurance A/C & Heating" />
-        <h1>Fleet Tracker</h1>
-        <p className="sub">Sign in with your username. First time? Use the temporary password from your admin, then choose your own in Settings.</p>
+        <h1>Field App</h1>
+        <p className="sub">
+          Trucks, warehouse, repairs, and parts — one place for the team. Sign in with your
+          username. First time? Use the temporary password from your admin, then choose your own
+          in Settings.
+        </p>
         {error && (
           <div className="error" style={{ marginBottom: "0.85rem" }}>
             {error}
@@ -75,7 +79,7 @@ export function LoginPage() {
           </>
         )}
         <p className="muted" style={{ marginTop: "1rem", fontSize: "0.8rem", textAlign: "center" }}>
-          Forgot password? Contact your fleet admin — they can reset it in Settings/Admin.
+          Forgot password? Contact your admin — they can reset it in Settings / Admin.
         </p>
         <p className="muted" style={{ marginTop: "0.5rem", fontSize: "0.72rem", textAlign: "center" }}>
           Open: total-assurance-fleet.totalassurance.workers.dev

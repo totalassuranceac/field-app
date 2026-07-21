@@ -221,7 +221,7 @@ function requireRoles(roles: Role[]) {
 app.get("/api/health", (c) =>
   c.json({
     ok: true,
-    app: c.env.APP_NAME || "Total Assurance Fleet",
+    app: c.env.APP_NAME || "Field App",
     google: googleConfigured(c.env),
   })
 );
@@ -1738,7 +1738,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       shortDesc ||
         (isEmergency ? "Needs help now — open the fleet app." : "New shop request."),
       isEmergency
-        ? "Open Notifications / Repairs in Total Assurance Fleet ASAP."
+        ? "Open Notifications / Repairs in Field App ASAP."
         : "Open Repairs & shop board.",
     ].join("\n"),
     priority: isEmergency ? "urgent" : "high",
