@@ -4,15 +4,26 @@ import type { Env, PublicUser, Role, UserRow } from "./types";
 const SESSION_COOKIE = "fleet_session";
 const SESSION_DAYS = 14;
 
+/** Map DB row → public user. Warehouse is stored as office + is_warehouse=1 (CHECK on role). */
 export function toPublicUser(u: UserRow): PublicUser {
+  const isWh = Boolean(u.is_warehouse) || u.role === "warehouse";
   return {
     id: u.id,
     email: u.email,
     username: u.username,
     display_name: u.display_name,
-    role: u.role,
+    role: isWh ? "warehouse" : u.role,
+    is_warehouse: isWh,
     employee_id: u.employee_id,
+    phone: u.phone ?? null,
+    must_change_password: Boolean(u.must_change_password),
   };
+}
+
+/** Persist role for users table (CHECK allows admin|office|driver|mechanic|viewer only). */
+export function dbRoleFor(role: Role): { role: Role; is_warehouse: number } {
+  if (role === "warehouse") return { role: "office", is_warehouse: 1 };
+  return { role, is_warehouse: 0 };
 }
 
 function bufToHex(buf: ArrayBuffer): string {
@@ -113,7 +124,12 @@ export async function getUserFromSession(db: D1Database, token: string | null): 
   return row ?? null;
 }
 
+/**
+ * Permission check for API routes.
+ * Admin always passes (superuser) so one admin login can exercise every feature.
+ */
 export function roleAtLeast(role: Role, allowed: Role[]): boolean {
+  if (role === "admin") return true;
   return allowed.includes(role);
 }
 
@@ -124,13 +140,102 @@ export const ROLE_PERMS = {
   logFuel: ["admin", "office", "driver"] as Role[],
   editAnyFuel: ["admin", "office"] as Role[],
   viewFuel: ["admin", "office", "driver", "mechanic", "viewer"] as Role[],
-  manageAlerts: ["admin", "office"] as Role[],
+  /** Read mileage flags + tracking health (viewers browse-only) */
+  viewAlerts: ["admin", "office", "mechanic", "viewer"] as Role[],
+  /** Ack / dismiss flags — admin, office, mechanic (shop eyes) */
+  manageAlerts: ["admin", "office", "mechanic"] as Role[],
   reportIssues: ["admin", "office", "driver", "mechanic"] as Role[],
   manageIssues: ["admin", "mechanic", "office"] as Role[],
+  /** Audit trail is admin-only */
   viewAudit: ["admin"] as Role[],
-  viewReports: ["admin", "office", "mechanic", "viewer"] as Role[],
+  viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"] as Role[],
   manageSettings: ["admin"] as Role[],
+  /**
+   * Inventory
+   * - view: admin, office, warehouse (techs do not browse full catalog)
+   * - manage: issue/receive, transfers, import (admin + warehouse; office view-only helpers)
+   * - levels: min/max only admin + warehouse
+   */
+  viewInventory: ["admin", "office", "warehouse"] as Role[],
+  manageInventory: ["admin", "warehouse"] as Role[],
+  manageInventoryLevels: ["admin", "warehouse"] as Role[],
+  /**
+   * Company assets (bottles, ladders, tools) — outside pricebook
+   * - view: warehouse/office/admin full; field + mechanic can see (field scoped in routes)
+   * - manage: warehouse + admin only
+   */
+  viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic"] as Role[],
+  manageCompanyAssets: ["admin", "warehouse"] as Role[],
 };
+
+function normName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\(.*?\)/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Vehicles a driver may see (matched by assigned_driver → employee name / display name).
+ * Returns null for non-drivers (no restriction).
+ */
+export async function getDriverVehicleIds(
+  db: D1Database,
+  user: PublicUser
+): Promise<number[] | null> {
+  if (user.role !== "driver") return null;
+
+  const names: string[] = [];
+  if (user.display_name?.trim()) names.push(normName(user.display_name));
+  if (user.username?.trim()) names.push(normName(user.username));
+
+  if (user.employee_id) {
+    const emp = await db
+      .prepare("SELECT name FROM employees WHERE id = ?")
+      .bind(user.employee_id)
+      .first<{ name: string }>();
+    if (emp?.name) names.push(normName(emp.name));
+  }
+
+  if (!names.length) return [];
+
+  const rows = await db
+    .prepare(
+      `SELECT id, assigned_driver FROM vehicles WHERE status != 'retired' AND assigned_driver IS NOT NULL`
+    )
+    .all<{ id: number; assigned_driver: string }>();
+
+  const ids: number[] = [];
+  for (const v of rows.results || []) {
+    const ad = normName(v.assigned_driver || "");
+    if (!ad) continue;
+    const hit = names.some(
+      (n) => n && (ad === n || ad.includes(n) || n.includes(ad))
+    );
+    if (hit) ids.push(v.id);
+  }
+  return ids;
+}
+
+/** SQL fragment: AND col IN (?,?,?) — empty ids become AND 0 (no rows). */
+export function sqlInIds(
+  column: string,
+  ids: number[]
+): { clause: string; binds: number[] } {
+  if (!ids.length) return { clause: ` AND 0`, binds: [] };
+  const placeholders = ids.map(() => "?").join(",");
+  return { clause: ` AND ${column} IN (${placeholders})`, binds: ids };
+}
+
+export function assertDriverVehicleAccess(
+  vehicleIds: number[] | null,
+  vehicleId: number
+): boolean {
+  if (vehicleIds === null) return true; // not a driver
+  return vehicleIds.includes(vehicleId);
+}
 
 export async function ensureBootstrapAdmin(env: Env): Promise<void> {
   const count = await env.DB.prepare("SELECT COUNT(*) as c FROM users").first<{ c: number }>();

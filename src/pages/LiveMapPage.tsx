@@ -19,6 +19,31 @@ export interface LivePosition {
   online: boolean | null;
 }
 
+interface TrackingIssue {
+  code: string;
+  severity: "bad" | "warn" | string;
+  message: string;
+  vehicle_id: number | null;
+  unit_number: string | null;
+  provider?: string | null;
+  detail?: string | null;
+}
+
+interface TrackingHealth {
+  stale_hours: number;
+  counts: {
+    not_reporting: number;
+    stale_or_offline: number;
+    dashcam_policy: number;
+    equipment_manual: number;
+    unmatched_devices: number;
+    total: number;
+  };
+  issues: TrackingIssue[];
+  expected_trackers: number;
+  live_matched: number;
+}
+
 interface LiveResponse {
   fetched_at: string;
   positions: LivePosition[];
@@ -26,6 +51,7 @@ interface LiveResponse {
     onestep: { ok: boolean; count: number; error?: string; configured: boolean };
     verizon: { ok: boolean; count: number; error?: string; configured: boolean };
   };
+  tracking?: TrackingHealth | null;
   error?: string;
 }
 
@@ -118,7 +144,6 @@ export function LiveMapPage() {
   const [mapReady, setMapReady] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
 
   filterRef.current = filter;
 
@@ -204,6 +229,7 @@ export function LiveMapPage() {
               configured: false,
             },
           },
+          tracking: res.tracking ?? null,
           error: res.error,
         };
         setData(normalized);
@@ -291,14 +317,14 @@ export function LiveMapPage() {
     syncMarkers(filtered);
   }, [filter, mapReady]); // intentionally not filtered/data every paint
 
-  // Auto-refresh
+  // Always auto-refresh every 30s
   useEffect(() => {
-    if (!autoRefresh || !mapReady) return;
+    if (!mapReady) return;
     const id = window.setInterval(() => {
       loadPositions(false);
     }, 30_000);
     return () => window.clearInterval(id);
-  }, [autoRefresh, mapReady, loadPositions]);
+  }, [mapReady, loadPositions]);
 
   function focusPosition(p: LivePosition) {
     if (!isValidCoord(p.lat, p.lng)) return;
@@ -327,28 +353,7 @@ export function LiveMapPage() {
       <div className="page-header">
         <div>
           <h1>Live map</h1>
-          <p>OneStep + Verizon GPS · refreshes every 30 seconds</p>
-        </div>
-        <div className="toolbar no-print">
-          <label className="muted" style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-            />
-            Auto-refresh
-          </label>
-          <button
-            className="btn secondary"
-            type="button"
-            onClick={() => {
-              setLoading(true);
-              loadPositions(true);
-            }}
-            disabled={loading && !data}
-          >
-            Refresh now
-          </button>
+          <p>OneStep + Verizon GPS · updates every 30 seconds</p>
         </div>
       </div>
 
@@ -451,7 +456,9 @@ export function LiveMapPage() {
                   onClick={() => focusPosition(p)}
                 >
                   <div className="live-vehicle-top">
-                    <strong>{p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle"}</strong>
+                    <strong>
+                      {p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle"}
+                    </strong>
                     <span className={`badge ${p.provider === "onestep" ? "ok" : "info"}`}>
                       {providerLabel(p.provider)}
                     </span>

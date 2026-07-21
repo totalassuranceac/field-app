@@ -2,16 +2,113 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0f3d2e" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0f1c33" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <title>Total Assurance Fleet</title>
-    <link rel="icon" type="image/png" href="/logo-mark.png" />
-    <link rel="apple-touch-icon" href="/logo-mark.png" />
+    <!-- build: 2026-07-21-admin-polish -->
+    <script>
+      // Apply saved theme before paint so dark mode is not a white flash
+      try {
+        var t = localStorage.getItem("ta_fleet_theme");
+        if (t !== "light" && t !== "dark") {
+          t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.style.colorScheme = t;
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <style>
+      /* Boot only — do NOT set html/body colors (that broke dark theme). */
+      #boot-shell {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+        text-align: center;
+        box-sizing: border-box;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: #0b1220;
+        color: #e8eef6;
+      }
+      #boot-shell h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.25rem;
+      }
+      #boot-shell p {
+        margin: 0.35rem 0;
+        color: #93a4b8;
+        font-size: 0.95rem;
+        max-width: 28rem;
+        line-height: 1.4;
+      }
+      #boot-shell a {
+        display: inline-block;
+        margin-top: 0.85rem;
+        padding: 0.5rem 0.9rem;
+        border-radius: 10px;
+        background: #c8102e;
+        color: #fff;
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 0.9rem;
+      }
+      #boot-shell .muted {
+        font-size: 0.8rem;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-shell">
+        <div>
+          <h1>Total Assurance Fleet</h1>
+          <p id="boot-msg">Starting the app…</p>
+          <p class="muted" id="boot-url">total-assurance-fleet.totalassurance.workers.dev</p>
+        </div>
+      </div>
+    </div>
+    <script>
+      // If React never replaces #root, show a clear recovery path (not a blank page).
+      window.__TA_BOOT__ = Date.now();
+      setTimeout(function () {
+        var shell = document.getElementById("boot-shell");
+        var msg = document.getElementById("boot-msg");
+        if (!shell || !msg) return;
+        // React removes boot-shell when it mounts; if still here after 6s, help the user
+        msg.textContent =
+          "Still starting… If this does not change, use Retry (clears a stuck cache).";
+        if (!document.getElementById("boot-retry")) {
+          var a = document.createElement("a");
+          a.id = "boot-retry";
+          a.href = "/?reload=" + Date.now();
+          a.textContent = "Retry load";
+          shell.querySelector("div").appendChild(a);
+        }
+      }, 6000);
+      setTimeout(function () {
+        var shell = document.getElementById("boot-shell");
+        if (!shell) return;
+        var msg = document.getElementById("boot-msg");
+        if (msg) {
+          msg.innerHTML =
+            "The app did not finish loading on this device.<br/>Open the link below in a new tab, or clear site data for this site and try again.";
+        }
+      }, 12000);
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

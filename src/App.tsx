@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useSearchParams } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -16,6 +16,14 @@ import { LiveMapPage } from "./pages/LiveMapPage";
 import { InspectionsPage } from "./pages/InspectionsPage";
 import { DowntimePage } from "./pages/DowntimePage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { ServicePage } from "./pages/ServicePage";
+import { NotificationsPage } from "./pages/NotificationsPage";
+import { InventoryPage } from "./pages/InventoryPage";
+import { AssetsPage } from "./pages/AssetsPage";
+import { MessagesPage } from "./pages/MessagesPage";
+import { WarrantiesPage } from "./pages/WarrantiesPage";
+import { HandbookPage } from "./pages/HandbookPage";
+import { RolesPage } from "./pages/RolesPage";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -27,6 +35,16 @@ function Protected({ children }: { children: React.ReactNode }) {
     );
   }
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+/** After admin creates/resets password, force user into Settings to pick their own. */
+function PasswordGate({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const location = useLocation();
+  if (user?.must_change_password && location.pathname !== "/settings") {
+    return <Navigate to="/settings" replace />;
+  }
   return <>{children}</>;
 }
 
@@ -54,6 +72,7 @@ export default function App() {
           path="/*"
           element={
             <Protected>
+              <PasswordGate>
               <Layout>
                 <Routes>
                   <Route
@@ -121,6 +140,38 @@ export default function App() {
                     }
                   />
                   <Route
+                    path="/service"
+                    element={
+                      <Page title="Oil changes">
+                        <ServicePage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/notifications"
+                    element={
+                      <Page title="Notifications">
+                        <NotificationsPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/messages"
+                    element={
+                      <Page title="Messages">
+                        <MessagesPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/warranties"
+                    element={
+                      <Page title="Warranties">
+                        <WarrantiesPage />
+                      </Page>
+                    }
+                  />
+                  <Route
                     path="/downtime"
                     element={
                       <Page title="Downtime">
@@ -133,6 +184,38 @@ export default function App() {
                     element={
                       <Page title="Reports">
                         <ReportsPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/inventory"
+                    element={
+                      <Page title="Inventory">
+                        <InventoryPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/assets"
+                    element={
+                      <Page title="Company assets">
+                        <AssetsPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/handbook"
+                    element={
+                      <Page title="Employee handbook">
+                        <HandbookPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/roles"
+                    element={
+                      <Page title="Role simulator">
+                        <RolesPage />
                       </Page>
                     }
                   />
@@ -163,6 +246,7 @@ export default function App() {
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Layout>
+              </PasswordGate>
             </Protected>
           }
         />

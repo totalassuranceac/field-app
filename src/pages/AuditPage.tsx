@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { LogItem, LogList } from "../components/CollapsibleLog";
 
 interface Log {
   id: number;
@@ -33,40 +34,36 @@ export function AuditPage() {
       <div className="page-header">
         <div>
           <h1>Audit log</h1>
-          <p>Who changed what, and when</p>
+          <p>Who changed what, and when — tap a row for the full summary.</p>
         </div>
       </div>
       {error && <div className="error">{error}</div>}
-      <div className="card">
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Who</th>
-                <th>Action</th>
-                <th>Entity</th>
-                <th>Summary</th>
-              </tr>
-            </thead>
-            <tbody>
-              {logs.map((l) => (
-                <tr key={l.id}>
-                  <td>{l.created_at}</td>
-                  <td>{l.user_display}</td>
-                  <td>{l.action}</td>
-                  <td>
-                    {l.entity_type}
-                    {l.entity_id ? ` #${l.entity_id}` : ""}
-                  </td>
-                  <td>{l.summary}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!logs.length && <div className="empty">No audit events yet.</div>}
-        </div>
-      </div>
+      <LogList empty="No audit events yet.">
+        {logs.map((l) => (
+          <LogItem
+            key={l.id}
+            summary={
+              <>
+                <span className="log-item-badge">{l.action}</span>
+                <strong>{l.entity_type}</strong>
+                {l.entity_id ? (
+                  <span className="log-item-meta">#{l.entity_id}</span>
+                ) : null}
+                <span className="log-item-meta">{l.user_display}</span>
+                <span className="log-item-meta">
+                  {String(l.created_at || "").replace("T", " ").slice(0, 16)}
+                </span>
+              </>
+            }
+          >
+            <div>{l.summary}</div>
+            <div className="muted">
+              {l.entity_type}
+              {l.entity_id ? ` #${l.entity_id}` : ""} · {l.user_display}
+            </div>
+          </LogItem>
+        ))}
+      </LogList>
     </div>
   );
 }

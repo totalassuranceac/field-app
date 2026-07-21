@@ -1,3 +1,22 @@
+import {
+  bootstrapOfflineQueue,
+  enqueueFromRequest,
+  flushOfflineQueue,
+  isNetworkFailure,
+  isQueueableMutation,
+  OfflineQueuedError,
+  pendingCount,
+  subscribeOfflineQueue,
+} from "./offlineQueue";
+
+export {
+  OfflineQueuedError,
+  flushOfflineQueue,
+  pendingCount,
+  subscribeOfflineQueue,
+  bootstrapOfflineQueue,
+};
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -13,10 +32,23 @@ function redirectToLogin() {
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 
+/**
+ * API helper. Mutating requests that hit offline / bad signal are queued in
+ * IndexedDB and sent automatically when connection returns.
+ */
 export async function api<T = unknown>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const method = (options.method || "GET").toUpperCase();
+  const queueable = isQueueableMutation(path, method);
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false && queueable) {
+    const item = await enqueueFromRequest(path, options);
+    const count = await pendingCount();
+    throw new OfflineQueuedError(item.id, count, item.label);
+  }
+
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     throw new ApiError(0, "You appear to be offline. Check your connection and try again.");
   }
@@ -33,19 +65,41 @@ export async function api<T = unknown>(
       headers,
       credentials: "include",
     });
-  } catch {
+  } catch (err) {
+    if (queueable && isNetworkFailure(err)) {
+      const item = await enqueueFromRequest(path, options);
+      const count = await pendingCount();
+      throw new OfflineQueuedError(item.id, count, item.label);
+    }
     throw new ApiError(
       0,
       "Network error — could not reach the server. Check connection and try again."
     );
   }
 
+  // Gateway blips on mobile — queue mutations so they aren't lost
+  if (queueable && (res.status === 502 || res.status === 503 || res.status === 504)) {
+    const item = await enqueueFromRequest(path, options);
+    const count = await pendingCount();
+    throw new OfflineQueuedError(item.id, count, item.label);
+  }
+
   const text = await res.text();
+  const looksLikeHtml =
+    /^\s*<(!DOCTYPE|html|!--)/i.test(text) || text.includes("<!DOCTYPE html>");
+
   let data: unknown = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text ? { error: text.slice(0, 200) } : null;
+  if (text && !looksLikeHtml) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  // /auth/me may return 401 on some edge paths — treat as logged out, never redirect-loop
+  if (res.status === 401 && (path.startsWith("/auth/me") || path === "/auth/me")) {
+    return { user: null } as T;
   }
 
   if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/me")) {
@@ -54,16 +108,49 @@ export async function api<T = unknown>(
   }
 
   if (!res.ok) {
-    const msg =
-      data && typeof data === "object" && data !== null && "error" in data
-        ? String((data as { error: string }).error)
-        : res.statusText || `Request failed (${res.status})`;
+    let msg = res.statusText || `Request failed (${res.status})`;
+    if (data && typeof data === "object" && data !== null && "error" in data) {
+      msg = String((data as { error: string }).error);
+    } else if (looksLikeHtml) {
+      msg =
+        res.status === 502 || res.status === 503 || res.status === 504
+          ? "Server temporarily unavailable. Wait a moment and try again."
+          : `Server error (${res.status}). Try refresh — if it keeps happening, the API may be overloaded.`;
+    } else if (text && text.length < 200 && !text.includes("<")) {
+      msg = text;
+    }
+    msg = msg.replace(/\s+/g, " ").trim().slice(0, 160);
     throw new ApiError(res.status, msg);
+  }
+
+  if (looksLikeHtml) {
+    // SPA fallback HTML on an API path — do not hang auth forever
+    if (path.startsWith("/auth/me")) return { user: null } as T;
+    throw new ApiError(
+      res.status || 502,
+      "Got an unexpected response from the server. Refresh and try again."
+    );
+  }
+  if (data == null) {
+    if (path.startsWith("/auth/me")) return { user: null } as T;
+    throw new ApiError(
+      res.status || 502,
+      "Got an empty response from the server. Refresh and try again."
+    );
   }
   return data as T;
 }
 
-export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer";
+export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer" | "warehouse";
+
+/** Roles admin can preview as (session "view as") */
+export const VIEW_AS_ROLES: Role[] = [
+  "warehouse",
+  "office",
+  "driver",
+  "mechanic",
+  "viewer",
+];
 
 export interface User {
   id: number;
@@ -71,29 +158,90 @@ export interface User {
   username: string | null;
   display_name: string;
   role: Role;
+  /** Warehouse is stored as office + is_warehouse in DB */
+  is_warehouse?: boolean;
+  /** Real role when admin is previewing another role */
+  real_role?: Role;
   employee_id: number | null;
+  phone?: string | null;
+  must_change_password?: boolean;
 }
 
+/** All permission keys used by the UI (admin always has every one). */
+export const ALL_PERMISSIONS = [
+  "manageUsers",
+  "manageEmployees",
+  "manageVehicles",
+  "logFuel",
+  "editFuel",
+  "viewAlerts",
+  "manageAlerts",
+  "reportIssues",
+  "manageIssues",
+  "viewAudit",
+  "viewReports",
+  "manageSettings",
+  "viewInventory",
+  "manageInventory",
+  "manageInventoryLevels",
+  "viewCompanyAssets",
+  "manageCompanyAssets",
+] as const;
+
+export type Permission = (typeof ALL_PERMISSIONS)[number];
+
+/**
+ * UI permission check.
+ * - Effective role "admin" → superuser (all features).
+ * - When admin uses View as, role becomes warehouse/field/etc. so the UI
+ *   matches that role (API still runs as admin on the server).
+ */
 export function can(user: User | null, action: string): boolean {
   if (!user) return false;
   const r = user.role;
+  // Superuser only when not previewing another role
+  if (r === "admin") return true;
+
   const map: Record<string, Role[]> = {
     manageUsers: ["admin"],
     manageEmployees: ["admin", "office"],
     manageVehicles: ["admin", "office", "mechanic"],
     logFuel: ["admin", "office", "driver"],
     editFuel: ["admin", "office"],
-    manageAlerts: ["admin", "office"],
+    viewAlerts: ["admin", "office", "mechanic", "viewer"],
+    manageAlerts: ["admin", "office", "mechanic"],
     reportIssues: ["admin", "office", "driver", "mechanic"],
     manageIssues: ["admin", "mechanic", "office"],
     viewAudit: ["admin"],
-    viewReports: ["admin", "office", "mechanic", "viewer"],
+    viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"],
     manageSettings: ["admin"],
+    viewInventory: ["admin", "office", "warehouse"],
+    manageInventory: ["admin", "warehouse"],
+    manageInventoryLevels: ["admin", "warehouse"],
+    viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic"],
+    manageCompanyAssets: ["admin", "warehouse"],
   };
   return (map[action] || []).includes(r);
 }
 
-/** Short role guide for UI copy */
+/** Permission matrix for role simulation / admin testing */
+export function permissionsForRole(role: Role): Record<string, boolean> {
+  const fake: User = {
+    id: 0,
+    email: null,
+    username: null,
+    display_name: role,
+    role,
+    employee_id: null,
+  };
+  const out: Record<string, boolean> = {};
+  for (const p of ALL_PERMISSIONS) {
+    out[p] = can(fake, p);
+  }
+  return out;
+}
+
+/** Short role guide for UI copy (internal codes stay: driver = field) */
 export function roleLabel(role: Role | string | undefined): string {
   switch (role) {
     case "admin":
@@ -101,12 +249,37 @@ export function roleLabel(role: Role | string | undefined): string {
     case "office":
       return "Office";
     case "driver":
-      return "Technician";
+      return "Field";
     case "mechanic":
-      return "Fleet mechanic";
+      return "Mechanic";
+    case "warehouse":
+      return "Warehouse";
     case "viewer":
       return "Viewer";
     default:
       return role || "User";
+  }
+}
+
+/**
+ * App name shown in the shell for each role.
+ * Field = mobile techs; others are desk-oriented trackers.
+ */
+export function appBrandName(role: Role | string | undefined): string {
+  switch (role) {
+    case "driver":
+      return "Field App";
+    case "mechanic":
+      return "Shop Tracker";
+    case "warehouse":
+      return "Warehouse Tracker";
+    case "office":
+      return "Office Tracker";
+    case "admin":
+      return "Fleet Admin";
+    case "viewer":
+      return "Fleet Viewer";
+    default:
+      return "Fleet App";
   }
 }

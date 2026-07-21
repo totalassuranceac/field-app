@@ -1,4 +1,4 @@
-export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer";
+export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer" | "warehouse";
 
 export interface Env {
   DB: D1Database;
@@ -17,6 +17,15 @@ export interface Env {
   /** Verizon Connect Reveal login (mechanics / Verizon units) */
   VERIZON_USER?: string;
   VERIZON_PASS?: string;
+  /** Twilio SMS (optional — enables text alerts to drivers / shop) */
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_AUTH_TOKEN?: string;
+  TWILIO_FROM_NUMBER?: string;
+  /** ServiceTitan API v2 (pricebook photos + future sync) */
+  ST_TENANT_ID?: string;
+  ST_CLIENT_ID?: string;
+  ST_CLIENT_SECRET?: string;
+  ST_APP_KEY?: string;
 }
 
 export interface UserRow {
@@ -27,7 +36,11 @@ export interface UserRow {
   password_hash: string | null;
   password_salt: string | null;
   role: Role;
+  /** 1 = warehouse staff (role stored as office in DB due to CHECK constraint) */
+  is_warehouse?: number;
   employee_id: number | null;
+  phone: string | null;
+  must_change_password: number;
   auth_provider: "password" | "google" | "both";
   google_sub: string | null;
   active: number;
@@ -41,7 +54,11 @@ export interface PublicUser {
   username: string | null;
   display_name: string;
   role: Role;
+  /** True when account is warehouse (may also have office base role in DB) */
+  is_warehouse?: boolean;
   employee_id: number | null;
+  phone: string | null;
+  must_change_password: boolean;
 }
 
 export interface EmployeeRow {
@@ -67,13 +84,13 @@ export interface VehicleRow {
   assigned_driver: string | null;
   phone: string | null;
   insurance_card: string | null;
-  dash_cam_status: "working" | "not_working" | "missing" | "unknown";
+  dash_cam_status: "working" | "not_working" | "missing" | "n/a";
   cam_type: string | null;
   gps_tracker: string | null;
+  gps_status: "working" | "not_working" | "missing" | "n/a" | null;
   registration_expires: string | null;
   inspection_expires: string | null;
   insurance_expires: string | null;
-  emissions_expires: string | null;
   modifications: string | null;
   notes: string | null;
   created_at: string;
@@ -88,6 +105,9 @@ export interface FuelEntryRow {
   gallons: number | null;
   total_cost: number | null;
   fuel_date: string;
+  fuel_time: string | null;
+  store_number: string | null;
+  card_last4: string | null;
   station_notes: string | null;
   receipt_key: string | null;
   entered_by_user_id: number;

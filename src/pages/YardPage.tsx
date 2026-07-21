@@ -3,7 +3,7 @@ import { api, can } from "../api";
 import { useAuth } from "../auth";
 import type { Vehicle } from "./VehiclesPage";
 
-type Filter = "all" | "expired" | "expiring" | "dash_cam";
+type Filter = "all" | "expired" | "expiring" | "equipment";
 
 function daysUntil(dateStr: string | null): number | null {
   if (!dateStr) return null;
@@ -13,8 +13,24 @@ function daysUntil(dateStr: string | null): number | null {
   return Math.round((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+/** N/A = skip. Only missing / not_working need shop attention. */
+function gpsOk(v: Vehicle): boolean {
+  const status = v.gps_status || "n/a";
+  return status !== "not_working" && status !== "missing";
+}
+
+function camOk(v: Vehicle): boolean {
+  return v.dash_cam_status !== "not_working" && v.dash_cam_status !== "missing";
+}
+
+function equipmentGood(v: Vehicle): boolean {
+  // Good when both are working; N/A on either side is fine (don't schedule)
+  return camOk(v) && gpsOk(v);
+}
+
 function worstStatus(v: Vehicle, soonDays: number): "ok" | "warn" | "bad" {
-  const dates = [v.registration_expires, v.inspection_expires, v.insurance_expires, v.emissions_expires];
+  // Texas: registration sticker + insurance (no state inspection sticker)
+  const dates = [v.registration_expires, v.insurance_expires];
   let worst: "ok" | "warn" | "bad" = "ok";
   for (const d of dates) {
     const days = daysUntil(d);
@@ -22,7 +38,10 @@ function worstStatus(v: Vehicle, soonDays: number): "ok" | "warn" | "bad" {
     if (days < 0) worst = "bad";
     else if (days <= soonDays && worst !== "bad") worst = "warn";
   }
-  if (["not_working", "missing"].includes(v.dash_cam_status) && worst === "ok") worst = "warn";
+  if (!equipmentGood(v)) {
+    // Missing or broken cam/GPS — schedule installs / repairs
+    worst = "bad";
+  }
   if (v.status === "out_of_service") worst = worst === "bad" ? "bad" : "warn";
   return worst;
 }
@@ -32,13 +51,16 @@ export function YardPage() {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [soonDays, setSoonDays] = useState(30);
   const [filter, setFilter] = useState<Filter>("all");
+  const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [form, setForm] = useState({
     registration_expires: "",
-    inspection_expires: "",
     insurance_expires: "",
-    dash_cam_status: "unknown",
+    dash_cam_status: "n/a",
+    cam_type: "",
+    gps_status: "n/a",
+    gps_tracker: "",
     insurance_card: "",
     notes: "",
   });
@@ -55,19 +77,58 @@ export function YardPage() {
   }, [filter]);
 
   const sorted = useMemo(() => {
-    return [...vehicles].sort((a, b) => {
+    const q = search.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, "");
+    let list = [...vehicles];
+    if (q) {
+      list = list.filter((v) => {
+        const unit = (v.unit_number || "").toLowerCase();
+        const unitDigits = unit.replace(/\D/g, "");
+        const driver = (v.assigned_driver || "").toLowerCase();
+        const plate = (v.plate || "").toLowerCase();
+        // Prefer unit number: "8", "008", "unit 8" all match
+        if (unit.includes(q) || (qDigits && unitDigits.includes(qDigits))) return true;
+        if (driver.includes(q) || plate.includes(q)) return true;
+        return false;
+      });
+      // Exact / starts-with unit matches first when searching
+      list.sort((a, b) => {
+        const au = a.unit_number.toLowerCase();
+        const bu = b.unit_number.toLowerCase();
+        const aExact = au === q || au.replace(/\D/g, "") === qDigits ? 0 : au.startsWith(q) ? 1 : 2;
+        const bExact = bu === q || bu.replace(/\D/g, "") === qDigits ? 0 : bu.startsWith(q) ? 1 : 2;
+        return aExact - bExact || au.localeCompare(bu, undefined, { numeric: true });
+      });
+      return list;
+    }
+    return list.sort((a, b) => {
       const rank = { bad: 0, warn: 1, ok: 2 };
-      return rank[worstStatus(a, soonDays)] - rank[worstStatus(b, soonDays)] || a.unit_number.localeCompare(b.unit_number);
+      return (
+        rank[worstStatus(a, soonDays)] - rank[worstStatus(b, soonDays)] ||
+        a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true })
+      );
     });
-  }, [vehicles, soonDays]);
+  }, [vehicles, soonDays, search]);
 
   function openVehicle(v: Vehicle) {
     setSelected(v);
     setForm({
       registration_expires: v.registration_expires || "",
-      inspection_expires: v.inspection_expires || "",
       insurance_expires: v.insurance_expires || "",
       dash_cam_status: v.dash_cam_status,
+      cam_type: (() => {
+        const c = (v.cam_type || "").toLowerCase();
+        if (/verizon/.test(c)) return "Verizon";
+        if (c) return "Third-party";
+        return "";
+      })(),
+      gps_status: v.gps_status === "unknown" || !v.gps_status ? "n/a" : v.gps_status,
+      gps_tracker: (() => {
+        const g = (v.gps_tracker || "").toLowerCase();
+        if (/verizon/.test(g)) return "Verizon";
+        if (/one\s*step|onestep/.test(g)) return "One Step";
+        return v.gps_tracker || "";
+      })(),
       insurance_card: v.insurance_card || "",
       notes: v.notes || "",
     });
@@ -81,10 +142,12 @@ export function YardPage() {
         method: "PATCH",
         body: JSON.stringify({
           registration_expires: form.registration_expires || null,
-          inspection_expires: form.inspection_expires || null,
           insurance_expires: form.insurance_expires || null,
           insurance_card: form.insurance_card || null,
           dash_cam_status: form.dash_cam_status,
+          cam_type: form.cam_type || null,
+          gps_status: form.gps_status,
+          gps_tracker: form.gps_tracker || null,
           notes: form.notes,
         }),
       });
@@ -100,23 +163,69 @@ export function YardPage() {
       <div className="page-header">
         <div>
           <h1>Yard walk</h1>
-          <p>Walk the lot and update stickers, registration, and dash cams</p>
+          <p>Registration sticker · insurance · dash cam · GPS</p>
         </div>
         <button className="btn secondary no-print" onClick={() => window.print()}>
           Print list
         </button>
       </div>
 
-      <div className="filters no-print">
+      <div className="filters no-print" style={{ flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+        <label
+          className="yard-search"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            marginRight: "0.35rem",
+            flex: "1 1 10rem",
+            maxWidth: "16rem",
+            minWidth: "8rem",
+          }}
+        >
+          <input
+            type="search"
+            inputMode="search"
+            enterKeyHint="search"
+            placeholder="Unit #…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoComplete="off"
+            style={{
+              width: "100%",
+              padding: "0.45rem 0.65rem",
+              borderRadius: "8px",
+              border: "1px solid var(--border, #ccc)",
+              fontSize: "1rem",
+            }}
+            aria-label="Find unit by number"
+          />
+          {search && (
+            <button
+              type="button"
+              className="btn secondary"
+              style={{ padding: "0.35rem 0.55rem", flexShrink: 0 }}
+              onClick={() => setSearch("")}
+              aria-label="Clear search"
+            >
+              ✕
+            </button>
+          )}
+        </label>
         {(
           [
             ["all", "All units"],
-            ["expired", "Expired"],
-            ["expiring", `Expiring ≤${soonDays}d`],
-            ["dash_cam", "Dash cam issues"],
+            ["expired", "Expired (reg / insurance)"],
+            ["expiring", `Due ≤${soonDays}d`],
+            ["equipment", "Cam / GPS issues"],
           ] as const
         ).map(([k, label]) => (
-          <button key={k} className={`chip ${filter === k ? "active" : ""}`} onClick={() => setFilter(k)}>
+          <button
+            key={k}
+            type="button"
+            className={`chip ${filter === k ? "active" : ""}`}
+            onClick={() => setFilter(k)}
+          >
             {label}
           </button>
         ))}
@@ -124,11 +233,26 @@ export function YardPage() {
 
       {error && <div className="error">{error}</div>}
 
+      {search.trim() && (
+        <p className="muted no-print" style={{ margin: "0 0 0.65rem", fontSize: "0.9rem" }}>
+          {sorted.length === 0
+            ? `No unit matching “${search.trim()}”`
+            : sorted.length === 1
+              ? `1 unit · tap to open`
+              : `${sorted.length} units matching “${search.trim()}”`}
+        </p>
+      )}
+
       <div className="yard-grid">
         {sorted.map((v) => {
           const status = worstStatus(v, soonDays);
           return (
-            <button key={v.id} className={`yard-card status-${status}`} onClick={() => openVehicle(v)}>
+            <button
+              key={v.id}
+              type="button"
+              className={`yard-card status-${status}`}
+              onClick={() => openVehicle(v)}
+            >
               <div className="unit">Unit {v.unit_number}</div>
               <div className="muted" style={{ marginBottom: "0.35rem" }}>
                 {v.assigned_driver || "Unassigned"}
@@ -139,26 +263,49 @@ export function YardPage() {
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
                 <span className={`badge ${status === "bad" ? "expired" : status === "warn" ? "expiring" : "ok"}`}>
-                  {status === "bad" ? "Needs attention" : status === "warn" ? "Due soon" : "Current"}
+                  {status === "bad" ? "Needs attention" : status === "warn" ? "Due soon" : "OK"}
                 </span>
-                <span className={`badge ${v.dash_cam_status === "working" ? "ok" : "warning"}`}>
-                  cam: {v.cam_type || v.dash_cam_status}
+                <span
+                  className={`badge ${
+                    !camOk(v) ? "danger" : v.dash_cam_status === "working" ? "ok" : "ok"
+                  }`}
+                >
+                  Cam: {v.dash_cam_status === "n/a" ? "N/A" : v.dash_cam_status.replace(/_/g, " ")}
                 </span>
-                {v.gps_tracker && <span className="badge">GPS: {v.gps_tracker}</span>}
+                <span
+                  className={`badge ${
+                    !gpsOk(v) ? "danger" : v.gps_status === "working" ? "ok" : "ok"
+                  }`}
+                >
+                  GPS:{" "}
+                  {v.gps_status === "n/a" || !v.gps_status
+                    ? "N/A"
+                    : v.gps_status.replace(/_/g, " ")}
+                  {v.gps_tracker ? ` (${v.gps_tracker})` : ""}
+                </span>
+                {!camOk(v) && (
+                  <span className="badge danger">
+                    {v.dash_cam_status === "missing" ? "Install dash cam" : "Fix dash cam"}
+                  </span>
+                )}
+                {!gpsOk(v) && (
+                  <span className="badge danger">
+                    {v.gps_status === "missing" ? "Install GPS" : "Fix GPS"}
+                  </span>
+                )}
+                {equipmentGood(v) &&
+                  (v.dash_cam_status === "working" || v.gps_status === "working") && (
+                    <span className="badge ok">Equipment good</span>
+                  )}
               </div>
               <div style={{ fontSize: "0.9rem" }}>
                 <div>
-                  <strong>Reg:</strong> {v.registration_expires || "—"}{" "}
+                  <strong>Registration:</strong> {v.registration_expires || "—"}{" "}
                   {dateHint(v.registration_expires, soonDays)}
                 </div>
                 <div>
-                  <strong>Insp:</strong> {v.inspection_expires || "—"}{" "}
-                  {dateHint(v.inspection_expires, soonDays)}
-                </div>
-                <div>
-                  <strong>Ins:</strong> {v.insurance_expires || "—"}{" "}
+                  <strong>Insurance:</strong> {v.insurance_expires || "—"}{" "}
                   {dateHint(v.insurance_expires, soonDays)}
-                  {v.insurance_card ? ` · card ${v.insurance_card}` : ""}
                 </div>
               </div>
             </button>
@@ -185,14 +332,6 @@ export function YardPage() {
                   />
                 </label>
                 <label>
-                  Inspection expires
-                  <input
-                    type="date"
-                    value={form.inspection_expires}
-                    onChange={(e) => setForm({ ...form, inspection_expires: e.target.value })}
-                  />
-                </label>
-                <label>
                   Insurance expires
                   <input
                     type="date"
@@ -213,17 +352,66 @@ export function YardPage() {
                   </select>
                 </label>
                 <label>
-                  Dash cam
+                  Dash cam status
                   <select
-                    value={form.dash_cam_status}
+                    value={form.dash_cam_status === "unknown" ? "n/a" : form.dash_cam_status}
                     onChange={(e) => setForm({ ...form, dash_cam_status: e.target.value })}
                   >
-                    <option value="working">working</option>
-                    <option value="not_working">not_working</option>
-                    <option value="missing">missing</option>
-                    <option value="unknown">unknown</option>
+                    <option value="working">Working</option>
+                    <option value="not_working">Not working</option>
+                    <option value="missing">Missing</option>
+                    <option value="n/a">N/A (no cam)</option>
                   </select>
                 </label>
+                <label>
+                  Cam type
+                  <select
+                    value={form.cam_type}
+                    onChange={(e) => setForm({ ...form, cam_type: e.target.value })}
+                  >
+                    <option value="">—</option>
+                    <option value="Verizon">Verizon (monthly)</option>
+                    <option value="Third-party">Third-party (no fee)</option>
+                  </select>
+                </label>
+                <label>
+                  GPS status
+                  <select
+                    value={form.gps_status === "unknown" ? "n/a" : form.gps_status}
+                    onChange={(e) => setForm({ ...form, gps_status: e.target.value })}
+                  >
+                    <option value="working">Working</option>
+                    <option value="not_working">Not working</option>
+                    <option value="missing">Missing</option>
+                    <option value="n/a">N/A (no paid tracker)</option>
+                  </select>
+                </label>
+                <label>
+                  GPS system
+                  <select
+                    value={form.gps_tracker}
+                    onChange={(e) => {
+                      const gps_tracker = e.target.value;
+                      let cam_type = form.cam_type;
+                      if (gps_tracker === "Verizon" && !cam_type) cam_type = "Verizon";
+                      if (gps_tracker === "One Step" && (!cam_type || cam_type === "Verizon")) {
+                        cam_type = "Third-party";
+                      }
+                      setForm({ ...form, gps_tracker, cam_type });
+                    }}
+                  >
+                    <option value="">— none / cancelled —</option>
+                    <option value="One Step">One Step</option>
+                    <option value="Verizon">Verizon</option>
+                  </select>
+                </label>
+                {(form.gps_tracker === "Verizon" || form.gps_tracker === "One Step") && (
+                  <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+                    {form.gps_tracker === "Verizon"
+                      ? "Verizon GPS → Verizon dash cam · must show on live map."
+                      : "OneStep GPS → third-party cam (no monthly fee) · must show on live map."}
+                  </p>
+                )}
                 <label>
                   Notes
                   <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
@@ -240,9 +428,19 @@ export function YardPage() {
             ) : (
               <div>
                 <p>Registration: {selected.registration_expires || "—"}</p>
-                <p>Inspection: {selected.inspection_expires || "—"}</p>
-                <p>Dash cam: {selected.dash_cam_status}</p>
-                <button className="btn secondary" onClick={() => setSelected(null)}>
+                <p>Insurance: {selected.insurance_expires || "—"}</p>
+                <p>
+                  Dash cam:{" "}
+                  {selected.dash_cam_status === "n/a" ? "N/A" : selected.dash_cam_status}
+                </p>
+                <p>
+                  GPS:{" "}
+                  {selected.gps_status === "n/a" || !selected.gps_status
+                    ? "N/A"
+                    : selected.gps_status}{" "}
+                  {selected.gps_tracker ? `(${selected.gps_tracker})` : ""}
+                </p>
+                <button className="btn secondary" type="button" onClick={() => setSelected(null)}>
                   Close
                 </button>
               </div>

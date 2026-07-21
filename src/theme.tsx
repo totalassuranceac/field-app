@@ -26,9 +26,18 @@ function preferInitial(): ThemeMode {
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemeMode>(preferInitial);
 
+  // Apply theme attribute immediately so first paint is not stuck on light defaults
+  useEffect(() => {
+    const initial = preferInitial();
+    document.documentElement.setAttribute("data-theme", initial);
+    document.documentElement.style.colorScheme = initial;
+  }, []);
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.style.colorScheme = theme;
+    document.body.style.backgroundColor = "";
+    document.documentElement.style.backgroundColor = "";
     try {
       localStorage.setItem("ta_fleet_theme", theme);
     } catch {

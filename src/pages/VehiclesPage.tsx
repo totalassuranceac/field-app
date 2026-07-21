@@ -19,9 +19,9 @@ export interface Vehicle {
   cam_type: string | null;
   gps_tracker: string | null;
   registration_expires: string | null;
-  inspection_expires: string | null;
+  inspection_expires: string | null; // legacy DB field; not used in Texas UI
   insurance_expires: string | null;
-  emissions_expires: string | null;
+  gps_status: string | null;
   modifications: string | null;
   notes: string | null;
 }
@@ -37,16 +37,25 @@ const emptyForm = {
   assigned_driver: "",
   phone: "",
   insurance_card: "",
-  dash_cam_status: "unknown",
+  dash_cam_status: "n/a",
   cam_type: "",
   gps_tracker: "",
   registration_expires: "",
-  inspection_expires: "",
   insurance_expires: "",
-  emissions_expires: "",
+  gps_status: "n/a",
   modifications: "",
   notes: "",
 };
+
+/** N/A is fine. Only missing / not_working need shop work. */
+function equipmentNotes(v: Vehicle): string[] {
+  const notes: string[] = [];
+  if (v.dash_cam_status === "missing") notes.push("Install dash cam");
+  else if (v.dash_cam_status === "not_working") notes.push("Repair dash cam");
+  if (v.gps_status === "missing") notes.push("Install GPS");
+  else if (v.gps_status === "not_working") notes.push("Repair GPS");
+  return notes;
+}
 
 export function VehiclesPage() {
   const { user } = useAuth();
@@ -85,12 +94,21 @@ export function VehiclesPage() {
       phone: v.phone || "",
       insurance_card: v.insurance_card || "",
       dash_cam_status: v.dash_cam_status,
-      cam_type: v.cam_type || "",
-      gps_tracker: v.gps_tracker || "",
+      cam_type: (() => {
+        const c = (v.cam_type || "").toLowerCase();
+        if (/verizon/.test(c)) return "Verizon";
+        if (c) return "Third-party";
+        return "";
+      })(),
+      gps_tracker: (() => {
+        const g = (v.gps_tracker || "").toLowerCase();
+        if (/verizon/.test(g)) return "Verizon";
+        if (/one\s*step|onestep/.test(g)) return "One Step";
+        return v.gps_tracker || "";
+      })(),
       registration_expires: v.registration_expires || "",
-      inspection_expires: v.inspection_expires || "",
       insurance_expires: v.insurance_expires || "",
-      emissions_expires: v.emissions_expires || "",
+      gps_status: v.gps_status === "unknown" || !v.gps_status ? "n/a" : v.gps_status,
       modifications: v.modifications || "",
       notes: v.notes || "",
     });
@@ -103,9 +121,8 @@ export function VehiclesPage() {
       ...form,
       year: form.year ? Number(form.year) : null,
       registration_expires: form.registration_expires || null,
-      inspection_expires: form.inspection_expires || null,
       insurance_expires: form.insurance_expires || null,
-      emissions_expires: form.emissions_expires || null,
+      gps_status: form.gps_status || "n/a",
     };
     try {
       if (edit) {
@@ -143,7 +160,8 @@ export function VehiclesPage() {
                 <th>Driver</th>
                 <th>Vehicle</th>
                 <th>Plate / VIN</th>
-                <th>Cam / GPS</th>
+                <th>Dash cam</th>
+                <th>GPS</th>
                 <th>Registration</th>
                 <th>Insurance</th>
                 <th className="no-print"></th>
@@ -169,10 +187,45 @@ export function VehiclesPage() {
                     {v.vin && <div className="muted" style={{ fontSize: "0.78rem" }}>{v.vin}</div>}
                   </td>
                   <td>
-                    <span className={`badge ${v.dash_cam_status === "working" ? "ok" : "warning"}`}>
-                      {v.cam_type || v.dash_cam_status}
+                    <span
+                      className={`badge ${
+                        v.dash_cam_status === "working" || v.dash_cam_status === "n/a"
+                          ? "ok"
+                          : "danger"
+                      }`}
+                    >
+                      {v.dash_cam_status === "n/a" ? "N/A" : v.dash_cam_status.replace(/_/g, " ")}
                     </span>
-                    {v.gps_tracker && <div className="muted">GPS: {v.gps_tracker}</div>}
+                    {v.cam_type && (
+                      <div className="muted" style={{ fontSize: "0.78rem" }}>
+                        {v.cam_type}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <span
+                      className={`badge ${
+                        v.gps_status === "working" ||
+                        v.gps_status === "n/a" ||
+                        !v.gps_status
+                          ? "ok"
+                          : "danger"
+                      }`}
+                    >
+                      {v.gps_status === "n/a" || !v.gps_status
+                        ? "N/A"
+                        : v.gps_status.replace(/_/g, " ")}
+                    </span>
+                    {v.gps_tracker && (
+                      <div className="muted" style={{ fontSize: "0.78rem" }}>
+                        {v.gps_tracker}
+                      </div>
+                    )}
+                    {equipmentNotes(v).length > 0 && (
+                      <div style={{ fontSize: "0.75rem", color: "var(--danger)", marginTop: "0.2rem" }}>
+                        {equipmentNotes(v).join(" · ")}
+                      </div>
+                    )}
                   </td>
                   <td>{v.registration_expires || "—"}</td>
                   <td>
@@ -272,55 +325,73 @@ export function VehiclesPage() {
                   />
                 </label>
                 <label>
-                  Cam status
+                  Dash cam status
                   <select
-                    value={form.dash_cam_status}
+                    value={form.dash_cam_status === "unknown" ? "n/a" : form.dash_cam_status}
                     onChange={(e) => setForm({ ...form, dash_cam_status: e.target.value })}
                   >
-                    <option value="working">working</option>
-                    <option value="not_working">not_working</option>
-                    <option value="missing">missing</option>
-                    <option value="unknown">unknown</option>
+                    <option value="working">Working</option>
+                    <option value="not_working">Not working</option>
+                    <option value="missing">Missing</option>
+                    <option value="n/a">N/A</option>
                   </select>
                 </label>
                 <label>
                   Cam type
-                  <input
+                  <select
                     value={form.cam_type}
                     onChange={(e) => setForm({ ...form, cam_type: e.target.value })}
-                    placeholder="Dash Cam / Verizon"
-                  />
+                  >
+                    <option value="">—</option>
+                    <option value="Verizon">Verizon (monthly)</option>
+                    <option value="Third-party">Third-party (installed, no fee)</option>
+                  </select>
                 </label>
                 <label>
-                  GPS tracker
-                  <input
+                  GPS status
+                  <select
+                    value={form.gps_status === "unknown" ? "n/a" : form.gps_status}
+                    onChange={(e) => setForm({ ...form, gps_status: e.target.value })}
+                  >
+                    <option value="working">Working</option>
+                    <option value="not_working">Not working</option>
+                    <option value="missing">Missing</option>
+                    <option value="n/a">N/A (no paid tracker)</option>
+                  </select>
+                </label>
+                <label>
+                  GPS system
+                  <select
                     value={form.gps_tracker}
-                    onChange={(e) => setForm({ ...form, gps_tracker: e.target.value })}
-                    placeholder="One Step / Verizon"
-                  />
+                    onChange={(e) => {
+                      const gps_tracker = e.target.value;
+                      // Suggest cam pairing when system changes
+                      let cam_type = form.cam_type;
+                      if (gps_tracker === "Verizon" && !cam_type) cam_type = "Verizon";
+                      if (gps_tracker === "One Step" && (!cam_type || cam_type === "Verizon")) {
+                        cam_type = "Third-party";
+                      }
+                      setForm({ ...form, gps_tracker, cam_type });
+                    }}
+                  >
+                    <option value="">— none / cancelled —</option>
+                    <option value="One Step">One Step</option>
+                    <option value="Verizon">Verizon</option>
+                  </select>
                 </label>
+                {(form.gps_tracker === "Verizon" || form.gps_tracker === "One Step") && (
+                  <p className="muted" style={{ gridColumn: "1 / -1", margin: 0, fontSize: "0.85rem" }}>
+                    {form.gps_tracker === "Verizon"
+                      ? "Policy: Verizon GPS units should use a Verizon dash cam and show on the live map."
+                      : "Policy: OneStep GPS units should use the third-party installed cam (no monthly fee) and show on the live map."}
+                  </p>
+                )}
                 <label>
-                  Registration expires
+                  Registration sticker expires
                   <input
                     type="date"
                     value={form.registration_expires}
                     onChange={(e) => setForm({ ...form, registration_expires: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Inspection expires
-                  <input
-                    type="date"
-                    value={form.inspection_expires}
-                    onChange={(e) => setForm({ ...form, inspection_expires: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Emissions expires
-                  <input
-                    type="date"
-                    value={form.emissions_expires}
-                    onChange={(e) => setForm({ ...form, emissions_expires: e.target.value })}
                   />
                 </label>
               </div>

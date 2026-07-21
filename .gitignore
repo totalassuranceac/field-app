@@ -20,3 +20,7 @@ onestep_devices_summary.json
 verizon_devices_summary.json
 verizon_vehicle_plots.json
 verizon_account_meta.json
+# local secrets / dumps
+backups/
+*.sql.bak
+.fleet-session*
