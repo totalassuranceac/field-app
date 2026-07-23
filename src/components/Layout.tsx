@@ -1,11 +1,43 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { api, appBrandName, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
+import { api, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
 import { useAuth } from "../auth";
 import { NotificationBell } from "./NotificationBell";
 import { OfflineBanner } from "./OfflineBanner";
+import { MessageBubble } from "./MessageBubble";
 
-type NavItem = { to: string; label: string; show: boolean; badge?: number };
+type NavItem = {
+  to: string;
+  label: string;
+  show: boolean;
+  badge?: number;
+  /** Show badge even when 0 (e.g. warehouse vendor-run counter) */
+  badgeAlways?: boolean;
+  badgeLabel?: string;
+};
+
+function NavBadge({
+  count,
+  always,
+  label,
+}: {
+  count: number;
+  always?: boolean;
+  label?: string;
+}) {
+  if (!always && count <= 0) return null;
+  const display = count > 99 ? "99+" : count;
+  const zero = count <= 0;
+  return (
+    <span
+      className={`nav-badge${zero ? " is-zero" : " is-hot"}`}
+      aria-label={label || (zero ? "None waiting" : `${count} waiting`)}
+      title={label || (zero ? "Caught up" : `${count} to pick up`)}
+    >
+      {display}
+    </span>
+  );
+}
 
 function NavGroup({ title, items }: { title: string; items: NavItem[] }) {
   const visible = items.filter((l) => l.show);
@@ -21,10 +53,8 @@ function NavGroup({ title, items }: { title: string; items: NavItem[] }) {
           className={({ isActive }) => (isActive ? "active" : undefined)}
         >
           <span>{l.label}</span>
-          {l.badge != null && l.badge > 0 && (
-            <span className="nav-badge" aria-label={`${l.badge} unread`}>
-              {l.badge > 99 ? "99+" : l.badge}
-            </span>
+          {l.badge != null && (
+            <NavBadge count={l.badge} always={l.badgeAlways} label={l.badgeLabel} />
           )}
         </NavLink>
       ))}
@@ -79,10 +109,8 @@ function NavCategory({
               className={({ isActive }) => (isActive ? "active" : undefined)}
             >
               <span>{l.label}</span>
-              {l.badge != null && l.badge > 0 && (
-                <span className="nav-badge" aria-label={`${l.badge} unread`}>
-                  {l.badge > 99 ? "99+" : l.badge}
-                </span>
+              {l.badge != null && (
+                <NavBadge count={l.badge} always={l.badgeAlways} label={l.badgeLabel} />
               )}
             </NavLink>
           ))}
@@ -107,6 +135,8 @@ function pathCategory(pathname: string): string {
   }
   if (
     pathname.startsWith("/inventory") ||
+    pathname.startsWith("/part-pickup") ||
+    pathname.startsWith("/vendor-runs") ||
     pathname.startsWith("/assets") ||
     pathname.startsWith("/warranties")
   ) {
@@ -136,6 +166,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
+  /** Parts waiting at vendors — warehouse glance counter (shows 0 when clear) */
+  const [vendorWaiting, setVendorWaiting] = useState(0);
   const [adminOpen, setAdminOpen] = useState<string>(() => pathCategory(location.pathname));
   const sidebarClass = open ? "sidebar open" : "sidebar";
   // White/light logo artwork on dark navy sidebar
@@ -144,7 +176,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const isOffice = user?.role === "office";
   const isWarehouse = user?.role === "warehouse";
   const isTrueAdmin = realUser?.role === "admin";
-  const brand = appBrandName(user?.role);
+  const showVendorCounter =
+    isWarehouse || isOffice || user?.role === "admin" || user?.role === "viewer";
 
   useEffect(() => {
     let cancelled = false;
@@ -155,24 +188,34 @@ export function Layout({ children }: { children: React.ReactNode }) {
       } catch {
         /* ignore */
       }
+      if (showVendorCounter) {
+        try {
+          // Lightweight COUNT only — full list was timing out D1 on large catalogs
+          const vr = await api<{ waiting?: number }>("/inventory/part-pickups/count").catch(
+            () => api<{ waiting?: number }>("/inventory/vendor-runs/count")
+          );
+          if (!cancelled) setVendorWaiting(Number(vr.waiting) || 0);
+        } catch {
+          /* migration optional */
+        }
+      }
     }
-    poll();
-    const id = window.setInterval(poll, 20_000);
-    const onFocus = () => poll();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") poll();
-    });
+    // Defer badge poll so first paint is not blocked by extra API calls
+    const start = window.setTimeout(() => void poll(), 400);
+    const id = window.setInterval(poll, 30_000);
+    const onVendorChange = () => void poll();
+    window.addEventListener("vendor-runs-changed", onVendorChange);
     return () => {
       cancelled = true;
+      window.clearTimeout(start);
       window.clearInterval(id);
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("vendor-runs-changed", onVendorChange);
     };
-  }, [user?.id]);
+  }, [user?.id, showVendorCounter]);
 
   useEffect(() => {
-    document.title = `${brand} · Total Assurance`;
-  }, [brand]);
+    document.title = "Total Assurance";
+  }, []);
 
   const adminShell = usesAdminShell(user) && !viewAsRole;
   const readOnly = isViewer(user);
@@ -184,11 +227,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
     }
   }, [location.pathname, adminShell]);
 
+  const vendorNavBadge = {
+    badge: vendorWaiting,
+    badgeAlways: true as const,
+    badgeLabel:
+      vendorWaiting > 0
+        ? `${vendorWaiting} part${vendorWaiting === 1 ? "" : "s"} to pick up`
+        : "No parts waiting for pickup",
+  };
+
   const officeNav: NavItem[] = [
     { to: "/", label: "Home", show: true },
     { to: "/live", label: "Live map", show: true },
     { to: "/issues", label: "Scheduled repairs", show: true },
     { to: "/inventory", label: "Inventory", show: can(user, "viewInventory") },
+    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
+    { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/assets", label: "Assets", show: can(user, "viewCompanyAssets") },
     { to: "/warranties", label: "Warranties", show: true },
     { to: "/howto", label: "How-to", show: true },
@@ -204,6 +258,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const warehouseNav: NavItem[] = [
     { to: "/", label: "Home", show: true },
     { to: "/inventory", label: "Inventory", show: true },
+    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
+    { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/assets", label: "Bottles & gear", show: true },
     { to: "/warranties", label: "Warranties", show: true },
     { to: "/vehicles", label: "Trucks", show: true },
@@ -220,6 +276,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const daily: NavItem[] = [
     { to: "/", label: "Home", show: true },
     { to: "/warranties", label: "Warranties", show: true },
+    { to: "/part-pickup", label: "Part pickup", show: true },
+    { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
     { to: "/howto", label: "How-to", show: true },
@@ -311,6 +369,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const adminWarehouse: NavItem[] = [
     { to: "/inventory", label: "Inventory & pickup", show: true },
+    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
+    { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/assets", label: "Bottles & equipment", show: true },
     { to: "/warranties", label: "Warranties", show: true },
   ];
@@ -345,10 +405,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
           onClick={() => setOpen(false)}
         />
       )}
-      <aside className={sidebarClass}>
-        <div className="brand">
-          <img src={logoSrc} alt="Total Assurance A/C & Heating" />
-          <span>{brand}</span>
+      <aside className={sidebarClass} id="app-nav-drawer">
+        <div className="drawer-head">
+          <div className="drawer-brand">
+            <img src={logoSrc} alt="Total Assurance A/C & Heating" className="drawer-logo-img" />
+          </div>
+          <button
+            type="button"
+            className="drawer-close no-print"
+            aria-label="Close menu"
+            onClick={() => setOpen(false)}
+          >
+            ✕
+          </button>
         </div>
         <nav className="nav" onClick={() => setOpen(false)}>
           {isWarehouse ? (
@@ -459,26 +528,67 @@ export function Layout({ children }: { children: React.ReactNode }) {
             ) : null}
           </div>
         )}
+        {/* Dark header: logo only (+ menu) */}
         <div className="topbar-mobile no-print">
-          <div className="brand topbar-brand">
-            <img src={logoSrc} alt="Total Assurance A/C & Heating" />
-            <span>{brand}</span>
-          </div>
-          <div className="topbar-actions">
-            <NotificationBell />
-            <button
-              className="btn ghost topbar-menu-btn"
-              onClick={() => setOpen((v) => !v)}
-              type="button"
-              aria-expanded={open}
-              aria-label={open ? "Close menu" : "Open menu"}
-            >
-              {open ? "Close" : "Menu"}
-            </button>
+          <div className="topbar-row topbar-row-brand">
+            <div className="topbar-side topbar-side-left">
+              <button
+                type="button"
+                className={`topbar-hamburger${open ? " is-open" : ""}`}
+                onClick={() => setOpen((v) => !v)}
+                aria-expanded={open}
+                aria-controls="app-nav-drawer"
+                aria-label={open ? "Close menu" : "Open menu"}
+              >
+                <span className="topbar-hamburger-lines" aria-hidden>
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </button>
+            </div>
+            <div className="topbar-logo-center">
+              <img
+                src={logoSrc}
+                alt="Total Assurance A/C & Heating"
+                className="topbar-logo-img"
+              />
+            </div>
+            <div className="topbar-side topbar-side-right" aria-hidden="true" />
           </div>
         </div>
-        <main className="main">{children}</main>
+        <div className="content-body">
+          {/* Same page color as main — right side, opposite Command Center */}
+          <div className="content-tools no-print">
+            <div className="topbar-actions content-tools-actions">
+              {showVendorCounter && (
+                <NavLink
+                  to="/part-pickup"
+                  className={`topbar-vendor-chip${vendorWaiting > 0 ? " is-hot" : " is-clear"}`}
+                  title={
+                    vendorWaiting > 0
+                      ? `${vendorWaiting} parts waiting for pickup`
+                      : "Part pickup clear — nothing waiting"
+                  }
+                  aria-label={
+                    vendorWaiting > 0
+                      ? `${vendorWaiting} parts to pick up`
+                      : "Part pickup clear"
+                  }
+                >
+                  <span className="topbar-vendor-chip-label">Pickup</span>
+                  <span className="topbar-vendor-chip-n">
+                    {vendorWaiting > 99 ? "99+" : vendorWaiting}
+                  </span>
+                </NavLink>
+              )}
+              <NotificationBell />
+            </div>
+          </div>
+          <main className="main">{children}</main>
+        </div>
       </div>
+      <MessageBubble />
     </div>
   );
 }

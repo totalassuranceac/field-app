@@ -18,6 +18,7 @@ interface Dash {
     live_matched?: number;
     open_warranties?: number;
     open_pickups?: number;
+    open_vendor_runs?: number;
     assets_attention?: number;
     handbook_pending?: number;
     emergencies?: number;
@@ -164,23 +165,37 @@ function FocusGrid({
     return bv - av || b.weight - a.weight;
   });
   const hot = sorted.filter((i) => i.tone === "bad" || i.tone === "warn");
-  const rest = sorted.filter((i) => i.tone !== "bad" && i.tone !== "warn");
 
   return (
     <section className="home-section" aria-label={title}>
-      <div className="home-section-head">
-        <div>
+      <div className="home-section-head home-focus-head">
+        <div className="home-focus-head-text">
           <h2 style={{ margin: 0 }}>{title}</h2>
           {subtitle ? (
-            <p className="muted" style={{ margin: "0.15rem 0 0", fontSize: "0.78rem" }}>
-              {subtitle}
-            </p>
+            <div className="home-focus-sub-block">
+              <p className="muted home-focus-sub">{subtitle}</p>
+              {hot.length > 0 ? (
+                <p className="home-focus-inline-hot">
+                  <strong>{hot.length}</strong> need a look
+                </p>
+              ) : (
+                <p className="home-focus-inline-clear">all clear</p>
+              )}
+            </div>
           ) : null}
         </div>
         {hot.length > 0 ? (
-          <span className="badge warning">{hot.length} need attention</span>
+          <div
+            className="home-focus-count"
+            title={`${hot.length} areas need attention — sorted to the top`}
+          >
+            <span className="home-focus-count-n">{hot.length}</span>
+            <span className="home-focus-count-label">hot</span>
+          </div>
         ) : (
-          <span className="badge ok">All clear</span>
+          <div className="home-focus-count is-clear" title="Nothing urgent on this board">
+            <span className="home-focus-count-label">OK</span>
+          </div>
         )}
       </div>
       {/* Hot + rest share the same left-digit button layout (compact) */}
@@ -255,28 +270,53 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [handbookPending, setHandbookPending] = useState(false);
 
-  function load() {
-    setLoading(true);
-    setError("");
-    // Never leave staff on a blank spinner if GPS/network is slow
-    const watchdog = window.setTimeout(() => {
-      setLoading(false);
-    }, 5500);
+  /** quiet = background refresh (no full-page spinner) */
+  function load(opts?: { quiet?: boolean }) {
+    const quiet = !!opts?.quiet;
+    if (!quiet) {
+      setLoading(true);
+      setError("");
+    }
+    // Hard cap so home never spins forever if API is slow
+    const watchdog = quiet
+      ? 0
+      : window.setTimeout(() => {
+          setLoading(false);
+        }, 2500);
     api<Dash>("/dashboard")
-      .then(setData)
-      .catch((e) => setError(e.message))
+      .then((d) => {
+        setData(d);
+        setError("");
+      })
+      .catch((e) => {
+        if (!quiet) setError(e instanceof Error ? e.message : "Could not load home");
+      })
       .finally(() => {
-        window.clearTimeout(watchdog);
+        if (watchdog) window.clearTimeout(watchdog);
         setLoading(false);
       });
     api<{ pending?: boolean }>("/handbook")
       .then((h) => setHandbookPending(!!h.pending))
-      .catch(() => setHandbookPending(false));
+      .catch(() => {
+        /* ignore */
+      });
   }
 
+  // Auto-refresh when opened, then every 45s while visible (not on every focus spam)
   useEffect(() => {
     if (isOffice) return;
     load();
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") load({ quiet: true });
+    }, 45_000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") load({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role]);
 
@@ -349,6 +389,7 @@ export function DashboardPage() {
     not_reporting: stats?.not_reporting ?? 0,
     warranties: stats?.open_warranties ?? 0,
     pickups: stats?.open_pickups ?? 0,
+    vendor_runs: stats?.open_vendor_runs ?? 0,
     assets: stats?.assets_attention ?? 0,
     handbook: stats?.handbook_pending ?? 0,
   };
@@ -357,7 +398,8 @@ export function DashboardPage() {
   if (isDriver) {
     attentionTotal = myWeekly.length + myRepairs.length + (handbookPending ? 1 : 0);
   } else if (isWarehouse) {
-    attentionTotal = s.pickups + s.warranties + s.assets + (handbookPending ? 1 : 0);
+    attentionTotal =
+      s.pickups + s.vendor_runs + s.warranties + s.assets + (handbookPending ? 1 : 0);
   } else if (isMechanic) {
     attentionTotal = s.emergencies + s.open_issues + s.weekly + s.tracking;
   } else {
@@ -370,6 +412,7 @@ export function DashboardPage() {
       s.tracking +
       s.warranties +
       s.pickups +
+      s.vendor_runs +
       s.assets +
       (s.handbook > 0 ? 1 : 0);
   }
@@ -399,6 +442,15 @@ export function DashboardPage() {
           weight: 9,
         },
         {
+          key: "vendor",
+          value: "→",
+          label: "Part pickup",
+          hint: "Vendor called you? Log it for warehouse",
+          to: "/part-pickup",
+          tone: "info",
+          weight: 7,
+        },
+        {
           key: "warranties",
           value: "→",
           label: "Warranty drop-off",
@@ -421,6 +473,15 @@ export function DashboardPage() {
 
     if (isWarehouse) {
       return [
+        {
+          key: "vendor_runs",
+          value: s.vendor_runs,
+          label: "Part pickups waiting",
+          hint: "Parts ready at supply houses",
+          to: "/part-pickup",
+          tone: toneForCount(s.vendor_runs, 1, 3),
+          weight: 11,
+        },
         {
           key: "pickups",
           value: s.pickups,
@@ -727,18 +788,13 @@ export function DashboardPage() {
           <h1 className="home-title">Hi, {first}</h1>
           <p className="home-sub">{subtitle}</p>
         </div>
-        {isAdminShell && (
-          <button type="button" className="btn secondary home-refresh" onClick={load}>
-            Refresh
-          </button>
-        )}
       </header>
 
       {error && (
         <div className="error" style={{ marginBottom: "0.85rem" }}>
           {error}
           <div style={{ marginTop: "0.5rem" }}>
-            <button className="btn secondary" type="button" onClick={load}>
+            <button className="btn secondary" type="button" onClick={() => load()}>
               Retry
             </button>
           </div>

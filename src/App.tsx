@@ -22,6 +22,8 @@ import { NotificationsPage } from "./pages/NotificationsPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { AssetsPage } from "./pages/AssetsPage";
 import { MessagesPage } from "./pages/MessagesPage";
+import { VendorRunsPage } from "./pages/VendorRunsPage";
+import { TruckStockCountPage } from "./pages/TruckStockCountPage";
 import { WarrantiesPage } from "./pages/WarrantiesPage";
 import { HandbookPage } from "./pages/HandbookPage";
 import { HowToPage } from "./pages/HowToPage";
@@ -164,6 +166,23 @@ export default function App() {
                     element={
                       <Page title="Messages">
                         <MessagesPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/part-pickup"
+                    element={
+                      <Page title="Part pickup">
+                        <VendorRunsPage />
+                      </Page>
+                    }
+                  />
+                  <Route path="/vendor-runs" element={<Navigate to="/part-pickup" replace />} />
+                  <Route
+                    path="/truck-stock"
+                    element={
+                      <Page title="Truck stock count">
+                        <TruckStockCountPage />
                       </Page>
                     }
                   />

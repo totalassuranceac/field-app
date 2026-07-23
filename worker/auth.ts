@@ -180,7 +180,10 @@ function normName(s: string): string {
 }
 
 /**
- * Vehicles a driver may see (matched by assigned_driver → employee name / display name).
+ * Vehicles a driver may see:
+ * - assigned_employee_id / helper_employee_id match
+ * - rides-with partner is assigned to the unit
+ * - name match on assigned_driver (legacy)
  * Returns null for non-drivers (no restriction).
  */
 export async function getDriverVehicleIds(
@@ -193,32 +196,87 @@ export async function getDriverVehicleIds(
   if (user.display_name?.trim()) names.push(normName(user.display_name));
   if (user.username?.trim()) names.push(normName(user.username));
 
+  const empIds = new Set<number>();
   if (user.employee_id) {
-    const emp = await db
-      .prepare("SELECT name FROM employees WHERE id = ?")
-      .bind(user.employee_id)
-      .first<{ name: string }>();
-    if (emp?.name) names.push(normName(emp.name));
+    empIds.add(user.employee_id);
+    try {
+      const emp = await db
+        .prepare(
+          `SELECT id, name, rides_with_employee_id FROM employees WHERE id = ? AND active = 1`
+        )
+        .bind(user.employee_id)
+        .first<{ id: number; name: string; rides_with_employee_id: number | null }>();
+      if (emp?.name) names.push(normName(emp.name));
+      if (emp?.rides_with_employee_id) empIds.add(emp.rides_with_employee_id);
+      // Also: people who list me as rides_with
+      const partners = await db
+        .prepare(
+          `SELECT id, name FROM employees WHERE active = 1 AND rides_with_employee_id = ?`
+        )
+        .bind(user.employee_id)
+        .all<{ id: number; name: string }>();
+      for (const p of partners.results || []) {
+        empIds.add(p.id);
+        if (p.name) names.push(normName(p.name));
+      }
+      // Partner's name for assigned_driver text match
+      if (emp?.rides_with_employee_id) {
+        const partner = await db
+          .prepare(`SELECT name FROM employees WHERE id = ?`)
+          .bind(emp.rides_with_employee_id)
+          .first<{ name: string }>();
+        if (partner?.name) names.push(normName(partner.name));
+      }
+    } catch {
+      /* rides_with column optional until migration 036 */
+      try {
+        const emp = await db
+          .prepare("SELECT name FROM employees WHERE id = ?")
+          .bind(user.employee_id)
+          .first<{ name: string }>();
+        if (emp?.name) names.push(normName(emp.name));
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
-  if (!names.length) return [];
+  const idSet = new Set<number>();
 
-  const rows = await db
-    .prepare(
-      `SELECT id, assigned_driver FROM vehicles WHERE status != 'retired' AND assigned_driver IS NOT NULL`
-    )
-    .all<{ id: number; assigned_driver: string }>();
-
-  const ids: number[] = [];
-  for (const v of rows.results || []) {
-    const ad = normName(v.assigned_driver || "");
-    if (!ad) continue;
-    const hit = names.some(
-      (n) => n && (ad === n || ad.includes(n) || n.includes(ad))
-    );
-    if (hit) ids.push(v.id);
+  // Explicit employee / helper assignment on vehicle
+  if (empIds.size) {
+    try {
+      const ph = [...empIds].map(() => "?").join(",");
+      const byEmp = await db
+        .prepare(
+          `SELECT id FROM vehicles WHERE status != 'retired' AND (
+             assigned_employee_id IN (${ph}) OR helper_employee_id IN (${ph})
+           )`
+        )
+        .bind(...empIds, ...empIds)
+        .all<{ id: number }>();
+      for (const r of byEmp.results || []) idSet.add(r.id);
+    } catch {
+      /* columns may be missing pre-036 */
+    }
   }
-  return ids;
+
+  if (names.length) {
+    const rows = await db
+      .prepare(
+        `SELECT id, assigned_driver FROM vehicles WHERE status != 'retired' AND assigned_driver IS NOT NULL`
+      )
+      .all<{ id: number; assigned_driver: string }>();
+
+    for (const v of rows.results || []) {
+      const ad = normName(v.assigned_driver || "");
+      if (!ad) continue;
+      const hit = names.some((n) => n && (ad === n || ad.includes(n) || n.includes(ad)));
+      if (hit) idSet.add(v.id);
+    }
+  }
+
+  return [...idSet];
 }
 
 /** SQL fragment: AND col IN (?,?,?) — empty ids become AND 0 (no rows). */

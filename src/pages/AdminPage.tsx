@@ -27,6 +27,7 @@ interface Employee {
   active: number;
   phone: string | null;
   notes: string | null;
+  rides_with_employee_id?: number | null;
 }
 
 interface AdminUser {
@@ -112,6 +113,7 @@ export function AdminPage() {
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editActive, setEditActive] = useState(true);
+  const [editRidesWith, setEditRidesWith] = useState("");
   const [editLinkedUserId, setEditLinkedUserId] = useState("");
   const [editRole, setEditRole] = useState<Role>("driver");
   const [editCreateLogin, setEditCreateLogin] = useState(false);
@@ -262,6 +264,9 @@ export function AdminPage() {
     setEditName(emp.name);
     setEditPhone(emp.phone ? formatPhone(emp.phone) : "");
     setEditActive(emp.active !== 0);
+    setEditRidesWith(
+      emp.rides_with_employee_id ? String(emp.rides_with_employee_id) : ""
+    );
     const linked = userForEmployee(emp);
     setEditLinkedUserId(linked ? String(linked.id) : "");
     setEditRole((linked?.role as Role) || "driver");
@@ -306,10 +311,15 @@ export function AdminPage() {
           name: editName.trim(),
           phone: formatPhone(editPhone) || null,
           active: editActive,
+          rides_with_employee_id: editRidesWith ? Number(editRidesWith) : null,
         }),
       });
 
       let note = `Saved ${editName.trim()}`;
+      if (editRidesWith) {
+        const partner = employees.find((e) => e.id === Number(editRidesWith));
+        if (partner) note += ` · rides with ${partner.name}`;
+      }
 
       if (canUsers) {
         const linkId =
@@ -1092,6 +1102,25 @@ export function AdminPage() {
                       onChange={(e) => setEditActive(e.target.checked)}
                     />
                     Active on employee list
+                  </label>
+                  <label>
+                    Rides with (helper / tech pair)
+                    <select
+                      value={editRidesWith}
+                      onChange={(e) => setEditRidesWith(e.target.value)}
+                    >
+                      <option value="">— Nobody linked —</option>
+                      {employees
+                        .filter((e) => e.id !== editEmp.id && e.active !== 0)
+                        .map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                    </select>
+                    <span className="muted" style={{ fontSize: "0.8rem" }}>
+                      When you assign the primary tech to a truck, the helper can be auto-included.
+                    </span>
                   </label>
 
                   {can(user, "manageUsers") && (

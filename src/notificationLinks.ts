@@ -15,7 +15,17 @@ export function notificationLink(n: {
 
   // Explicit kinds
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
-  if (kind === "message" || kind.startsWith("message")) return "/messages";
+  if (
+    kind === "message" ||
+    kind === "message_ack" ||
+    kind.startsWith("message") ||
+    entity === "conversation"
+  ) {
+    if (entity === "conversation" && n.entity_id != null && String(n.entity_id) !== "") {
+      return `/messages?c=${encodeURIComponent(String(n.entity_id))}`;
+    }
+    return "/messages";
+  }
   if (kind.startsWith("handbook") || entity === "handbook" || text.includes("handbook")) {
     return "/handbook";
   }
@@ -35,6 +45,22 @@ export function notificationLink(n: {
     entity === "issue"
   ) {
     return "/issues";
+  }
+  if (
+    kind === "vendor_run" ||
+    entity === "vendor_run" ||
+    text.includes("parts ready") ||
+    text.includes("vendor run") ||
+    text.includes("part pickup")
+  ) {
+    return "/part-pickup";
+  }
+  if (
+    kind === "truck_stock_count" ||
+    entity === "truck_stock_count" ||
+    text.includes("truck stock count")
+  ) {
+    return "/truck-stock";
   }
   if (kind.includes("pickup") || entity === "pickup" || text.includes("pickup")) {
     return "/inventory";

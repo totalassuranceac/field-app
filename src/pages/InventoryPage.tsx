@@ -11,9 +11,18 @@ import {
 } from "../pricebookMap";
 import { partImageSrc } from "../partImage";
 import { PickupPanel } from "../components/PickupPanel";
+import { VendorRunPanel } from "../components/VendorRunPanel";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 
-type Tab = "stock" | "pickup" | "order" | "stage" | "catalog" | "history" | "sections";
+type Tab =
+  | "stock"
+  | "pickup"
+  | "vendor"
+  | "order"
+  | "stage"
+  | "catalog"
+  | "history"
+  | "sections";
 
 interface StockLocation {
   id: number;
@@ -323,11 +332,13 @@ export function InventoryPage() {
     part_id: number;
     code: string;
     name: string;
+    image_url?: string | null;
     location_id: number;
     location_name: string;
     unit_number: string | null;
     qty: number;
     min_qty: number;
+    max_qty?: number | null;
     stage_qty: number;
   };
   const [stageTrucks, setStageTrucks] = useState<StageTruckRow[]>([]);
@@ -358,50 +369,81 @@ export function InventoryPage() {
   ) {
     const printedBy = user?.display_name || user?.username || "Warehouse";
     const when = new Date().toLocaleString();
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+
+    function absImg(raw?: string | null, partId?: number): string {
+      const src = partImageSrc(raw);
+      if (src) {
+        if (/^https?:\/\//i.test(src) || src.startsWith("data:") || src.startsWith("blob:")) {
+          return src;
+        }
+        return `${origin}${src.startsWith("/") ? src : `/${src}`}`;
+      }
+      if (partId) return `${origin}/api/inventory/parts/${partId}/image`;
+      return "";
+    }
+
     const sheets = groups
       .map((g) => {
         const rows = g.lines
-          .map(
-            (r) => `
+          .map((r) => {
+            const img = absImg(r.image_url, r.part_id);
+            const hi =
+              r.max_qty != null && Number.isFinite(Number(r.max_qty))
+                ? String(r.max_qty)
+                : "—";
+            const photo = img
+              ? `<img class="photo" src="${escapeHtml(img)}" alt="" />`
+              : `<div class="photo ph-empty">${escapeHtml((r.code || r.name || "?").slice(0, 2).toUpperCase())}</div>`;
+            return `
           <tr>
-            <td class="chk">☐</td>
-            <td><strong>${escapeHtml(r.name)}</strong><br/><span class="code">${escapeHtml(r.code || "")}</span></td>
-            <td class="num">${r.qty}</td>
-            <td class="num">${r.min_qty}</td>
-            <td class="num stage"><strong>${r.stage_qty}</strong></td>
-          </tr>`
-          )
+            <td class="photo-cell">${photo}</td>
+            <td class="part-cell">
+              <div class="pn">${escapeHtml(r.code || "—")}</div>
+              <div class="pname">${escapeHtml(r.name || "")}</div>
+            </td>
+            <td class="num levels">${escapeHtml(String(r.min_qty))} / ${escapeHtml(hi)}</td>
+            <td class="num curr">${escapeHtml(String(r.qty))}</td>
+            <td class="count-box"><div class="write-in"></div></td>
+          </tr>`;
+          })
           .join("");
-        const totalStage = g.lines.reduce((s, r) => s + (Number(r.stage_qty) || 0), 0);
         return `
         <section class="sheet">
           <header>
             <div>
-              <h1>Truck pull sheet</h1>
-              <p class="sub">${escapeHtml(g.label)} · stage from warehouse</p>
+              <h1>Truck stock count sheet</h1>
+              <p class="sub">${escapeHtml(g.label)}</p>
+              <p class="hint">Write the physical count in the last column. Turn in for warehouse adjustments.</p>
             </div>
             <div class="meta">
               <div>${escapeHtml(when)}</div>
-              <div>${escapeHtml(printedBy)}</div>
-              <div>${g.lines.length} line${g.lines.length === 1 ? "" : "s"} · ${totalStage} pcs</div>
+              <div>Prepared: ${escapeHtml(printedBy)}</div>
+              <div>${g.lines.length} part${g.lines.length === 1 ? "" : "s"}</div>
             </div>
           </header>
           <table>
             <thead>
               <tr>
-                <th class="chk"></th>
-                <th>Part</th>
-                <th class="num">On truck</th>
-                <th class="num">Low</th>
-                <th class="num">Pull</th>
+                <th class="photo-cell">Photo</th>
+                <th>Part # / name</th>
+                <th class="num">Low / hi</th>
+                <th class="num">System qty</th>
+                <th class="count-box">Count</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
           </table>
           <footer>
-            <div>Pulled by: ________________</div>
-            <div>Loaded / staged: ________________</div>
-            <div>Date: ________________</div>
+            <div class="sign-row">
+              <div>Counted by: ________________________</div>
+              <div>Date: ______________</div>
+            </div>
+            <div class="sign-row">
+              <div>Entered by (office / warehouse): ________________________</div>
+              <div>Date: ______________</div>
+            </div>
+            <label class="confirm">☐ I confirm this count is accurate</label>
           </footer>
         </section>`;
       })
@@ -411,33 +453,54 @@ export function InventoryPage() {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${escapeHtml(opts?.title || "Truck pull sheet")}</title>
+  <title>${escapeHtml(opts?.title || "Truck stock count sheet")}</title>
   <style>
     * { box-sizing: border-box; }
-    body { font-family: system-ui, Segoe UI, sans-serif; margin: 0.6in; color: #111; font-size: 12px; }
+    body { font-family: system-ui, "Segoe UI", sans-serif; margin: 0.45in; color: #111; font-size: 11px; }
     .sheet { page-break-after: always; }
     .sheet:last-child { page-break-after: auto; }
-    header { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 2px solid #111; padding-bottom: 0.5rem; margin-bottom: 0.75rem; }
-    h1 { margin: 0; font-size: 1.35rem; }
-    .sub { margin: 0.2rem 0 0; font-size: 1.05rem; font-weight: 700; }
-    .meta { text-align: right; font-size: 0.85rem; color: #333; line-height: 1.4; }
+    header { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 2px solid #111; padding-bottom: 0.45rem; margin-bottom: 0.55rem; }
+    h1 { margin: 0; font-size: 1.25rem; letter-spacing: -0.01em; }
+    .sub { margin: 0.2rem 0 0; font-size: 1.1rem; font-weight: 800; }
+    .hint { margin: 0.25rem 0 0; font-size: 0.8rem; color: #444; max-width: 22rem; }
+    .meta { text-align: right; font-size: 0.8rem; color: #333; line-height: 1.45; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #ccc; padding: 0.4rem 0.35rem; text-align: left; vertical-align: top; }
-    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #444; }
-    .num { text-align: right; white-space: nowrap; width: 4.2rem; }
-    .chk { width: 1.4rem; text-align: center; font-size: 1rem; }
-    .code { color: #555; font-size: 0.8rem; }
-    .stage { font-size: 1.05rem; }
-    footer { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 1.25rem; padding-top: 0.75rem; border-top: 1px solid #999; font-size: 0.9rem; }
+    th, td { border-bottom: 1px solid #ccc; padding: 0.35rem 0.3rem; text-align: left; vertical-align: middle; }
+    th { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; background: #f4f4f5; }
+    .photo-cell { width: 2.6rem; }
+    .photo {
+      width: 2.35rem; height: 2.35rem; object-fit: contain;
+      border: 1px solid #ddd; border-radius: 6px; background: #fff; display: block;
+    }
+    .ph-empty {
+      width: 2.35rem; height: 2.35rem; border-radius: 6px; border: 1px dashed #bbb;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.65rem; font-weight: 800; color: #888; background: #fafafa;
+    }
+    .part-cell { min-width: 0; }
+    .pn { font-weight: 800; font-size: 0.95rem; font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.02em; }
+    .pname { color: #444; font-size: 0.78rem; margin-top: 0.1rem; line-height: 1.25; }
+    .num { text-align: center; white-space: nowrap; width: 4.5rem; font-variant-numeric: tabular-nums; }
+    .levels { font-weight: 600; color: #222; }
+    .curr { font-weight: 700; }
+    .count-box { width: 3.6rem; text-align: center; }
+    .write-in {
+      width: 2.6rem; height: 1.65rem; margin: 0 auto;
+      border: 1.5px solid #111; border-radius: 4px; background: #fff;
+    }
+    footer { margin-top: 1rem; padding-top: 0.65rem; border-top: 1px solid #999; font-size: 0.88rem; }
+    .sign-row { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; margin-bottom: 0.55rem; }
+    .confirm { display: block; font-weight: 700; margin-top: 0.35rem; }
     @media print {
-      body { margin: 0.45in; }
+      body { margin: 0.4in; }
       .sheet { break-after: page; }
       .sheet:last-child { break-after: auto; }
+      .photo, .ph-empty { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     }
   </style>
 </head>
 <body>${sheets}
-<script>window.onload = function () { window.focus(); window.print(); };</script>
+<script>window.onload = function () { window.focus(); setTimeout(function(){ window.print(); }, 400); };</script>
 </body>
 </html>`;
 
@@ -1772,6 +1835,24 @@ export function InventoryPage() {
         <button
           type="button"
           role="tab"
+          className={`home-action${tab === "vendor" ? " primary" : ""}`}
+          aria-selected={tab === "vendor"}
+          onClick={() => {
+            setTab("vendor");
+            closePartDetail();
+          }}
+        >
+          <span className="home-action-icon" aria-hidden>
+            🏪
+          </span>
+          <span className="home-action-text">
+            <strong>Part pickup</strong>
+            <span>Parts ready at supply house</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          role="tab"
           className={`home-action${tab === "order" ? " primary" : ""}${
             summary.needs_order ? " status-tile tone-warn" : ""
           }`}
@@ -2567,14 +2648,20 @@ export function InventoryPage() {
         </div>
       )}
 
+      {tab === "vendor" && (
+        <div className="inv-vendor-tab">
+          <VendorRunPanel />
+        </div>
+      )}
+
       {tab === "stage" && (
         <div className="card order-report-card inv-stage-card">
           <div className="page-header no-print" style={{ marginBottom: "0.75rem" }}>
             <div>
-              <h2 style={{ marginTop: 0 }}>Stage for truck pickup</h2>
+              <h2 style={{ marginTop: 0 }}>Stage / truck count sheets</h2>
               <p style={{ margin: 0 }}>
-                Sorted by unit. Print a pull sheet per truck for the counter, or print every unit
-                as separate pages.
+                Print a clean count sheet per truck: photo, part #, low/hi, system qty, and a blank
+                count box for turn-in.
               </p>
             </div>
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -2592,31 +2679,29 @@ export function InventoryPage() {
                   type="button"
                   onClick={() =>
                     printTruckPullSheet(stageByUnit, {
-                      title: `All truck pull sheets · ${new Date().toLocaleDateString()}`,
+                      title: `All truck count sheets · ${new Date().toLocaleDateString()}`,
                     })
                   }
                 >
-                  Print all pull sheets
+                  Print all count sheets
                 </button>
               )}
             </div>
           </div>
 
-          <h3 className="inv-section-title no-print">Trucks to fill</h3>
+          <h3 className="inv-section-title no-print">Trucks below low</h3>
           {!stageByUnit.length ? (
             <p className="muted">No truck lines below low right now.</p>
           ) : (
             <div className="inv-stage-units">
               {stageByUnit.map((g) => {
-                const totalPull = g.lines.reduce((s, r) => s + (Number(r.stage_qty) || 0), 0);
                 return (
                   <section key={g.key} className="inv-stage-unit-block card">
                     <div className="inv-stage-unit-head no-print">
                       <div>
                         <h3 className="inv-stage-unit-title">{g.label}</h3>
                         <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
-                          {g.lines.length} part{g.lines.length === 1 ? "" : "s"} · {totalPull} to
-                          pull
+                          {g.lines.length} part{g.lines.length === 1 ? "" : "s"} below low
                         </p>
                       </div>
                       <button
@@ -2624,36 +2709,44 @@ export function InventoryPage() {
                         className="btn secondary btn-sm"
                         onClick={() =>
                           printTruckPullSheet([g], {
-                            title: `Pull sheet · ${g.label}`,
+                            title: `Count sheet · ${g.label}`,
                           })
                         }
                       >
-                        Print pull sheet
+                        Print count sheet
                       </button>
                     </div>
                     <div className="table-wrap inv-table-wrap">
                       <table className="inv-stage-table">
                         <thead>
                           <tr>
-                            <th>Part</th>
-                            <th>On truck</th>
-                            <th>Low</th>
-                            <th>Pull</th>
+                            <th></th>
+                            <th>Part #</th>
+                            <th>Name</th>
+                            <th>Low / hi</th>
+                            <th>System</th>
+                            <th>Count</th>
                           </tr>
                         </thead>
                         <tbody>
                           {g.lines.map((r) => (
                             <tr key={`${r.part_id}-${r.location_id}`}>
+                              <td style={{ width: 44 }}>
+                                <PartThumb src={r.image_url} name={r.name} size={36} />
+                              </td>
                               <td>
-                                <strong>{r.name}</strong>
-                                <div className="muted" style={{ fontSize: "0.78rem" }}>
+                                <strong style={{ fontFamily: "ui-monospace, monospace" }}>
                                   {r.code}
-                                </div>
+                                </strong>
+                              </td>
+                              <td>{r.name}</td>
+                              <td>
+                                {r.min_qty}
+                                {r.max_qty != null ? ` / ${r.max_qty}` : " / —"}
                               </td>
                               <td>{r.qty}</td>
-                              <td>{r.min_qty}</td>
                               <td>
-                                <strong>{r.stage_qty}</strong>
+                                <span className="muted">____</span>
                               </td>
                             </tr>
                           ))}

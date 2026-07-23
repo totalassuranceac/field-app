@@ -807,7 +807,8 @@ api.get("/dashboard", async (c) => {
   // for admin/office, personal reminders by name are less critical; leave empty when not driver
   // unless we want admin to see nothing personal — OK
 
-  // Tracking / dashcam health (fleet eyes) — never block home on slow GPS
+  // Tracking stats: DB-only on home (never call live GPS here — it hung the whole app).
+  // Live map page still loads OneStep/Verizon. Home uses vehicle gps_status columns.
   let trackingSummary: {
     not_reporting: number;
     stale_or_offline: number;
@@ -826,21 +827,22 @@ api.get("/dashboard", async (c) => {
     vehicle_id: number | null;
   }> = [];
 
-  // Warehouse home doesn't need live GPS; skip to keep page instant
   if (me.role !== "driver" && me.role !== "warehouse") {
     try {
-      const staleHours = Number(await getSetting(c.env.DB, "gps_stale_hours", "6"));
-      const live = await Promise.race([
-        getLivePositions(c.env, false),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("gps-timeout")), 4500)
-        ),
-      ]);
       const vrows = await c.env.DB.prepare(
         `SELECT id, unit_number, status, gps_tracker, gps_status, dash_cam_status, cam_type
          FROM vehicles WHERE status != 'retired'`
       ).all<VehicleTrackRow>();
-      const th = computeTrackingHealth(vrows.results || [], live, staleHours || 6);
+      // Empty live positions — health still flags missing trackers / cam policy from DB
+      const emptyLive = {
+        fetched_at: new Date().toISOString(),
+        positions: [] as never[],
+        providers: {
+          onestep: { ok: false, count: 0, configured: false },
+          verizon: { ok: false, count: 0, configured: false },
+        },
+      };
+      const th = computeTrackingHealth(vrows.results || [], emptyLive, 6);
       trackingSummary = {
         ...th.counts,
         expected_trackers: th.expected_trackers,
@@ -854,7 +856,7 @@ api.get("/dashboard", async (c) => {
         vehicle_id: i.vehicle_id,
       }));
     } catch {
-      // GPS slow/missing — still return dashboard stats
+      /* optional */
     }
   }
 
@@ -878,6 +880,15 @@ api.get("/dashboard", async (c) => {
       `SELECT COUNT(*) as c FROM part_pickups WHERE status IN ('open','ready')`
     ).first<{ c: number }>();
     openPickups = p?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+  let openVendorRuns = 0;
+  try {
+    const vr = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`
+    ).first<{ c: number }>();
+    openVendorRuns = vr?.c ?? 0;
   } catch {
     /* optional */
   }
@@ -941,6 +952,7 @@ api.get("/dashboard", async (c) => {
       live_matched: trackingSummary?.live_matched ?? 0,
       open_warranties: openWarranties,
       open_pickups: openPickups,
+      open_vendor_runs: openVendorRuns,
       assets_attention: assetsAttention,
       handbook_pending: handbookPending,
       emergencies,
@@ -1276,7 +1288,48 @@ api.patch("/employees/:id", requireRoles(ROLE_PERMS.manageEmployees), async (c) 
   const id = Number(c.req.param("id"));
   const before = await c.env.DB.prepare("SELECT * FROM employees WHERE id = ?").bind(id).first();
   if (!before) return c.json({ error: "Not found" }, 404);
-  const body = await c.req.json<{ name?: string; notes?: string; phone?: string; active?: boolean }>();
+  const body = await c.req.json<{
+    name?: string;
+    notes?: string;
+    phone?: string;
+    active?: boolean;
+    rides_with_employee_id?: number | null;
+  }>();
+
+  // Link helper ↔ tech (rides together)
+  if (body.rides_with_employee_id !== undefined) {
+    const partnerId =
+      body.rides_with_employee_id == null || body.rides_with_employee_id === 0
+        ? null
+        : Number(body.rides_with_employee_id);
+    if (partnerId === id) {
+      return c.json({ error: "Someone cannot ride with themselves" }, 400);
+    }
+    if (partnerId) {
+      const partner = await c.env.DB.prepare(
+        `SELECT id, name FROM employees WHERE id = ? AND active = 1`
+      )
+        .bind(partnerId)
+        .first<{ id: number; name: string }>();
+      if (!partner) return c.json({ error: "Ride partner not found" }, 400);
+    }
+    try {
+      await c.env.DB.prepare(
+        `UPDATE employees SET rides_with_employee_id = ?, updated_at = datetime('now') WHERE id = ?`
+      )
+        .bind(partnerId, id)
+        .run();
+      // Keep link one-way primary: clear others pointing at this person incorrectly is optional
+      // If partner set, also set partner's rides_with back to this person when empty? Keep one-way only.
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such column/i.test(msg)) {
+        return c.json({ error: "Run migration 036_crew_vehicle_assign.sql" }, 503);
+      }
+      throw e;
+    }
+  }
+
   await c.env.DB.prepare(
     `UPDATE employees SET
       name = COALESCE(?, name),
@@ -1296,6 +1349,165 @@ api.patch("/employees/:id", requireRoles(ROLE_PERMS.manageEmployees), async (c) 
   const after = await c.env.DB.prepare("SELECT * FROM employees WHERE id = ?").bind(id).first();
   await writeAudit(c.env.DB, c.get("user"), "update", "employee", id, "Updated employee", before, after);
   return c.json({ employee: after });
+});
+
+/**
+ * Fleet manager: put a tech (and optional helper) on a unit.
+ * Clears the same people off other active units so map + driver access stay correct.
+ */
+api.post("/vehicles/:id/assign", requireRoles(ROLE_PERMS.manageVehicles), async (c) => {
+  const user = c.get("user");
+  const vehicleId = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    employee_id?: number | null;
+    helper_employee_id?: number | null;
+    note?: string | null;
+    clear?: boolean;
+  }>();
+
+  const vehicle = await c.env.DB.prepare(`SELECT * FROM vehicles WHERE id = ?`)
+    .bind(vehicleId)
+    .first<{
+      id: number;
+      unit_number: string;
+      assigned_driver: string | null;
+      assigned_employee_id?: number | null;
+      helper_employee_id?: number | null;
+    }>();
+  if (!vehicle) return c.json({ error: "Vehicle not found" }, 404);
+
+  try {
+    const clear = body.clear === true || body.employee_id === null || body.employee_id === 0;
+    let empId: number | null = clear ? null : Number(body.employee_id);
+    let helperId: number | null =
+      body.helper_employee_id == null || body.helper_employee_id === 0
+        ? null
+        : Number(body.helper_employee_id);
+
+    let driverName: string | null = null;
+    if (empId) {
+      const emp = await c.env.DB.prepare(
+        `SELECT id, name, rides_with_employee_id FROM employees WHERE id = ? AND active = 1`
+      )
+        .bind(empId)
+        .first<{ id: number; name: string; rides_with_employee_id: number | null }>();
+      if (!emp) return c.json({ error: "Employee not found" }, 400);
+      driverName = emp.name;
+      // Auto-include linked helper if not specified
+      if (helperId == null && emp.rides_with_employee_id) {
+        helperId = emp.rides_with_employee_id;
+      }
+    }
+    if (helperId) {
+      if (helperId === empId) {
+        return c.json({ error: "Helper must be a different person" }, 400);
+      }
+      const helper = await c.env.DB.prepare(
+        `SELECT id, name FROM employees WHERE id = ? AND active = 1`
+      )
+        .bind(helperId)
+        .first<{ id: number; name: string }>();
+      if (!helper) return c.json({ error: "Helper not found" }, 400);
+      if (driverName) driverName = `${driverName} + ${helper.name}`;
+      else driverName = helper.name;
+    }
+
+    const prevEmp = vehicle.assigned_employee_id ?? null;
+    const prevHelper = vehicle.helper_employee_id ?? null;
+    const prevName = vehicle.assigned_driver;
+
+    // Remove this tech/helper from any other unit (one primary truck at a time)
+    if (empId || helperId) {
+      const ids = [empId, helperId].filter((x): x is number => x != null);
+      if (ids.length) {
+        const ph = ids.map(() => "?").join(",");
+        await c.env.DB.prepare(
+          `UPDATE vehicles SET
+             assigned_employee_id = CASE WHEN assigned_employee_id IN (${ph}) THEN NULL ELSE assigned_employee_id END,
+             helper_employee_id = CASE WHEN helper_employee_id IN (${ph}) THEN NULL ELSE helper_employee_id END,
+             assigned_driver = CASE
+               WHEN assigned_employee_id IN (${ph}) OR helper_employee_id IN (${ph}) THEN NULL
+               ELSE assigned_driver
+             END,
+             updated_at = datetime('now')
+           WHERE id != ? AND status != 'retired'`
+        )
+          .bind(...ids, ...ids, ...ids, ...ids, vehicleId)
+          .run();
+      }
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE vehicles SET
+         assigned_employee_id = ?,
+         helper_employee_id = ?,
+         assigned_driver = ?,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(empId, helperId, driverName, vehicleId)
+      .run();
+
+    await c.env.DB.prepare(
+      `INSERT INTO vehicle_assignment_log (
+         vehicle_id, assigned_employee_id, helper_employee_id, assigned_driver_name,
+         previous_employee_id, previous_helper_employee_id, previous_driver_name,
+         assigned_by_user_id, note, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    )
+      .bind(
+        vehicleId,
+        empId,
+        helperId,
+        driverName,
+        prevEmp,
+        prevHelper,
+        prevName,
+        user.id,
+        body.note?.trim() || null
+      )
+      .run();
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "vehicle",
+      vehicleId,
+      clear
+        ? `Cleared assignment on unit ${vehicle.unit_number}`
+        : `Assigned ${driverName} → unit ${vehicle.unit_number}`
+    );
+
+    const after = await c.env.DB.prepare(`SELECT * FROM vehicles WHERE id = ?`)
+      .bind(vehicleId)
+      .first();
+    return c.json({ ok: true, vehicle: after });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column|no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 036_crew_vehicle_assign.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.get("/vehicles/:id/assignment-log", requireRoles(ROLE_PERMS.manageVehicles), async (c) => {
+  const vehicleId = Number(c.req.param("id"));
+  try {
+    const rows = await c.env.DB.prepare(
+      `SELECT l.*, u.display_name as assigned_by_name
+       FROM vehicle_assignment_log l
+       LEFT JOIN users u ON u.id = l.assigned_by_user_id
+       WHERE l.vehicle_id = ?
+       ORDER BY l.created_at DESC LIMIT 30`
+    )
+      .bind(vehicleId)
+      .all();
+    return c.json({ log: rows.results || [] });
+  } catch {
+    return c.json({ log: [] });
+  }
 });
 
 // Vehicles
@@ -2966,40 +3178,332 @@ api.delete("/reviews/:id", requireRoles(["admin"]), async (c) => {
 });
 
 
-// ——— In-app messenger ———
+// ——— In-app messenger (threaded conversations + thumbs-up acks) ———
+
+type MsgConvRow = {
+  id: number;
+  subject: string;
+  is_team: number;
+  created_by_user_id: number;
+  last_message_at: string;
+  created_at: string;
+};
+
+/**
+ * Backfill pre-thread messages into conversations.
+ * Keep batches tiny — large backfills timed out D1 and made the app hang on open.
+ */
+async function backfillMessageConversations(db: D1Database, limit = 8): Promise<void> {
+  try {
+    const orphan = await db
+      .prepare(
+        `SELECT id, from_user_id, to_user_id, body, created_at
+         FROM app_messages
+         WHERE conversation_id IS NULL
+         ORDER BY id ASC
+         LIMIT ?`
+      )
+      .bind(Math.min(20, Math.max(1, limit)))
+      .all<{
+        id: number;
+        from_user_id: number;
+        to_user_id: number | null;
+        body: string;
+        created_at: string;
+      }>();
+    for (const m of orphan.results || []) {
+      const subj =
+        m.body.length > 48 ? `${m.body.slice(0, 48).trim()}…` : m.body.trim() || "Message";
+      const isTeam = m.to_user_id == null ? 1 : 0;
+      const cr = await db
+        .prepare(
+          `INSERT INTO app_conversations (subject, is_team, created_by_user_id, last_message_at, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(subj, isTeam, m.from_user_id, m.created_at, m.created_at)
+        .run();
+      const cid = Number(cr.meta.last_row_id);
+      await db
+        .prepare(`UPDATE app_messages SET conversation_id = ? WHERE id = ?`)
+        .bind(cid, m.id)
+        .run();
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
+        )
+        .bind(cid, m.from_user_id)
+        .run();
+      if (m.to_user_id) {
+        await db
+          .prepare(
+            `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
+          )
+          .bind(cid, m.to_user_id)
+          .run();
+      }
+    }
+  } catch {
+    /* tables may not exist yet */
+  }
+}
+
+async function userCanAccessConversation(
+  db: D1Database,
+  userId: number,
+  convId: number
+): Promise<MsgConvRow | null> {
+  const conv = await db
+    .prepare(`SELECT * FROM app_conversations WHERE id = ?`)
+    .bind(convId)
+    .first<MsgConvRow>();
+  if (!conv) return null;
+  if (conv.is_team) return conv;
+  const mem = await db
+    .prepare(
+      `SELECT 1 as ok FROM app_conversation_members WHERE conversation_id = ? AND user_id = ?`
+    )
+    .bind(convId, userId)
+    .first<{ ok: number }>();
+  return mem ? conv : null;
+}
+
+async function countUnreadMessages(db: D1Database, userId: number): Promise<number> {
+  // Fast path: direct to-user + team broadcasts (no member-table scan)
+  try {
+    const unread = await db
+      .prepare(
+        `SELECT COUNT(*) as c FROM app_messages m
+         WHERE m.from_user_id != ?
+           AND (m.to_user_id = ? OR m.to_user_id IS NULL)
+           AND NOT EXISTS (
+             SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?
+           )`
+      )
+      .bind(userId, userId, userId)
+      .first<{ c: number }>();
+    return unread?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 api.get("/messages", async (c) => {
   const user = c.get("user");
-  const limit = Math.min(100, Math.max(20, Number(c.req.query("limit") || "50")));
+  const peek = c.req.query("peek") === "1" || c.req.query("light") === "1";
+  const limit = peek
+    ? Math.min(12, Math.max(1, Number(c.req.query("limit") || "5")))
+    : Math.min(100, Math.max(20, Number(c.req.query("limit") || "50")));
+  const sinceId = Number(c.req.query("since_id") || "0");
   try {
-    const rows = await c.env.DB.prepare(
-      `SELECT m.*, fu.display_name as from_name, tu.display_name as to_name,
-              (SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?) as is_read
+    // Never backfill on peek/poll — that was freezing the whole app on open
+    if (!peek) {
+      await backfillMessageConversations(c.env.DB, 8);
+    }
+
+    // Lightweight poll for toast / badge (no acks, no conversation join)
+    if (peek) {
+      let sql = `SELECT m.id, m.from_user_id, m.to_user_id, m.body, m.created_at, m.conversation_id,
+                        fu.display_name as from_name
+                 FROM app_messages m
+                 JOIN users fu ON fu.id = m.from_user_id
+                 WHERE (m.from_user_id = ? OR m.to_user_id = ? OR m.to_user_id IS NULL)`;
+      const binds: (string | number)[] = [user.id, user.id];
+      if (sinceId > 0) {
+        sql += ` AND m.id > ?`;
+        binds.push(sinceId);
+      }
+      sql += ` ORDER BY m.id DESC LIMIT ?`;
+      binds.push(limit);
+      const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+      const unread = await countUnreadMessages(c.env.DB, user.id);
+      const maxRow = await c.env.DB.prepare(`SELECT MAX(id) as max_id FROM app_messages`).first<{
+        max_id: number | null;
+      }>();
+      return c.json({
+        messages: rows.results || [],
+        unread,
+        max_id: maxRow?.max_id ?? 0,
+      });
+    }
+
+    let sql = `SELECT m.*, fu.display_name as from_name, tu.display_name as to_name,
+              (SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?) as is_read,
+              (SELECT COUNT(*) FROM app_message_acks a WHERE a.message_id = m.id) as ack_count,
+              (SELECT 1 FROM app_message_acks a WHERE a.message_id = m.id AND a.user_id = ?) as i_acked,
+              c.subject as conversation_subject
        FROM app_messages m
        JOIN users fu ON fu.id = m.from_user_id
        LEFT JOIN users tu ON tu.id = m.to_user_id
-       WHERE m.from_user_id = ?
+       LEFT JOIN app_conversations c ON c.id = m.conversation_id
+       WHERE (m.from_user_id = ?
           OR m.to_user_id = ?
-          OR m.to_user_id IS NULL
-       ORDER BY m.created_at DESC
-       LIMIT ?`
-    )
-      .bind(user.id, user.id, user.id, limit)
-      .all();
-    const unread = await c.env.DB.prepare(
-      `SELECT COUNT(*) as c FROM app_messages m
-       WHERE (m.to_user_id = ? OR m.to_user_id IS NULL)
-         AND m.from_user_id != ?
-         AND NOT EXISTS (
-           SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?
-         )`
-    )
-      .bind(user.id, user.id, user.id)
-      .first<{ c: number }>();
-    return c.json({ messages: rows.results || [], unread: unread?.c ?? 0 });
+          OR m.to_user_id IS NULL)`;
+    const binds: (string | number)[] = [user.id, user.id, user.id, user.id];
+    if (sinceId > 0) {
+      sql += ` AND m.id > ?`;
+      binds.push(sinceId);
+    }
+    sql += ` ORDER BY m.created_at DESC LIMIT ?`;
+    binds.push(limit);
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+    const unread = await countUnreadMessages(c.env.DB, user.id);
+    const maxRow = await c.env.DB.prepare(`SELECT MAX(id) as max_id FROM app_messages`).first<{
+      max_id: number | null;
+    }>();
+    return c.json({
+      messages: rows.results || [],
+      unread,
+      max_id: maxRow?.max_id ?? 0,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) {
-      return c.json({ messages: [], unread: 0, error: "Run migration 024" });
+      return c.json({ messages: [], unread: 0, max_id: 0, error: "Run migration 024 / 032" });
+    }
+    if (/timeout|storage operation/i.test(msg)) {
+      return c.json({ messages: [], unread: 0, max_id: 0, error: "Database busy" });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.get("/messages/conversations", async (c) => {
+  const user = c.get("user");
+  try {
+    await backfillMessageConversations(c.env.DB, 8);
+    const rows = await c.env.DB.prepare(
+      `SELECT c.id, c.subject, c.is_team, c.created_by_user_id, c.last_message_at, c.created_at,
+              (SELECT body FROM app_messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) as last_body,
+              (SELECT fu.display_name FROM app_messages m
+                 JOIN users fu ON fu.id = m.from_user_id
+               WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) as last_from_name,
+              (SELECT m.from_user_id FROM app_messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) as last_from_id,
+              (SELECT COUNT(*) FROM app_messages m WHERE m.conversation_id = c.id) as message_count,
+              (SELECT COUNT(*) FROM app_messages m
+               WHERE m.conversation_id = c.id
+                 AND m.from_user_id != ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?
+                 )) as unread,
+              (SELECT u.display_name FROM app_conversation_members cm
+                 JOIN users u ON u.id = cm.user_id
+               WHERE cm.conversation_id = c.id AND cm.user_id != ?
+               LIMIT 1) as peer_name,
+              (SELECT cm.user_id FROM app_conversation_members cm
+               WHERE cm.conversation_id = c.id AND cm.user_id != ?
+               LIMIT 1) as peer_id
+       FROM app_conversations c
+       WHERE c.is_team = 1
+          OR EXISTS (
+            SELECT 1 FROM app_conversation_members cm
+            WHERE cm.conversation_id = c.id AND cm.user_id = ?
+          )
+       ORDER BY c.last_message_at DESC
+       LIMIT 100`
+    )
+      .bind(user.id, user.id, user.id, user.id, user.id)
+      .all();
+    const unread = await countUnreadMessages(c.env.DB, user.id);
+    return c.json({ conversations: rows.results || [], unread });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        conversations: [],
+        unread: 0,
+        error: "Run migration 032_message_conversations.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.get("/messages/conversations/:id", async (c) => {
+  const user = c.get("user");
+  const convId = Number(c.req.param("id"));
+  if (!convId) return c.json({ error: "Invalid conversation" }, 400);
+  try {
+    await backfillMessageConversations(c.env.DB);
+    const conv = await userCanAccessConversation(c.env.DB, user.id, convId);
+    if (!conv) return c.json({ error: "Conversation not found" }, 404);
+
+    const msgs = await c.env.DB.prepare(
+      `SELECT m.id, m.from_user_id, m.to_user_id, m.body, m.created_at, m.conversation_id,
+              fu.display_name as from_name,
+              (SELECT 1 FROM app_message_reads r WHERE r.message_id = m.id AND r.user_id = ?) as is_read,
+              (SELECT COUNT(*) FROM app_message_acks a WHERE a.message_id = m.id) as ack_count,
+              (SELECT 1 FROM app_message_acks a WHERE a.message_id = m.id AND a.user_id = ?) as i_acked
+       FROM app_messages m
+       JOIN users fu ON fu.id = m.from_user_id
+       WHERE m.conversation_id = ?
+       ORDER BY m.created_at ASC, m.id ASC
+       LIMIT 500`
+    )
+      .bind(user.id, user.id, convId)
+      .all();
+
+    const ackRows = await c.env.DB.prepare(
+      `SELECT a.message_id, a.user_id, u.display_name
+       FROM app_message_acks a
+       JOIN users u ON u.id = a.user_id
+       JOIN app_messages m ON m.id = a.message_id
+       WHERE m.conversation_id = ?
+       ORDER BY a.created_at ASC`
+    )
+      .bind(convId)
+      .all<{ message_id: number; user_id: number; display_name: string }>();
+
+    const ackersByMsg = new Map<number, { user_id: number; display_name: string }[]>();
+    for (const a of ackRows.results || []) {
+      const list = ackersByMsg.get(a.message_id) || [];
+      list.push({ user_id: a.user_id, display_name: a.display_name });
+      ackersByMsg.set(a.message_id, list);
+    }
+
+    const messages = (msgs.results || []).map((m: Record<string, unknown>) => ({
+      ...m,
+      id: Number(m.id),
+      from_user_id: Number(m.from_user_id),
+      ackers: ackersByMsg.get(Number(m.id)) || [],
+    }));
+
+    let peer_name: string | null = null;
+    let peer_id: number | null = null;
+    if (!conv.is_team) {
+      const peer = await c.env.DB.prepare(
+        `SELECT u.id, u.display_name FROM app_conversation_members cm
+         JOIN users u ON u.id = cm.user_id
+         WHERE cm.conversation_id = ? AND cm.user_id != ?
+         LIMIT 1`
+      )
+        .bind(convId, user.id)
+        .first<{ id: number; display_name: string }>();
+      peer_name = peer?.display_name || null;
+      peer_id = peer?.id ?? null;
+    }
+
+    // Mark conversation messages as read for this user
+    for (const m of messages) {
+      if (m.from_user_id === user.id) continue;
+      await c.env.DB.prepare(
+        `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
+      )
+        .bind(m.id, user.id)
+        .run();
+    }
+
+    return c.json({
+      conversation: {
+        ...conv,
+        peer_name,
+        peer_id,
+      },
+      messages,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 032_message_conversations.sql" }, 503);
     }
     return c.json({ error: msg }, 500);
   }
@@ -3025,39 +3529,101 @@ api.get("/messages/users", async (c) => {
 
 api.post("/messages", async (c) => {
   const user = c.get("user");
-  const body = await c.req.json<{ body?: string; to_user_id?: number | null; broadcast?: boolean }>();
+  const body = await c.req.json<{
+    body?: string;
+    to_user_id?: number | null;
+    broadcast?: boolean;
+    subject?: string;
+    conversation_id?: number | null;
+  }>();
   const text = (body.body || "").trim();
   if (!text || text.length > 2000) {
     return c.json({ error: "Message required (max 2000 characters)" }, 400);
   }
-  const broadcast = body.broadcast === true || body.to_user_id == null;
-  const toId = broadcast ? null : Number(body.to_user_id);
-  if (!broadcast && (!toId || toId === user.id)) {
-    return c.json({ error: "Pick a teammate to message" }, 400);
-  }
   try {
+    await backfillMessageConversations(c.env.DB);
+
+    let convId = body.conversation_id ? Number(body.conversation_id) : 0;
+    let isTeam = false;
+    let toId: number | null = null;
+    let subject = (body.subject || "").trim().slice(0, 120);
+
+    if (convId) {
+      const conv = await userCanAccessConversation(c.env.DB, user.id, convId);
+      if (!conv) return c.json({ error: "Conversation not found" }, 404);
+      isTeam = !!conv.is_team;
+      subject = conv.subject || subject;
+      if (!isTeam) {
+        const peer = await c.env.DB.prepare(
+          `SELECT user_id FROM app_conversation_members
+           WHERE conversation_id = ? AND user_id != ? LIMIT 1`
+        )
+          .bind(convId, user.id)
+          .first<{ user_id: number }>();
+        toId = peer?.user_id ?? null;
+      } else {
+        toId = null;
+      }
+    } else {
+      // New conversation — subject helps track the topic
+      if (!subject) {
+        subject = text.length > 48 ? `${text.slice(0, 48).trim()}…` : text;
+      }
+      const broadcast = body.broadcast === true || body.to_user_id == null;
+      toId = broadcast ? null : Number(body.to_user_id);
+      if (!broadcast && (!toId || toId === user.id)) {
+        return c.json({ error: "Pick a teammate to message" }, 400);
+      }
+      isTeam = broadcast;
+      const cr = await c.env.DB.prepare(
+        `INSERT INTO app_conversations (subject, is_team, created_by_user_id, last_message_at)
+         VALUES (?, ?, ?, datetime('now'))`
+      )
+        .bind(subject, isTeam ? 1 : 0, user.id)
+        .run();
+      convId = Number(cr.meta.last_row_id);
+      await c.env.DB.prepare(
+        `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
+      )
+        .bind(convId, user.id)
+        .run();
+      if (toId) {
+        await c.env.DB.prepare(
+          `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
+        )
+          .bind(convId, toId)
+          .run();
+      }
+    }
+
+    // For team threads, to_user_id stays null (visible to whole team)
     const r = await c.env.DB.prepare(
-      `INSERT INTO app_messages (from_user_id, to_user_id, body) VALUES (?, ?, ?)`
+      `INSERT INTO app_messages (from_user_id, to_user_id, body, conversation_id) VALUES (?, ?, ?, ?)`
     )
-      .bind(user.id, toId, text)
+      .bind(user.id, isTeam ? null : toId, text, convId)
       .run();
     const mid = r.meta.last_row_id;
+
+    await c.env.DB.prepare(
+      `UPDATE app_conversations SET last_message_at = datetime('now') WHERE id = ?`
+    )
+      .bind(convId)
+      .run();
+
     // Mark sender as read
     await c.env.DB.prepare(
       `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
     )
       .bind(mid, user.id)
       .run();
-    // In-app notify recipient(s)
-    if (toId) {
-      await notifyUsers(
-        c.env.DB,
-        [toId],
-        "message",
-        `Message from ${user.display_name}`,
-        text.slice(0, 200),
-        { type: "message", id: mid }
-      );
+
+    const notifyTitle = isTeam
+      ? `Team · ${subject || "Message"} · ${user.display_name}`
+      : `${user.display_name}: ${subject || "Message"}`;
+    const entity = { type: "conversation", id: convId };
+
+    if (!isTeam && toId) {
+      await notifyUsers(c.env.DB, [toId], "message", notifyTitle, text.slice(0, 200), entity);
     } else {
       const all = await c.env.DB.prepare(`SELECT id FROM users WHERE active = 1 AND id != ?`)
         .bind(user.id)
@@ -3066,27 +3632,127 @@ api.post("/messages", async (c) => {
         c.env.DB,
         (all.results || []).map((u) => u.id),
         "message",
-        `Team message from ${user.display_name}`,
+        notifyTitle,
         text.slice(0, 200),
-        { type: "message", id: mid }
+        entity
       );
     }
-    return c.json({ ok: true, id: mid });
+    return c.json({ ok: true, id: mid, conversation_id: convId });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Send failed" }, 500);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such (table|column)/i.test(msg)) {
+      return c.json({ error: "Run migration 032_message_conversations.sql" }, 503);
+    }
+    return c.json({ error: msg || "Send failed" }, 500);
+  }
+});
+
+/** Thumbs-up / "got it" confirmation on a message */
+api.post("/messages/:id/ack", async (c) => {
+  const user = c.get("user");
+  const mid = Number(c.req.param("id"));
+  if (!mid) return c.json({ error: "Invalid message" }, 400);
+  try {
+    const msg = await c.env.DB.prepare(
+      `SELECT id, from_user_id, to_user_id, conversation_id, body FROM app_messages WHERE id = ?`
+    )
+      .bind(mid)
+      .first<{
+        id: number;
+        from_user_id: number;
+        to_user_id: number | null;
+        conversation_id: number | null;
+        body: string;
+      }>();
+    if (!msg) return c.json({ error: "Message not found" }, 404);
+
+    if (msg.conversation_id) {
+      const conv = await userCanAccessConversation(c.env.DB, user.id, msg.conversation_id);
+      if (!conv) return c.json({ error: "Not allowed" }, 403);
+    } else if (
+      msg.from_user_id !== user.id &&
+      msg.to_user_id !== user.id &&
+      msg.to_user_id != null
+    ) {
+      return c.json({ error: "Not allowed" }, 403);
+    }
+
+    const existing = await c.env.DB.prepare(
+      `SELECT 1 as ok FROM app_message_acks WHERE message_id = ? AND user_id = ?`
+    )
+      .bind(mid, user.id)
+      .first<{ ok: number }>();
+
+    if (existing) {
+      await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ? AND user_id = ?`)
+        .bind(mid, user.id)
+        .run();
+      return c.json({ ok: true, acked: false });
+    }
+
+    await c.env.DB.prepare(
+      `INSERT INTO app_message_acks (message_id, user_id) VALUES (?, ?)`
+    )
+      .bind(mid, user.id)
+      .run();
+
+    // Notify the original sender that someone confirmed (unless self)
+    if (msg.from_user_id !== user.id) {
+      await notifyUsers(
+        c.env.DB,
+        [msg.from_user_id],
+        "message_ack",
+        `${user.display_name} 👍 got your message`,
+        msg.body.slice(0, 120),
+        msg.conversation_id
+          ? { type: "conversation", id: msg.conversation_id }
+          : { type: "message", id: mid }
+      );
+    }
+    return c.json({ ok: true, acked: true });
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(err)) {
+      return c.json({ error: "Run migration 032_message_conversations.sql" }, 503);
+    }
+    return c.json({ error: err }, 500);
   }
 });
 
 api.post("/messages/read", async (c) => {
   const user = c.get("user");
-  const body = await c.req.json<{ id?: number; all?: boolean }>().catch(() => ({} as { all?: boolean }));
+  type ReadBody = { id?: number; all?: boolean; conversation_id?: number };
+  const body: ReadBody = await c.req.json<ReadBody>().catch(() => ({}));
   try {
-    if (body.all) {
+    if (body.conversation_id) {
+      const conv = await userCanAccessConversation(c.env.DB, user.id, Number(body.conversation_id));
+      if (!conv) return c.json({ error: "Conversation not found" }, 404);
+      const rows = await c.env.DB.prepare(
+        `SELECT id FROM app_messages WHERE conversation_id = ? AND from_user_id != ?`
+      )
+        .bind(Number(body.conversation_id), user.id)
+        .all<{ id: number }>();
+      for (const m of rows.results || []) {
+        await c.env.DB.prepare(
+          `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
+        )
+          .bind(m.id, user.id)
+          .run();
+      }
+    } else if (body.all) {
       const rows = await c.env.DB.prepare(
         `SELECT m.id FROM app_messages m
-         WHERE (m.to_user_id = ? OR m.to_user_id IS NULL) AND m.from_user_id != ?`
+         WHERE m.from_user_id != ?
+           AND (
+             m.to_user_id = ?
+             OR m.to_user_id IS NULL
+             OR EXISTS (
+               SELECT 1 FROM app_conversation_members cm
+               WHERE cm.conversation_id = m.conversation_id AND cm.user_id = ?
+             )
+           )`
       )
-        .bind(user.id, user.id)
+        .bind(user.id, user.id, user.id)
         .all<{ id: number }>();
       for (const m of rows.results || []) {
         await c.env.DB.prepare(
@@ -6401,6 +7067,601 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
   });
 });
 
+// ——— Part pickup / vendor will-call ("parts ready at supply house") ———
+// Field App owns this list. ST job # / address are optional free-text for now.
+
+function tomorrowIsoDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function defaultVendorRunSource(role: string): "office" | "tech" | "warehouse" | "other" {
+  if (role === "office") return "office";
+  if (role === "warehouse") return "warehouse";
+  if (role === "driver" || role === "mechanic") return "tech";
+  return "other";
+}
+
+/** Lines still needing action at the vendor (pending / not ready / partial). */
+async function countPartPickupWaiting(db: D1Database): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) as c FROM part_pickup_ticket_lines
+         WHERE status IN ('pending','not_ready','partial')`
+      )
+      .first<{ c: number }>();
+    let n = row?.c ?? 0;
+    // Tickets marked qty unknown with no lines yet still count as 1 open ticket
+    const openEmpty = await db
+      .prepare(
+        `SELECT COUNT(*) as c FROM part_pickup_tickets t
+         WHERE t.status IN ('open','partial')
+           AND NOT EXISTS (SELECT 1 FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id)`
+      )
+      .first<{ c: number }>();
+    n += openEmpty?.c ?? 0;
+    return n;
+  } catch {
+    /* fall through to legacy */
+  }
+  try {
+    const legacy = await db
+      .prepare(`SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`)
+      .first<{ c: number }>();
+    return legacy?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): Promise<void> {
+  const lines = await db
+    .prepare(`SELECT status FROM part_pickup_ticket_lines WHERE ticket_id = ?`)
+    .bind(ticketId)
+    .all<{ status: string }>();
+  const list = lines.results || [];
+  if (!list.length) {
+    await db
+      .prepare(
+        `UPDATE part_pickup_tickets SET status = 'open', updated_at = datetime('now') WHERE id = ?`
+      )
+      .bind(ticketId)
+      .run();
+    return;
+  }
+  const pending = list.filter((l) =>
+    ["pending", "not_ready", "partial"].includes(l.status)
+  ).length;
+  const picked = list.filter((l) => l.status === "picked").length;
+  let status = "open";
+  if (pending === 0) status = "done";
+  else if (picked > 0 || list.some((l) => l.status === "partial")) status = "partial";
+  await db
+    .prepare(
+      `UPDATE part_pickup_tickets SET status = ?, updated_at = datetime('now') WHERE id = ?`
+    )
+    .bind(status, ticketId)
+    .run();
+}
+
+/** Fast badge poll */
+api.get("/inventory/vendor-runs/count", async (c) => {
+  const waiting = await countPartPickupWaiting(c.env.DB);
+  return c.json({ waiting });
+});
+
+api.get("/inventory/part-pickups/count", async (c) => {
+  const waiting = await countPartPickupWaiting(c.env.DB);
+  return c.json({ waiting });
+});
+
+/** List pickup tickets grouped by vendor (open / all). */
+api.get("/inventory/part-pickups", async (c) => {
+  const status = (c.req.query("status") || "open").trim();
+  try {
+    const waiting = await countPartPickupWaiting(c.env.DB);
+    let sql = `SELECT t.*,
+        u.display_name as logged_by_name,
+        (SELECT COUNT(*) FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id) as line_count,
+        (SELECT COUNT(*) FROM part_pickup_ticket_lines l
+          WHERE l.ticket_id = t.id AND l.status IN ('pending','not_ready','partial')) as open_lines,
+        (SELECT COUNT(*) FROM part_pickup_ticket_lines l
+          WHERE l.ticket_id = t.id AND l.status = 'picked') as picked_lines
+       FROM part_pickup_tickets t
+       LEFT JOIN users u ON u.id = t.logged_by_user_id`;
+    if (status === "open" || status === "waiting") {
+      sql += ` WHERE t.status IN ('open','partial')`;
+    } else if (status === "done") {
+      sql += ` WHERE t.status IN ('done','cancelled')`;
+    } else if (status !== "all") {
+      sql += ` WHERE t.status = ?`;
+    }
+    sql += ` ORDER BY
+      CASE t.status WHEN 'open' THEN 0 WHEN 'partial' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
+      lower(t.vendor_name), t.needed_for_date IS NULL, t.needed_for_date ASC, t.id DESC
+      LIMIT 100`;
+    const tickets =
+      status === "all" || status === "open" || status === "waiting" || status === "done"
+        ? await c.env.DB.prepare(sql).all()
+        : await c.env.DB.prepare(sql).bind(status).all();
+
+    const list = [];
+    for (const t of tickets.results || []) {
+      const tid = Number((t as { id: number }).id);
+      const lines = await c.env.DB.prepare(
+        `SELECT l.*, ru.display_name as resolved_by_name
+         FROM part_pickup_ticket_lines l
+         LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+         WHERE l.ticket_id = ?
+         ORDER BY l.line_no ASC, l.id ASC`
+      )
+        .bind(tid)
+        .all();
+      list.push({ ...t, lines: lines.results || [] });
+    }
+
+    // Vendor names for autocomplete
+    let vendorNames: string[] = [];
+    try {
+      const vn = await c.env.DB.prepare(
+        `SELECT DISTINCT vendor_name as name FROM (
+           SELECT vendor_name FROM part_pickup_tickets
+           UNION SELECT vendor_name FROM vendor_run_lines
+           UNION SELECT vendor_name FROM part_vendors
+         ) WHERE name IS NOT NULL AND trim(name) != ''
+         ORDER BY lower(name) LIMIT 100`
+      ).all<{ name: string }>();
+      vendorNames = (vn.results || []).map((r) => r.name);
+    } catch {
+      try {
+        const vn = await c.env.DB.prepare(
+          `SELECT DISTINCT vendor_name as name FROM part_pickup_tickets
+           WHERE vendor_name IS NOT NULL ORDER BY lower(vendor_name) LIMIT 80`
+        ).all<{ name: string }>();
+        vendorNames = (vn.results || []).map((r) => r.name);
+      } catch {
+        vendorNames = [];
+      }
+    }
+
+    // Group tickets by vendor for chips
+    const byVendor = new Map<string, typeof list>();
+    for (const t of list) {
+      const key = String((t as { vendor_name: string }).vendor_name || "Unknown").trim();
+      if (!byVendor.has(key)) byVendor.set(key, []);
+      byVendor.get(key)!.push(t);
+    }
+    const vendors = [...byVendor.entries()]
+      .map(([vendor_name, tickets]) => ({
+        vendor_name,
+        waiting: tickets.reduce(
+          (s, tk) => s + (Number((tk as { open_lines?: number }).open_lines) || 0),
+          0
+        ),
+        tickets,
+      }))
+      .sort((a, b) => a.vendor_name.localeCompare(b.vendor_name));
+
+    return c.json({
+      tickets: list,
+      vendors,
+      vendor_names: vendorNames,
+      waiting,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        tickets: [],
+        vendors: [],
+        vendor_names: [],
+        waiting: 0,
+        error: "Run migration 035_part_pickup_tickets.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/**
+ * Create a pickup ticket.
+ * Body: vendor_name, needed_for_date, purchase_order, notes,
+ *       qty_unknown?, part_count? (creates empty lines), parts?: [{part_code, part_name, qty_requested}]
+ */
+api.post("/inventory/part-pickups", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{
+    vendor_name?: string;
+    needed_for_date?: string | null;
+    purchase_order?: string | null;
+    notes?: string | null;
+    qty_unknown?: boolean;
+    part_count?: number;
+    parts?: Array<{
+      part_id?: number | null;
+      part_code?: string | null;
+      part_name?: string | null;
+      qty_requested?: number;
+    }>;
+    source?: "office" | "tech" | "warehouse" | "other";
+  }>();
+
+  const vendor = (body.vendor_name || "").trim();
+  if (!vendor) return c.json({ error: "Vendor is required" }, 400);
+
+  let needed = (body.needed_for_date || "").trim() || tomorrowIsoDate();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(needed)) needed = tomorrowIsoDate();
+
+  const qtyUnknown = body.qty_unknown === true;
+  const partsIn = body.parts || [];
+  let partCount = Number(body.part_count);
+  if (!qtyUnknown) {
+    if (partsIn.length > 0) partCount = partsIn.length;
+    if (!Number.isFinite(partCount) || partCount < 1) {
+      return c.json({ error: "How many parts? Enter a number or check “Don’t know yet”" }, 400);
+    }
+    if (partCount > 40) return c.json({ error: "Max 40 parts per ticket" }, 400);
+  } else {
+    partCount = partsIn.length > 0 ? partsIn.length : 0;
+  }
+
+  const source = body.source || defaultVendorRunSource(user.role);
+  const po = (body.purchase_order || "").trim() || null;
+  const notes = (body.notes || "").trim() || null;
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO part_pickup_tickets (
+         vendor_name, needed_for_date, purchase_order, notes, qty_unknown, expected_parts,
+         status, logged_by_user_id, source, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, datetime('now'), datetime('now'))`
+    )
+      .bind(vendor, needed, po, notes, qtyUnknown ? 1 : 0, partCount || null, user.id, source)
+      .run();
+    const ticketId = Number(ins.meta.last_row_id);
+
+    const slots = qtyUnknown && !partsIn.length ? 0 : Math.max(partCount, partsIn.length);
+    for (let i = 0; i < slots; i++) {
+      const p = partsIn[i] || {};
+      let partId = p.part_id ? Number(p.part_id) : null;
+      let partCode = (p.part_code || "").trim() || null;
+      let partName = (p.part_name || "").trim() || null;
+      if (partId) {
+        try {
+          const row = await c.env.DB.prepare(`SELECT id, code, name FROM parts WHERE id = ?`)
+            .bind(partId)
+            .first<{ id: number; code: string; name: string }>();
+          if (row) {
+            partCode = row.code;
+            if (!partName) partName = row.name;
+          }
+        } catch {
+          partId = null;
+        }
+      }
+      const qtyReq = Number(p.qty_requested);
+      await c.env.DB.prepare(
+        `INSERT INTO part_pickup_ticket_lines (
+           ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
+         ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`
+      )
+        .bind(
+          ticketId,
+          i + 1,
+          partId,
+          partCode,
+          partName,
+          Number.isFinite(qtyReq) && qtyReq > 0 ? qtyReq : 1
+        )
+        .run();
+    }
+
+    const bg = (async () => {
+      try {
+        const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin"]);
+        await notifyUsers(
+          c.env.DB,
+          notifyIds.filter((uid) => uid !== user.id).slice(0, 40),
+          "vendor_run",
+          `Part pickup · ${vendor}`,
+          `${qtyUnknown ? "Parts TBD" : `${partCount} part(s)`}${po ? ` · ${po}` : ""} · need ${needed} — ${user.display_name}`,
+          { type: "part_pickup", id: ticketId }
+        );
+      } catch {
+        /* ignore */
+      }
+    })();
+    scheduleWaitUntil(c, bg);
+
+    return c.json({ ok: true, id: ticketId });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 035_part_pickup_tickets.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/** Update part # / name on lines (office fills details). */
+api.put("/inventory/part-pickups/:id/lines", async (c) => {
+  const user = c.get("user");
+  const ticketId = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    lines?: Array<{
+      id: number;
+      part_code?: string | null;
+      part_name?: string | null;
+      part_id?: number | null;
+      qty_requested?: number;
+    }>;
+    add_lines?: number;
+  }>();
+
+  try {
+    const ticket = await c.env.DB.prepare(`SELECT id, status FROM part_pickup_tickets WHERE id = ?`)
+      .bind(ticketId)
+      .first<{ id: number; status: string }>();
+    if (!ticket) return c.json({ error: "Ticket not found" }, 404);
+    if (ticket.status === "done" || ticket.status === "cancelled") {
+      return c.json({ error: "Ticket is closed" }, 400);
+    }
+
+    if (body.add_lines && body.add_lines > 0) {
+      const maxLine = await c.env.DB.prepare(
+        `SELECT COALESCE(MAX(line_no),0) as m FROM part_pickup_ticket_lines WHERE ticket_id = ?`
+      )
+        .bind(ticketId)
+        .first<{ m: number }>();
+      let n = Number(maxLine?.m) || 0;
+      const add = Math.min(20, Math.floor(body.add_lines));
+      for (let i = 0; i < add; i++) {
+        n++;
+        await c.env.DB.prepare(
+          `INSERT INTO part_pickup_ticket_lines (ticket_id, line_no, qty_requested, status)
+           VALUES (?, ?, 1, 'pending')`
+        )
+          .bind(ticketId, n)
+          .run();
+      }
+    }
+
+    for (const line of body.lines || []) {
+      if (!line.id) continue;
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_ticket_lines SET
+           part_id = COALESCE(?, part_id),
+           part_code = COALESCE(?, part_code),
+           part_name = COALESCE(?, part_name),
+           qty_requested = COALESCE(?, qty_requested)
+         WHERE id = ? AND ticket_id = ?`
+      )
+        .bind(
+          line.part_id ?? null,
+          line.part_code != null ? String(line.part_code).trim() || null : null,
+          line.part_name != null ? String(line.part_name).trim() || null : null,
+          line.qty_requested != null && Number.isFinite(Number(line.qty_requested))
+            ? Number(line.qty_requested)
+            : null,
+          line.id,
+          ticketId
+        )
+        .run();
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE part_pickup_tickets SET updated_at = datetime('now') WHERE id = ?`
+    )
+      .bind(ticketId)
+      .run();
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Update failed" }, 500);
+  }
+});
+
+/**
+ * Resolve a line at the counter:
+ * status: picked | not_ready | partial | cancelled | pending
+ * qty_received required for partial; optional for picked (defaults to requested)
+ */
+api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
+  const user = c.get("user");
+  if (!["admin", "warehouse", "office"].includes(user.role)) {
+    return c.json({ error: "Only warehouse, office, or admin can update pickup status" }, 403);
+  }
+  const lineId = Number(c.req.param("lineId"));
+  const body = await c.req.json<{
+    status?: string;
+    qty_received?: number | null;
+    notes?: string | null;
+    receive_stock?: boolean;
+  }>();
+  const status = String(body.status || "").trim();
+  if (!["picked", "not_ready", "partial", "cancelled", "pending"].includes(status)) {
+    return c.json(
+      { error: "Status must be picked, not_ready, partial, cancelled, or pending" },
+      400
+    );
+  }
+
+  try {
+    const line = await c.env.DB.prepare(
+      `SELECT l.*, t.vendor_name, t.purchase_order, t.logged_by_user_id
+       FROM part_pickup_ticket_lines l
+       JOIN part_pickup_tickets t ON t.id = l.ticket_id
+       WHERE l.id = ?`
+    )
+      .bind(lineId)
+      .first<{
+        id: number;
+        ticket_id: number;
+        part_id: number | null;
+        part_name: string | null;
+        part_code: string | null;
+        qty_requested: number;
+        vendor_name: string;
+        purchase_order: string | null;
+        logged_by_user_id: number | null;
+      }>();
+    if (!line) return c.json({ error: "Line not found" }, 404);
+
+    let qtyRecv: number | null = null;
+    if (status === "picked") {
+      qtyRecv =
+        body.qty_received != null && Number.isFinite(Number(body.qty_received))
+          ? Number(body.qty_received)
+          : Number(line.qty_requested) || 1;
+    } else if (status === "partial") {
+      if (body.qty_received == null || !Number.isFinite(Number(body.qty_received))) {
+        return c.json({ error: "Enter how many you actually received" }, 400);
+      }
+      qtyRecv = Number(body.qty_received);
+      if (qtyRecv < 0) return c.json({ error: "Received qty cannot be negative" }, 400);
+    } else if (status === "pending" || status === "not_ready" || status === "cancelled") {
+      qtyRecv = null;
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE part_pickup_ticket_lines SET
+         status = ?,
+         qty_received = ?,
+         notes = COALESCE(?, notes),
+         resolved_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+         resolved_by_user_id = CASE WHEN ? = 'pending' THEN NULL ELSE ? END
+       WHERE id = ?`
+    )
+      .bind(
+        status,
+        qtyRecv,
+        body.notes != null ? String(body.notes).trim() || null : null,
+        status,
+        status,
+        user.id,
+        lineId
+      )
+      .run();
+
+    // Optional stock receive when fully or partially picked and catalog-linked
+    if (
+      (status === "picked" || status === "partial") &&
+      body.receive_stock !== false &&
+      line.part_id &&
+      qtyRecv != null &&
+      qtyRecv > 0
+    ) {
+      try {
+        await ensureStockLocations(c.env.DB);
+        const wh = await c.env.DB.prepare(
+          `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1
+           ORDER BY sort_order, id LIMIT 1`
+        ).first<{ id: number }>();
+        if (wh) {
+          await adjustStockQty(
+            c.env.DB,
+            line.part_id,
+            wh.id,
+            qtyRecv,
+            user.id,
+            "vendor_pickup",
+            `Part pickup ticket #${line.ticket_id} · ${line.vendor_name}`
+          );
+        }
+      } catch {
+        /* non-fatal */
+      }
+    }
+
+    await refreshPartPickupTicketStatus(c.env.DB, line.ticket_id);
+
+    if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
+      const label = line.part_name || line.part_code || `Line ${lineId}`;
+      await notifyUsers(
+        c.env.DB,
+        [line.logged_by_user_id],
+        "vendor_run",
+        `${status.replace("_", " ")} · ${line.vendor_name}`,
+        `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""} — ${user.display_name}`,
+        { type: "part_pickup", id: line.ticket_id }
+      );
+    }
+
+    return c.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 035_part_pickup_tickets.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+// Legacy list still works for old data (read-only helper via part-pickups is primary)
+api.get("/inventory/vendor-runs", async (c) => {
+  // Proxy shape expected by older clients: redirect semantics via same ticket list flattened
+  try {
+    const waiting = await countPartPickupWaiting(c.env.DB);
+    const tickets = await c.env.DB.prepare(
+      `SELECT t.*, u.display_name as logged_by_name
+       FROM part_pickup_tickets t
+       LEFT JOIN users u ON u.id = t.logged_by_user_id
+       WHERE t.status IN ('open','partial')
+       ORDER BY t.id DESC LIMIT 80`
+    ).all();
+    const flat: Record<string, unknown>[] = [];
+    for (const t of tickets.results || []) {
+      const tid = Number((t as { id: number }).id);
+      const lines = await c.env.DB.prepare(
+        `SELECT * FROM part_pickup_ticket_lines WHERE ticket_id = ? ORDER BY line_no`
+      )
+        .bind(tid)
+        .all();
+      for (const l of lines.results || []) {
+        const line = l as Record<string, unknown>;
+        flat.push({
+          id: line.id,
+          status:
+            line.status === "picked"
+              ? "picked"
+              : line.status === "cancelled"
+                ? "cancelled"
+                : "waiting",
+          vendor_name: (t as { vendor_name: string }).vendor_name,
+          part_name: line.part_name || "Part TBD",
+          part_code: line.part_code,
+          qty: line.qty_requested,
+          needed_for_date: (t as { needed_for_date: string }).needed_for_date,
+          job_address: (t as { purchase_order: string }).purchase_order,
+          notes: line.notes || (t as { notes: string }).notes,
+          logged_by_name: (t as { logged_by_name: string }).logged_by_name,
+          ticket_id: tid,
+          line_status: line.status,
+        });
+      }
+    }
+    const byVendor = new Map<string, typeof flat>();
+    for (const line of flat) {
+      const key = String(line.vendor_name || "?");
+      if (!byVendor.has(key)) byVendor.set(key, []);
+      byVendor.get(key)!.push(line);
+    }
+    return c.json({
+      vendors: [...byVendor.entries()].map(([vendor_name, lines]) => ({
+        vendor_name,
+        waiting: lines.filter((l) => l.status === "waiting").length,
+        lines,
+      })),
+      vendor_names: [],
+      waiting,
+      lines: flat,
+    });
+  } catch {
+    return c.json({ vendors: [], vendor_names: [], waiting: 0, lines: [] });
+  }
+});
+
 api.patch("/inventory/pickups/:id", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
   const id = Number(c.req.param("id"));
   const body = await c.req.json<{
@@ -7083,6 +8344,481 @@ api.put(
     }
   }
 );
+
+// ——— Truck stock counts (tech fills sheet; warehouse applies to inventory) ———
+
+async function loadTruckCountSheet(db: D1Database, id: number) {
+  const count = await db
+    .prepare(
+      `SELECT c.*, v.unit_number, v.year, v.make, v.model, v.assigned_driver,
+              l.name as location_name,
+              cu.display_name as created_by_name,
+              du.display_name as counted_by_name,
+              au.display_name as applied_by_name
+       FROM truck_stock_counts c
+       JOIN vehicles v ON v.id = c.vehicle_id
+       LEFT JOIN stock_locations l ON l.id = c.location_id
+       LEFT JOIN users cu ON cu.id = c.created_by_user_id
+       LEFT JOIN users du ON du.id = c.counted_by_user_id
+       LEFT JOIN users au ON au.id = c.applied_by_user_id
+       WHERE c.id = ?`
+    )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!count) return null;
+  const lines = await db
+    .prepare(
+      `SELECT * FROM truck_stock_count_lines WHERE count_id = ?
+       ORDER BY sort_order ASC, part_name ASC`
+    )
+    .bind(id)
+    .all();
+  return { count, lines: lines.results || [] };
+}
+
+api.get("/inventory/truck-counts", async (c) => {
+  const user = c.get("user");
+  const status = (c.req.query("status") || "open").trim();
+  try {
+    let sql = `SELECT c.id, c.vehicle_id, c.location_id, c.status, c.signed_name, c.signed_at,
+        c.accuracy_confirmed, c.created_at, c.submitted_at, c.applied_at,
+        v.unit_number, v.assigned_driver,
+        (SELECT COUNT(*) FROM truck_stock_count_lines tl WHERE tl.count_id = c.id) as line_count,
+        (SELECT COUNT(*) FROM truck_stock_count_lines tl
+          WHERE tl.count_id = c.id AND tl.not_needed = 1) as not_needed_count,
+        (SELECT COUNT(*) FROM truck_stock_count_lines tl
+          WHERE tl.count_id = c.id AND tl.counted_qty IS NULL AND IFNULL(tl.not_needed,0) = 0) as blank_count,
+        cu.display_name as created_by_name,
+        du.display_name as counted_by_name
+       FROM truck_stock_counts c
+       JOIN vehicles v ON v.id = c.vehicle_id
+       LEFT JOIN users cu ON cu.id = c.created_by_user_id
+       LEFT JOIN users du ON du.id = c.counted_by_user_id
+       WHERE 1=1`;
+    const binds: unknown[] = [];
+    if (status === "active") {
+      sql += ` AND c.status IN ('open','submitted')`;
+    } else if (status && status !== "all") {
+      sql += ` AND c.status = ?`;
+      binds.push(status);
+    }
+    // Drivers only see sheets for their assigned units
+    if (user.role === "driver") {
+      const vids = await getDriverVehicleIds(c.env.DB, user);
+      if (!vids || !vids.length) {
+        return c.json({ counts: [], open: 0 });
+      }
+      const ph = vids.map(() => "?").join(",");
+      sql += ` AND c.vehicle_id IN (${ph})`;
+      binds.push(...vids);
+    }
+    sql += ` ORDER BY
+      CASE c.status WHEN 'open' THEN 0 WHEN 'submitted' THEN 1 WHEN 'applied' THEN 2 ELSE 3 END,
+      v.unit_number
+      LIMIT 200`;
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+    const openRow = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM truck_stock_counts WHERE status IN ('open','submitted')`
+    ).first<{ c: number }>();
+    return c.json({ counts: rows.results || [], open: openRow?.c ?? 0 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ counts: [], open: 0, error: "Run migration 034_truck_stock_counts.sql" });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.get("/inventory/truck-counts/:id", async (c) => {
+  const user = c.get("user");
+  const id = Number(c.req.param("id"));
+  if (!id) return c.json({ error: "Invalid id" }, 400);
+  try {
+    const sheet = await loadTruckCountSheet(c.env.DB, id);
+    if (!sheet) return c.json({ error: "Not found" }, 404);
+    if (user.role === "driver") {
+      const vids = await getDriverVehicleIds(c.env.DB, user);
+      const vid = Number(sheet.count.vehicle_id);
+      if (!vids || !vids.includes(vid)) {
+        return c.json({ error: "Not your truck" }, 403);
+      }
+    }
+    return c.json(sheet);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 034_truck_stock_counts.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/** Create count sheet(s) for one unit or all active trucks with truck-stock parts. */
+api.post("/inventory/truck-counts", async (c) => {
+  const user = c.get("user");
+  if (!["admin", "warehouse", "office"].includes(user.role)) {
+    return c.json({ error: "Only warehouse, office, or admin can open truck count sheets" }, 403);
+  }
+  const body = await c.req.json<{ vehicle_id?: number; all_active?: boolean }>().catch(() => ({}));
+  try {
+    await ensureStockLocations(c.env.DB);
+    let vehicleIds: number[] = [];
+    if (body.all_active) {
+      const rows = await c.env.DB.prepare(
+        `SELECT id FROM vehicles WHERE status = 'active' ORDER BY unit_number`
+      ).all<{ id: number }>();
+      vehicleIds = (rows.results || []).map((r) => r.id);
+    } else if (body.vehicle_id) {
+      vehicleIds = [Number(body.vehicle_id)];
+    } else {
+      return c.json({ error: "Pick a vehicle or all_active" }, 400);
+    }
+
+    const parts = await c.env.DB.prepare(
+      `SELECT id, code, name FROM parts
+       WHERE active = 1 AND IFNULL(truck_stock, 0) = 1
+       ORDER BY name LIMIT 2000`
+    ).all<{ id: number; code: string; name: string }>();
+    const partList = parts.results || [];
+    if (!partList.length) {
+      return c.json({ error: "No truck-stock parts in catalog yet. Mark parts as truck stock first." }, 400);
+    }
+
+    const created: number[] = [];
+    const skipped: string[] = [];
+
+    for (const vid of vehicleIds) {
+      const v = await c.env.DB.prepare(
+        `SELECT id, unit_number FROM vehicles WHERE id = ? AND status != 'retired'`
+      )
+        .bind(vid)
+        .first<{ id: number; unit_number: string }>();
+      if (!v) continue;
+
+      // One open sheet per truck at a time
+      const existing = await c.env.DB.prepare(
+        `SELECT id FROM truck_stock_counts WHERE vehicle_id = ? AND status IN ('open','submitted') LIMIT 1`
+      )
+        .bind(vid)
+        .first<{ id: number }>();
+      if (existing) {
+        skipped.push(v.unit_number);
+        continue;
+      }
+
+      const locId = await ensureVehicleStockLocation(c.env.DB, vid, v.unit_number, {
+        seedTruckParts: true,
+      });
+      if (!locId) {
+        skipped.push(v.unit_number);
+        continue;
+      }
+      const ins = await c.env.DB.prepare(
+        `INSERT INTO truck_stock_counts (vehicle_id, location_id, status, created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, 'open', ?, datetime('now'), datetime('now'))`
+      )
+        .bind(vid, locId, user.id)
+        .run();
+      const cid = Number(ins.meta.last_row_id);
+
+      let sort = 0;
+      for (const p of partList) {
+        const bal = await c.env.DB.prepare(
+          `SELECT qty FROM stock_balances WHERE location_id = ? AND part_id = ?`
+        )
+          .bind(locId, p.id)
+          .first<{ qty: number }>();
+        const systemQty = bal?.qty ?? 0;
+        await c.env.DB.prepare(
+          `INSERT INTO truck_stock_count_lines
+            (count_id, part_id, part_code, part_name, system_qty, counted_qty, not_needed, sort_order)
+           VALUES (?, ?, ?, ?, ?, NULL, 0, ?)`
+        )
+          .bind(cid, p.id, p.code, p.name, systemQty, sort++)
+          .run();
+      }
+      created.push(cid);
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "truck_stock_count",
+      created[0] || null,
+      `Opened ${created.length} truck count sheet(s)`
+    );
+    return c.json({ ok: true, created_ids: created, skipped_units: skipped });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 034_truck_stock_counts.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/** Save line counts (tech / office / warehouse). */
+api.put("/inventory/truck-counts/:id/lines", async (c) => {
+  const user = c.get("user");
+  const id = Number(c.req.param("id"));
+  if (!id) return c.json({ error: "Invalid id" }, 400);
+  const body = await c.req.json<{
+    lines?: Array<{
+      id: number;
+      counted_qty?: number | null;
+      not_needed?: boolean | number;
+      notes?: string | null;
+    }>;
+  }>();
+  const lines = body.lines || [];
+  if (!lines.length) return c.json({ error: "No lines to save" }, 400);
+
+  try {
+    const sheet = await c.env.DB.prepare(`SELECT * FROM truck_stock_counts WHERE id = ?`)
+      .bind(id)
+      .first<{ id: number; status: string; vehicle_id: number }>();
+    if (!sheet) return c.json({ error: "Not found" }, 404);
+    if (sheet.status !== "open" && sheet.status !== "submitted") {
+      return c.json({ error: `Sheet is ${sheet.status} — cannot edit` }, 400);
+    }
+    // submitted sheets: warehouse can still tweak before apply; techs only edit open
+    if (user.role === "driver") {
+      if (sheet.status !== "open") {
+        return c.json({ error: "Already submitted — ask warehouse to reopen if needed" }, 403);
+      }
+      const vids = await getDriverVehicleIds(c.env.DB, user);
+      if (!vids?.includes(sheet.vehicle_id)) {
+        return c.json({ error: "Not your truck" }, 403);
+      }
+    }
+
+    for (const line of lines) {
+      if (!line.id) continue;
+      const notNeeded = line.not_needed === true || line.not_needed === 1 ? 1 : 0;
+      let qty = line.counted_qty;
+      if (notNeeded) qty = 0;
+      if (qty != null && (!Number.isFinite(Number(qty)) || Number(qty) < 0)) {
+        return c.json({ error: "Counts must be 0 or more" }, 400);
+      }
+      await c.env.DB.prepare(
+        `UPDATE truck_stock_count_lines SET
+           counted_qty = ?,
+           not_needed = ?,
+           notes = COALESCE(?, notes)
+         WHERE id = ? AND count_id = ?`
+      )
+        .bind(
+          qty == null ? null : Number(qty),
+          notNeeded,
+          line.notes != null ? String(line.notes).trim() || null : null,
+          line.id,
+          id
+        )
+        .run();
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE truck_stock_counts SET
+         counted_by_user_id = COALESCE(counted_by_user_id, ?),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(user.id, id)
+      .run();
+
+    // If was submitted and warehouse edits, leave submitted; tech edit stays open
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Save failed" }, 500);
+  }
+});
+
+/** Tech / office signs and submits for warehouse. */
+api.post("/inventory/truck-counts/:id/submit", async (c) => {
+  const user = c.get("user");
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    signed_name?: string;
+    accuracy_confirmed?: boolean;
+    notes?: string | null;
+  }>();
+  const signedName = (body.signed_name || "").trim();
+  if (!signedName || signedName.length < 2) {
+    return c.json({ error: "Type your name to sign" }, 400);
+  }
+  if (!body.accuracy_confirmed) {
+    return c.json({ error: "Check the box confirming the count is accurate" }, 400);
+  }
+
+  try {
+    const sheet = await c.env.DB.prepare(`SELECT * FROM truck_stock_counts WHERE id = ?`)
+      .bind(id)
+      .first<{ id: number; status: string; vehicle_id: number }>();
+    if (!sheet) return c.json({ error: "Not found" }, 404);
+    if (sheet.status !== "open") {
+      return c.json({ error: `Already ${sheet.status}` }, 400);
+    }
+    if (user.role === "driver") {
+      const vids = await getDriverVehicleIds(c.env.DB, user);
+      if (!vids?.includes(sheet.vehicle_id)) {
+        return c.json({ error: "Not your truck" }, 403);
+      }
+    }
+
+    const blank = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM truck_stock_count_lines
+       WHERE count_id = ? AND counted_qty IS NULL AND IFNULL(not_needed,0) = 0`
+    )
+      .bind(id)
+      .first<{ c: number }>();
+    if ((blank?.c ?? 0) > 0) {
+      return c.json(
+        {
+          error: `${blank?.c} part(s) still blank — enter a count or check “Don’t need on truck”`,
+        },
+        400
+      );
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE truck_stock_counts SET
+         status = 'submitted',
+         signed_name = ?,
+         signed_at = datetime('now'),
+         accuracy_confirmed = 1,
+         counted_by_user_id = ?,
+         notes = COALESCE(?, notes),
+         submitted_at = datetime('now'),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(signedName, user.id, body.notes?.trim() || null, id)
+      .run();
+
+    const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "admin", "office"]);
+    const unit = await c.env.DB.prepare(`SELECT unit_number FROM vehicles WHERE id = ?`)
+      .bind(sheet.vehicle_id)
+      .first<{ unit_number: string }>();
+    await notifyUsers(
+      c.env.DB,
+      notifyIds.filter((uid) => uid !== user.id),
+      "truck_stock_count",
+      `Truck stock count · unit ${unit?.unit_number || sheet.vehicle_id}`,
+      `Signed by ${signedName} — ready for warehouse to apply`,
+      { type: "truck_stock_count", id }
+    );
+
+    await writeAudit(c.env.DB, user, "update", "truck_stock_count", id, `Submitted by ${signedName}`);
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Submit failed" }, 500);
+  }
+});
+
+/** Warehouse applies submitted (or open) counts into truck stock balances. */
+api.post("/inventory/truck-counts/:id/apply", async (c) => {
+  const user = c.get("user");
+  if (!["admin", "warehouse", "office"].includes(user.role)) {
+    return c.json({ error: "Only warehouse, office, or admin can apply counts" }, 403);
+  }
+  const id = Number(c.req.param("id"));
+  try {
+    const sheet = await c.env.DB.prepare(`SELECT * FROM truck_stock_counts WHERE id = ?`)
+      .bind(id)
+      .first<{
+        id: number;
+        status: string;
+        vehicle_id: number;
+        location_id: number;
+        signed_name: string | null;
+      }>();
+    if (!sheet) return c.json({ error: "Not found" }, 404);
+    if (sheet.status === "applied") return c.json({ error: "Already applied" }, 400);
+    if (sheet.status === "cancelled") return c.json({ error: "Cancelled" }, 400);
+
+    const lines = await c.env.DB.prepare(
+      `SELECT * FROM truck_stock_count_lines WHERE count_id = ?`
+    )
+      .bind(id)
+      .all<{
+        id: number;
+        part_id: number;
+        part_name: string;
+        counted_qty: number | null;
+        not_needed: number;
+      }>();
+
+    let applied = 0;
+    for (const line of lines.results || []) {
+      const notNeeded = !!line.not_needed;
+      if (line.counted_qty == null && !notNeeded) {
+        return c.json({ error: `Still blank: ${line.part_name}` }, 400);
+      }
+      const qty = notNeeded ? 0 : Number(line.counted_qty) || 0;
+      await setStockQty(
+        c.env.DB,
+        line.part_id,
+        sheet.location_id,
+        qty,
+        user.id,
+        notNeeded
+          ? `Truck count #${id}: not needed on truck`
+          : `Truck count #${id}: counted ${qty}${sheet.signed_name ? ` · signed ${sheet.signed_name}` : ""}`
+      );
+      applied++;
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE truck_stock_counts SET
+         status = 'applied',
+         applied_at = datetime('now'),
+         applied_by_user_id = ?,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(user.id, id)
+      .run();
+
+    await writeAudit(c.env.DB, user, "update", "truck_stock_count", id, `Applied ${applied} lines`);
+    return c.json({ ok: true, applied });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Apply failed" }, 500);
+  }
+});
+
+api.post("/inventory/truck-counts/:id/reopen", async (c) => {
+  const user = c.get("user");
+  if (!["admin", "warehouse", "office"].includes(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const id = Number(c.req.param("id"));
+  try {
+    const sheet = await c.env.DB.prepare(`SELECT status FROM truck_stock_counts WHERE id = ?`)
+      .bind(id)
+      .first<{ status: string }>();
+    if (!sheet) return c.json({ error: "Not found" }, 404);
+    if (sheet.status === "applied") {
+      return c.json({ error: "Already applied — open a new count sheet instead" }, 400);
+    }
+    await c.env.DB.prepare(
+      `UPDATE truck_stock_counts SET
+         status = 'open',
+         signed_name = NULL,
+         signed_at = NULL,
+         accuracy_confirmed = 0,
+         submitted_at = NULL,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(id)
+      .run();
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Reopen failed" }, 500);
+  }
+});
 
 /**
  * Combined low-stock: warehouse orders + truck stage list (print for pickup).

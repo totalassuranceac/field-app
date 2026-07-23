@@ -13,6 +13,8 @@ export interface Vehicle {
   status: string;
   current_odometer: number | null;
   assigned_driver: string | null;
+  assigned_employee_id?: number | null;
+  helper_employee_id?: number | null;
   phone: string | null;
   insurance_card: string | null;
   dash_cam_status: string;
@@ -24,6 +26,12 @@ export interface Vehicle {
   gps_status: string | null;
   modifications: string | null;
   notes: string | null;
+}
+
+interface EmployeeOpt {
+  id: number;
+  name: string;
+  rides_with_employee_id?: number | null;
 }
 
 const emptyForm = {
@@ -92,10 +100,17 @@ function Field({
 export function VehiclesPage() {
   const { user } = useAuth();
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOpt[]>([]);
   const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<Vehicle | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [assignVehicle, setAssignVehicle] = useState<Vehicle | null>(null);
+  const [assignEmpId, setAssignEmpId] = useState("");
+  const [assignHelperId, setAssignHelperId] = useState("");
+  const [assignNote, setAssignNote] = useState("");
+  const [assignBusy, setAssignBusy] = useState(false);
 
   async function load() {
     const data = await api<{ vehicles: Vehicle[] }>("/vehicles");
@@ -105,6 +120,57 @@ export function VehiclesPage() {
   useEffect(() => {
     load().catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    if (!can(user, "manageVehicles")) return;
+    api<{ employees: EmployeeOpt[] }>("/employees")
+      .then((d) => setEmployees(d.employees || []))
+      .catch(() => setEmployees([]));
+  }, [user]);
+
+  function openAssign(v: Vehicle) {
+    setAssignVehicle(v);
+    setAssignEmpId(v.assigned_employee_id ? String(v.assigned_employee_id) : "");
+    setAssignHelperId(v.helper_employee_id ? String(v.helper_employee_id) : "");
+    setAssignNote("");
+    setError("");
+    setOk("");
+  }
+
+  async function submitAssign(e: FormEvent) {
+    e.preventDefault();
+    if (!assignVehicle) return;
+    setAssignBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const clear = !assignEmpId;
+      await api(`/vehicles/${assignVehicle.id}/assign`, {
+        method: "POST",
+        body: JSON.stringify({
+          clear,
+          employee_id: clear ? null : Number(assignEmpId),
+          helper_employee_id: assignHelperId ? Number(assignHelperId) : null,
+          note: assignNote.trim() || null,
+        }),
+      });
+      setOk(
+        clear
+          ? `Cleared assignment on unit ${assignVehicle.unit_number}`
+          : `Unit ${assignVehicle.unit_number} reassigned — map will track this unit for that crew`
+      );
+      setAssignVehicle(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Assign failed");
+    } finally {
+      setAssignBusy(false);
+    }
+  }
+
+  const helpersForAssign = employees.filter(
+    (e) => !assignEmpId || e.id !== Number(assignEmpId)
+  );
 
   function openCreate() {
     setEdit(null);
@@ -176,7 +242,10 @@ export function VehiclesPage() {
       <div className="page-header">
         <div>
           <h1>Vehicles</h1>
-          <p>Fleet registry, dash cams, and equipment notes</p>
+          <p>
+            Fleet registry and equipment. Use <strong>Assign</strong> when a tech moves to another
+            unit so live map and their app follow the right truck.
+          </p>
         </div>
         {canEdit && (
           <button className="btn no-print" onClick={openCreate}>
@@ -185,6 +254,7 @@ export function VehiclesPage() {
         )}
       </div>
       {error && <div className="error">{error}</div>}
+      {ok && <div className="success">{ok}</div>}
 
       {/* Desktop / wide: compact table */}
       <div className="card vehicles-wide">
@@ -250,11 +320,16 @@ export function VehiclesPage() {
                         <div className="muted vehicles-sub">card: {v.insurance_card}</div>
                       )}
                     </td>
-                    <td className="no-print">
+                    <td className="no-print vehicles-actions">
                       {canEdit && (
-                        <button className="btn secondary btn-sm" onClick={() => openEdit(v)}>
-                          Edit
-                        </button>
+                        <>
+                          <button className="btn secondary btn-sm" onClick={() => openAssign(v)}>
+                            Assign
+                          </button>
+                          <button className="btn ghost btn-sm" onClick={() => openEdit(v)}>
+                            Edit
+                          </button>
+                        </>
                       )}
                     </td>
                   </tr>
@@ -283,17 +358,18 @@ export function VehiclesPage() {
                   </div>
                 </div>
                 {canEdit && (
-                  <button
-                    type="button"
-                    className="btn secondary btn-sm no-print"
-                    onClick={() => openEdit(v)}
-                  >
-                    Edit
-                  </button>
+                  <div className="vehicle-card-actions no-print">
+                    <button type="button" className="btn secondary btn-sm" onClick={() => openAssign(v)}>
+                      Assign
+                    </button>
+                    <button type="button" className="btn ghost btn-sm" onClick={() => openEdit(v)}>
+                      Edit
+                    </button>
+                  </div>
                 )}
               </div>
               <dl className="vehicle-fields">
-                <Field label="Driver">
+                <Field label="Driver / crew">
                   {v.assigned_driver || "—"}
                   {v.phone ? (
                     <>
@@ -348,6 +424,65 @@ export function VehiclesPage() {
       </ul>
       {!vehicles.length && (
         <div className="card empty">No vehicles yet.</div>
+      )}
+
+      {assignVehicle && (
+        <div className="modal-backdrop" onClick={() => setAssignVehicle(null)}>
+          <div className="modal vehicle-assign-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Assign unit {assignVehicle.unit_number}</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Put a tech (and helper if they ride together) on this truck. They are cleared off any
+              other unit so live map search and their fuel/checks follow this GPS unit.
+            </p>
+            <form className="form" onSubmit={submitAssign}>
+              <label>
+                Tech / primary driver
+                <select value={assignEmpId} onChange={(e) => setAssignEmpId(e.target.value)}>
+                  <option value="">— Unassigned —</option>
+                  {employees.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                      {e.rides_with_employee_id
+                        ? ` (rides with #${e.rides_with_employee_id})`
+                        : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Helper (optional)
+                <select
+                  value={assignHelperId}
+                  onChange={(e) => setAssignHelperId(e.target.value)}
+                  disabled={!assignEmpId}
+                >
+                  <option value="">— None / auto from crew link —</option>
+                  {helpersForAssign.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Note (optional)
+                <input
+                  value={assignNote}
+                  onChange={(e) => setAssignNote(e.target.value)}
+                  placeholder="e.g. Unit 12 in shop — temp on 08"
+                />
+              </label>
+              <div className="modal-actions">
+                <button type="button" className="btn secondary" onClick={() => setAssignVehicle(null)}>
+                  Cancel
+                </button>
+                <button className="btn" type="submit" disabled={assignBusy}>
+                  {assignBusy ? "Saving…" : assignEmpId ? "Assign to this unit" : "Clear assignment"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {showForm && (

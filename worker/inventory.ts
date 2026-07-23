@@ -1221,6 +1221,7 @@ export async function lowStockReport(db: D1Database): Promise<{
     part_id: number;
     code: string;
     name: string;
+    image_url: string | null;
     location_id: number;
     location_name: string;
     unit_number: string | null;
@@ -1234,7 +1235,7 @@ export async function lowStockReport(db: D1Database): Promise<{
   const rows = await db
     .prepare(
       `SELECT
-         p.id as part_id, p.code, p.name, p.min_qty as part_min, p.max_qty as part_max,
+         p.id as part_id, p.code, p.name, p.image_url, p.min_qty as part_min, p.max_qty as part_max,
          p.truck_stock,
          l.id as location_id, l.type as location_type, l.name as location_name,
          v.unit_number,
@@ -1253,6 +1254,7 @@ export async function lowStockReport(db: D1Database): Promise<{
       part_id: number;
       code: string;
       name: string;
+      image_url: string | null;
       part_min: number | null;
       part_max: number | null;
       truck_stock: number;
@@ -1294,6 +1296,7 @@ export async function lowStockReport(db: D1Database): Promise<{
         part_id: r.part_id,
         code: r.code,
         name: r.name,
+        image_url: r.image_url || null,
         location_id: r.location_id,
         location_name: r.location_name,
         unit_number: r.unit_number,

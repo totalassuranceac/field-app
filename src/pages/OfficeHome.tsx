@@ -27,6 +27,7 @@ export function OfficeHome() {
   const [loading, setLoading] = useState(true);
 
   const [warranties, setWarranties] = useState(0);
+  const [vendorWaiting, setVendorWaiting] = useState(0);
   const [handbookPending, setHandbookPending] = useState(false);
 
   function load() {
@@ -38,12 +39,16 @@ export function OfficeHome() {
       api<{ warranties?: unknown[] }>("/warranties?status=open").catch(() => ({
         warranties: [],
       })),
+      api<{ waiting?: number }>("/inventory/vendor-runs/count").catch(() => ({
+        waiting: 0,
+      })),
       api<{ pending?: boolean }>("/handbook").catch(() => ({ pending: false })),
     ])
-      .then(([iss, n, w, h]) => {
+      .then(([iss, n, w, vr, h]) => {
         setIssues(iss.issues || []);
         setUnread(n.unread || 0);
         setWarranties((w.warranties || []).length);
+        setVendorWaiting(vr.waiting || 0);
         setHandbookPending(!!h.pending);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load"))
@@ -130,6 +135,19 @@ export function OfficeHome() {
           <span>
             <strong>Inventory</strong>
             <span className="office-action-hint">View stock &amp; trucks</span>
+          </span>
+        </Link>
+        <Link to="/part-pickup" className="office-action">
+          <span className="office-action-icon" aria-hidden>
+            🏪
+          </span>
+          <span>
+            <strong>Part pickup</strong>
+            <span className="office-action-hint">
+              {vendorWaiting
+                ? `${vendorWaiting} waiting for warehouse pickup`
+                : "Log parts ready at supply houses"}
+            </span>
           </span>
         </Link>
         {unread > 0 && (

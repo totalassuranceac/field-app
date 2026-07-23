@@ -103,7 +103,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     steps: [
       "Open Notifications from the menu (or the inbox icon).",
       "Unread items are highlighted — open one to go to the related screen (for example handbook).",
-      "Use Messages for team chat / notes when you need to leave a written trail.",
+      "Use Messages for team chat: start a conversation with a subject, reply in the same thread, and tap 👍 when you got it.",
+      "A chat bubble and sound appear when a new message arrives (toggle sound with the small bell bottom-right).",
     ],
   },
   {
@@ -244,6 +245,44 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Pull and stage the parts; note shortages if something is not available.",
       "Mark ready / complete according to the buttons on the request.",
       "Tech or office sees status updates on their side.",
+    ],
+  },
+  {
+    id: "wh-truck-count",
+    title: "Truck stock count (first baseline)",
+    summary:
+      "Techs count what is on their truck; check “don’t need” for parts they skip; sign; warehouse applies to inventory.",
+    roles: ["everyone"],
+    path: "/truck-stock",
+    steps: [
+      "Warehouse or office: open Truck stock count → open a sheet for one unit or all active trucks.",
+      "Tech: open your unit’s sheet, type a count for each part.",
+      "Check “Skip / don’t need” if you have no room or won’t use that part on this truck.",
+      "Confirm accuracy, type your name to sign, Submit.",
+      "Warehouse: open submitted sheets → Apply to truck stock (updates inventory for replenishment).",
+    ],
+    tips: [
+      "Only catalog parts marked as truck stock appear on the sheet.",
+      "Office can fill or sign for a tech if needed.",
+    ],
+  },
+  {
+    id: "wh-vendor-runs",
+    title: "Part pickup — parts ready at the supply house",
+    summary:
+      "When a vendor calls (office or tech), put parts on the pickup list so warehouse can pick by vendor before EOD.",
+    roles: ["everyone"],
+    path: "/part-pickup",
+    steps: [
+      "Open Part pickup from the menu (or Inventory → Part pickup).",
+      "Log vendor name, part, qty, needed-for date (usually tomorrow), and job address if known.",
+      "Anyone can log it — office after a vendor call, or a tech if the vendor called them.",
+      "Warehouse opens the same list grouped by vendor and checks off each line when picked up.",
+      "Marking picked receives catalog parts into warehouse stock when linked to the catalog.",
+    ],
+    tips: [
+      "This list lives in Field App first — ServiceTitan job # is optional free text for now.",
+      "Tech handoff from warehouse to truck is still Inventory → Pickup / custody.",
     ],
   },
   {

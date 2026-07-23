@@ -93,6 +93,24 @@ function isValidCoord(lat: unknown, lng: unknown): lat is number {
   );
 }
 
+/** Open phone Maps / Google Maps with turn-by-turn to these coordinates. */
+function openMapsToCoords(lat: number, lng: number, label?: string | null) {
+  const dest = `${lat},${lng}`;
+  const name = (label || "").trim();
+  // Google Maps directions — opens app on most phones, browser on desktop
+  const gmaps = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}${
+    name ? `&destination_place_id=&travelmode=driving` : "&travelmode=driving"
+  }`;
+  // Prefer native map handlers when available (iOS Safari / Android)
+  const isApple = /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent);
+  const url = isApple
+    ? `https://maps.apple.com/?daddr=${encodeURIComponent(dest)}${
+        name ? `&q=${encodeURIComponent(name)}` : ""
+      }`
+    : gmaps;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 function ensureLeaflet(): Promise<LType> {
   return new Promise((resolve, reject) => {
     const w = window as Window & { L?: LType };
@@ -198,6 +216,9 @@ export function LiveMapPage() {
         });
 
         const marker = L.marker([p.lat, p.lng], { icon });
+        const title = p.unit_number
+          ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
+          : p.driver_name || p.name || "Vehicle";
         marker.bindPopup(
           `<div class="fleet-popup">
             <strong>${escapeHtml(p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle")}</strong><br/>
@@ -206,10 +227,15 @@ export function LiveMapPage() {
             ${p.address ? `${escapeHtml(p.address)}<br/>` : ""}
             Speed: ${p.speed_mph != null ? `${Math.round(Number(p.speed_mph))} mph` : "—"} ·
             ${escapeHtml(p.status || "—")}<br/>
-            Updated: ${escapeHtml(formatTime(p.last_update))}
+            Updated: ${escapeHtml(formatTime(p.last_update))}<br/>
+            <span class="muted" style="font-size:0.8rem">Tap Navigate to open Maps</span>
           </div>`
         );
-        marker.on("click", () => setSelectedId(p.id));
+        marker.on("click", () => {
+          setSelectedId(p.id);
+          // Click pin → open phone Maps to drive to this tech
+          openMapsToCoords(p.lat, p.lng, title);
+        });
         marker.addTo(layer);
         bounds.push([p.lat, p.lng]);
       }
@@ -341,13 +367,19 @@ export function LiveMapPage() {
     return () => window.clearInterval(id);
   }, [mapReady, loadPositions]);
 
-  function focusPosition(p: LivePosition) {
+  function focusPosition(p: LivePosition, openMaps = false) {
     if (!isValidCoord(p.lat, p.lng)) return;
     setSelectedId(p.id);
     try {
       mapRef.current?.setView([p.lat, p.lng], 15);
     } catch {
       /* ignore */
+    }
+    if (openMaps) {
+      const title = p.unit_number
+        ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
+        : p.driver_name || p.name || "Vehicle";
+      openMapsToCoords(p.lat, p.lng, title);
     }
   }
 
@@ -501,8 +533,8 @@ export function LiveMapPage() {
                   {sorted.length === 0
                     ? `No unit matching “${techSearch.trim()}”`
                     : sorted.length === 1
-                      ? `Showing 1 unit for “${techSearch.trim()}”`
-                      : `Showing ${sorted.length} units matching “${techSearch.trim()}”`}
+                      ? `Showing 1 unit for “${techSearch.trim()}” · tap pin or row to open Maps`
+                      : `Showing ${sorted.length} units matching “${techSearch.trim()}” · tap one to open Maps`}
                 </p>
               )}
             </div>
@@ -519,6 +551,9 @@ export function LiveMapPage() {
               </span>
             ) : null}
           </h2>
+          <p className="muted live-list-nav-hint no-print">
+            Tap a tech or pin to zoom and open Maps with directions to their GPS.
+          </p>
           {!sorted.length && !loading && (
             <div className="empty">
               {error
@@ -534,7 +569,7 @@ export function LiveMapPage() {
                 <button
                   type="button"
                   className={`live-vehicle-row ${selectedId === p.id ? "selected" : ""}`}
-                  onClick={() => focusPosition(p)}
+                  onClick={() => focusPosition(p, true)}
                 >
                   <div className="live-vehicle-top">
                     <strong>
@@ -555,6 +590,7 @@ export function LiveMapPage() {
                       {p.address}
                     </div>
                   )}
+                  <div className="live-vehicle-nav-cue">Open in Maps →</div>
                 </button>
               </li>
             ))}

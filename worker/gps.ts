@@ -256,7 +256,8 @@ async function fetchOneStepPositions(
         id: `onestep:${d.device_id}`,
         provider: "onestep",
         name: d.display_name,
-        driver_name: d.display_name,
+        // Prefer assigned tech name so map search finds the person on this unit
+        driver_name: matched?.assigned_driver || d.display_name,
         lat: pt.lat,
         lng: pt.lng,
         speed_mph: pt.speed != null ? Number(pt.speed) : null,
@@ -450,7 +451,7 @@ async function fetchVerizonPositions(
         id: `verizon:${p.id}`,
         provider: "verizon",
         name: label,
-        driver_name: p.dnme || null,
+        driver_name: matched?.assigned_driver || p.dnme || null,
         lat,
         lng,
         speed_mph: p.spd != null ? Number(p.spd) : null,
