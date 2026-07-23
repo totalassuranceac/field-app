@@ -143,18 +143,35 @@ export function LiveMapPage() {
   const [loading, setLoading] = useState(true);
   const [mapReady, setMapReady] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  const [techSearch, setTechSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   filterRef.current = filter;
 
   const filtered = useMemo(() => {
     const positions = Array.isArray(data?.positions) ? data!.positions : [];
+    const q = techSearch.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, "");
     return positions.filter((p) => {
       if (!isValidCoord(p.lat, p.lng)) return false;
-      if (filter === "all") return true;
-      return p.provider === filter;
+      if (filter !== "all" && p.provider !== filter) return false;
+      if (!q) return true;
+      const driver = (p.driver_name || "").toLowerCase();
+      const unit = (p.unit_number || "").toLowerCase();
+      const unitDigits = unit.replace(/\D/g, "");
+      const name = (p.name || "").toLowerCase();
+      const plate = (p.plate || "").toLowerCase();
+      // Tech name is primary; unit # / plate also work
+      if (driver.includes(q)) return true;
+      if (name.includes(q)) return true;
+      if (unit.includes(q) || (qDigits && unitDigits.includes(qDigits))) return true;
+      if (plate.includes(q)) return true;
+      // First/last token match: "juan" → Juan Perez
+      const tokens = driver.split(/[\s,./]+/).filter(Boolean);
+      if (tokens.some((t) => t.startsWith(q) || q.startsWith(t))) return true;
+      return false;
     });
-  }, [data, filter]);
+  }, [data, filter, techSearch]);
 
   const syncMarkers = useCallback((positions: LivePosition[]) => {
     const L = LRef.current;
@@ -234,12 +251,10 @@ export function LiveMapPage() {
         };
         setData(normalized);
 
-        const f = filterRef.current;
-        const list = normalized.positions.filter((p) => {
-          if (!isValidCoord(p.lat, p.lng)) return false;
-          return f === "all" || p.provider === f;
-        });
-        if (mapRef.current) syncMarkers(list);
+        // Markers re-sync via filter/techSearch effect once data lands
+        if (mapRef.current) {
+          /* effect handles filtered markers */
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load GPS positions");
       } finally {
@@ -311,11 +326,11 @@ export function LiveMapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- init once
   }, []);
 
-  // Re-draw markers when filter changes (data already loaded)
+  // Re-draw markers when filter / tech search / data changes
   useEffect(() => {
     if (!mapReady || !data) return;
     syncMarkers(filtered);
-  }, [filter, mapReady]); // intentionally not filtered/data every paint
+  }, [filter, techSearch, mapReady, data, filtered, syncMarkers]);
 
   // Always auto-refresh every 30s
   useEffect(() => {
@@ -357,52 +372,64 @@ export function LiveMapPage() {
         </div>
       </div>
 
-      <div className="filters no-print">
-        {(
-          [
-            ["all", `All (${data?.positions?.length ?? 0})`],
-            ["onestep", `OneStep (${os?.count ?? 0})`],
-            ["verizon", `Verizon (${vz?.count ?? 0})`],
-          ] as const
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            type="button"
-            className={`chip ${filter === k ? "active" : ""}`}
-            onClick={() => setFilter(k)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <div className="live-status-bar card" style={{ marginBottom: "0.75rem" }}>
-        <div className="live-status-item">
+      {/* Default = all units. Tap OneStep or Verizon to filter; tap again to show all. */}
+      <div className="live-status-bar card no-print" style={{ marginBottom: "0.75rem" }}>
+        <button
+          type="button"
+          className={`live-status-item live-provider-toggle${
+            filter === "onestep" ? " is-active" : ""
+          }`}
+          onClick={() => setFilter((f) => (f === "onestep" ? "all" : "onestep"))}
+          aria-pressed={filter === "onestep"}
+          title={
+            filter === "onestep"
+              ? "Showing OneStep only — tap again for all"
+              : "Show only OneStep GPS"
+          }
+        >
           <strong>OneStep</strong>{" "}
           {!os ? (
             <span className="badge">…</span>
           ) : !os.configured ? (
             <span className="badge warning">not configured</span>
           ) : os.ok ? (
-            <span className="badge ok">{os.count} units</span>
+            <span className={`badge ${filter === "onestep" || filter === "all" ? "ok" : ""}`}>
+              {os.count} units
+            </span>
           ) : (
             <span className="badge danger">error</span>
           )}
-        </div>
-        <div className="live-status-item">
+        </button>
+        <button
+          type="button"
+          className={`live-status-item live-provider-toggle${
+            filter === "verizon" ? " is-active" : ""
+          }`}
+          onClick={() => setFilter((f) => (f === "verizon" ? "all" : "verizon"))}
+          aria-pressed={filter === "verizon"}
+          title={
+            filter === "verizon"
+              ? "Showing Verizon only — tap again for all"
+              : "Show only Verizon GPS"
+          }
+        >
           <strong>Verizon</strong>{" "}
           {!vz ? (
             <span className="badge">…</span>
           ) : !vz.configured ? (
             <span className="badge warning">not configured</span>
           ) : vz.ok ? (
-            <span className="badge ok">{vz.count} units</span>
+            <span className={`badge ${filter === "verizon" || filter === "all" ? "ok" : ""}`}>
+              {vz.count} units
+            </span>
           ) : (
             <span className="badge danger">error</span>
           )}
-        </div>
+        </button>
         {data?.fetched_at && (
-          <div className="muted" style={{ marginLeft: "auto", fontSize: "0.85rem" }}>
+          <div className="muted live-status-updated">
+            {filter === "all" ? "All GPS" : filter === "onestep" ? "OneStep only" : "Verizon only"}
+            {" · "}
             Updated {formatTime(data.fetched_at)}
           </div>
         )}
@@ -426,25 +453,79 @@ export function LiveMapPage() {
       )}
 
       <div className="live-layout">
-        <div className="live-map-wrap card">
-          {(loading || !mapReady) && !mapError && (
-            <div className="live-map-overlay">
-              {loading ? "Loading GPS positions (first load can take ~15s)…" : "Starting map…"}
+        <div className="live-map-column">
+          {/* Map + search in one card so the bar sits flush under the map */}
+          <div className="live-map-block card">
+            <div className="live-map-wrap">
+              {(loading || !mapReady) && !mapError && (
+                <div className="live-map-overlay">
+                  {loading ? "Loading GPS positions (first load can take ~15s)…" : "Starting map…"}
+                </div>
+              )}
+              {mapError && (
+                <div className="live-map-overlay" style={{ color: "var(--danger)" }}>
+                  {mapError}
+                </div>
+              )}
+              <div
+                ref={mapDivRef}
+                className="live-map"
+                role="application"
+                aria-label="Fleet live map"
+              />
             </div>
-          )}
-          {mapError && (
-            <div className="live-map-overlay" style={{ color: "var(--danger)" }}>
-              {mapError}
+            <div className="live-tech-search-bar no-print">
+              <label className="live-tech-search">
+                <span className="sr-only">Find tech by name</span>
+                <input
+                  type="search"
+                  value={techSearch}
+                  onChange={(e) => setTechSearch(e.target.value)}
+                  placeholder="Find tech by name…"
+                  autoComplete="off"
+                  enterKeyHint="search"
+                />
+                {techSearch.trim() && (
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    onClick={() => setTechSearch("")}
+                    aria-label="Clear search"
+                  >
+                    ✕
+                  </button>
+                )}
+              </label>
+              {techSearch.trim() && (
+                <p className="muted live-search-hint">
+                  {sorted.length === 0
+                    ? `No unit matching “${techSearch.trim()}”`
+                    : sorted.length === 1
+                      ? `Showing 1 unit for “${techSearch.trim()}”`
+                      : `Showing ${sorted.length} units matching “${techSearch.trim()}”`}
+                </p>
+              )}
             </div>
-          )}
-          <div ref={mapDivRef} className="live-map" role="application" aria-label="Fleet live map" />
+          </div>
         </div>
 
         <div className="live-list card">
-          <h2>Vehicles ({sorted.length})</h2>
+          <h2>
+            Vehicles ({sorted.length})
+            {techSearch.trim() ? (
+              <span className="muted" style={{ fontWeight: 500, fontSize: "0.85rem" }}>
+                {" "}
+                · filtered
+              </span>
+            ) : null}
+          </h2>
           {!sorted.length && !loading && (
             <div className="empty">
-              {error ? "Could not load positions." : "No vehicles with GPS for this filter."}
+              {error
+                ? "Could not load positions."
+                : techSearch.trim()
+                  ? "No tech / unit matches that search."
+                  : "No vehicles with GPS for this filter."}
             </div>
           )}
           <ul className="live-vehicle-list">
@@ -463,8 +544,8 @@ export function LiveMapPage() {
                       {providerLabel(p.provider)}
                     </span>
                   </div>
-                  <div className="muted" style={{ fontSize: "0.85rem" }}>
-                    {p.driver_name || p.name || "—"}
+                  <div className="live-vehicle-driver">
+                    {p.driver_name || "Unassigned"}
                     {typeof p.speed_mph === "number" && p.speed_mph > 0
                       ? ` · ${Math.round(p.speed_mph)} mph`
                       : " · stopped"}

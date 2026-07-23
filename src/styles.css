@@ -2669,14 +2669,35 @@ tr.row-dup td {
   color: var(--ink);
 }
 
+/*
+ * People page: thin Employees rail | wide Users table.
+ * Names are short — left stays narrow so Role/Phone/Email don't wrap mid-word.
+ */
 .admin-people-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  /* Fixed-ish narrow left (~15–17rem), rest of row for users */
+  grid-template-columns: minmax(13.5rem, 16.5rem) minmax(0, 1fr);
   gap: 0.75rem;
   align-items: start;
+  width: 100%;
 }
 
-@media (max-width: 900px) {
+.admin-people-grid > :first-child {
+  min-width: 0;
+}
+
+.admin-people-grid > :last-child:not(:only-child) {
+  min-width: 0;
+  /* Users card uses remaining width fully */
+  max-width: none;
+}
+
+.admin-people-grid > :only-child {
+  grid-column: 1 / -1;
+  max-width: none;
+}
+
+@media (max-width: 960px) {
   .admin-people-grid {
     grid-template-columns: 1fr;
   }
@@ -2691,6 +2712,90 @@ tr.row-dup td {
   margin: 0 0 0.55rem;
   font-size: 0.78rem;
   line-height: 1.35;
+}
+
+/* Duplicate person confirmation when adding employees / users */
+.admin-match-panel {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 12px;
+  border: 1.5px solid color-mix(in srgb, #f59e0b 55%, var(--border, var(--line)));
+  background: color-mix(in srgb, #f59e0b 10%, var(--bg-elevated, var(--card)));
+}
+
+.admin-match-panel h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.admin-match-panel > p {
+  margin: 0 0 0.55rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.admin-match-group-label {
+  margin: 0.5rem 0 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-match-list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.admin-match-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid var(--border, var(--line));
+  background: var(--bg-elevated, var(--card));
+}
+
+.admin-match-main {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+
+.admin-match-why {
+  font-size: 0.72rem;
+  margin-top: 0.15rem;
+}
+
+.admin-match-hint {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.admin-match-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.admin-match-actions .btn {
+  min-height: 36px;
+  font-size: 0.82rem;
+}
+
+.admin-match-list .btn {
+  min-height: 34px;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  flex-shrink: 0;
 }
 
 .admin-compact-form {
@@ -2709,15 +2814,16 @@ tr.row-dup td {
   padding: 0.35rem 0.5rem;
 }
 
+/* Create-user form: stack fields on narrow; two-up only when roomy */
 .form-row-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 0.45rem;
 }
 
-@media (max-width: 520px) {
-  .form-row-2 {
-    grid-template-columns: 1fr;
+@media (min-width: 640px) {
+  .admin-card .form-row-2 {
+    grid-template-columns: 1fr 1fr;
   }
 }
 
@@ -2777,57 +2883,208 @@ tr.row-dup td {
   font-weight: 600;
 }
 
+.emp-account-name-btn {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.15rem 0.2rem;
+  margin: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.emp-account-name-btn:hover {
+  background: color-mix(in srgb, var(--brand, #3b82f6) 12%, transparent);
+}
+
+.emp-account-name-btn:hover .emp-account-name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.emp-account-row.is-selected {
+  background: color-mix(in srgb, var(--brand, #3b82f6) 10%, transparent);
+  border-radius: 8px;
+}
+
+.emp-account-role {
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .emp-account-phone {
   font-size: 0.75rem;
   white-space: nowrap;
 }
 
-/* Users table: no clipped columns */
-.admin-users-table {
-  overflow-x: auto;
-  max-width: 100%;
-  -webkit-overflow-scrolling: touch;
+/* Click-to-edit employee panel */
+.emp-edit-panel {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.8rem;
+  border-radius: 12px;
+  border: 1.5px solid color-mix(in srgb, var(--brand, #3b82f6) 40%, var(--border, var(--line)));
+  background: color-mix(in srgb, var(--brand, #3b82f6) 8%, var(--bg-elevated, var(--card)));
+}
+
+.emp-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.emp-edit-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.emp-edit-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.emp-edit-check input {
+  width: auto;
+  min-height: 0;
+}
+
+.emp-edit-create-login {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.emp-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
   margin-top: 0.35rem;
+}
+
+/* Employee list rows: button fills the name column */
+.emp-account-row {
+  grid-template-columns: 0.7rem minmax(0, 1fr);
+  align-items: center;
+}
+
+/* —— Users roster: table when wide, dense cards when narrow —— */
+.admin-users-list {
+  margin-top: 0.5rem;
+  width: 100%;
+}
+
+/* Compact readable table (desktop / tablet landscape) */
+.admin-users-wide {
+  display: none;
+}
+
+.admin-users-table {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .admin-users-table table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
-  table-layout: auto;
+  font-size: 0.86rem;
+  /* fixed layout + col widths so short labels never wrap to "Offi / ce" */
+  table-layout: fixed;
 }
 
 .admin-users-table th,
 .admin-users-table td {
-  padding: 0.4rem 0.45rem;
+  padding: 0.45rem 0.5rem;
   border-bottom: 1px solid var(--line);
-  vertical-align: top;
+  vertical-align: middle;
   text-align: left;
-  white-space: normal;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  max-width: 12rem;
 }
 
 .admin-users-table th {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
   color: var(--muted);
-  font-weight: 700;
+  font-weight: 750;
   white-space: nowrap;
 }
 
-.admin-cell-name,
-.admin-cell-login {
-  display: inline-block;
-  max-width: 100%;
-  word-break: break-word;
+/* Column budget: short fields get enough for full words; login/email flexes */
+.admin-users-table col.c-name {
+  width: 14%;
+}
+.admin-users-table col.c-login {
+  width: 26%;
+}
+.admin-users-table col.c-phone {
+  width: 12%;
+}
+.admin-users-table col.c-role {
+  width: 9%;
+}
+.admin-users-table col.c-mgr {
+  width: 12%;
+}
+.admin-users-table col.c-emp {
+  width: 17%;
+}
+.admin-users-table col.c-act {
+  width: 10%;
 }
 
-.admin-cell-email {
-  font-size: 0.72rem;
-  word-break: break-all;
+.admin-users-table .admin-login-cell {
+  min-width: 0;
+}
+
+.admin-users-table .admin-cell-name {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.admin-users-table .admin-login-cell strong {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Email under login — full readable line, ellipsis only if still tight */
+.admin-users-table .admin-cell-email {
+  display: block;
+  margin-top: 0.12rem;
+  font-size: 0.78rem;
+  color: var(--brand, var(--info));
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Never split "Office" / "Field" / "Mechanic" across lines */
+.admin-users-table .admin-cell-role,
+.admin-users-table .admin-cell-mgr,
+.admin-users-table .admin-cell-phone,
+.admin-users-table td.admin-cell-nowrap {
+  white-space: nowrap;
 }
 
 .admin-cell-phone {
@@ -2835,10 +3092,551 @@ tr.row-dup td {
   font-variant-numeric: tabular-nums;
 }
 
-.admin-user-actions {
+.admin-cell-hint {
+  font-size: 0.72rem;
+  margin-top: 0.1rem;
+}
+
+.admin-users-table .admin-link-select {
+  width: 100%;
+  max-width: 100%;
+  min-height: 34px;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.35rem;
+  border-radius: 8px;
+}
+
+/* Compact employee rail */
+.admin-people-grid > .admin-card:first-child:not(:only-child) {
+  padding: 0.75rem 0.7rem;
+}
+
+.admin-people-grid > .admin-card:first-child:not(:only-child) .admin-compact-form {
+  gap: 0.35rem;
+}
+
+.admin-people-grid > .admin-card:first-child:not(:only-child) .emp-account-list {
+  max-height: min(70vh, 36rem);
+  overflow: auto;
+}
+
+.admin-people-grid > .admin-card:first-child:not(:only-child) .emp-account-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Narrow: card stack with 2-column field pairs */
+.admin-users-narrow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.admin-user-card {
+  border: 1px solid var(--border, var(--line));
+  border-radius: 12px;
+  padding: 0.65rem 0.75rem;
+  background: var(--bg-elevated, var(--card));
+  display: grid;
+  gap: 0.5rem;
+}
+
+.admin-user-card.is-off {
+  opacity: 0.62;
+}
+
+.admin-user-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.admin-user-card-title {
+  min-width: 0;
+  flex: 1 1 8rem;
+}
+
+.admin-user-card-name {
+  font-size: 1rem;
+  font-weight: 750;
+  line-height: 1.25;
+  display: block;
+}
+
+.admin-user-card-badges {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
+  margin-top: 0.2rem;
+}
+
+.admin-user-fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem 0.65rem;
+}
+
+.admin-user-field {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.admin-user-field-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-user-field dt {
+  margin: 0;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-user-field dd {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.admin-user-card-email {
+  color: var(--brand, var(--info));
+  text-decoration: none;
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.admin-link-select {
+  width: 100%;
+  min-height: 38px;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 10px;
+  max-width: 100%;
+}
+
+.admin-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+/* ≥900px: table uses the width; hide tall cards */
+@media (min-width: 900px) {
+  .admin-users-wide {
+    display: block;
+  }
+  .admin-users-narrow {
+    display: none;
+  }
+}
+
+@media (max-width: 899px) {
+  .admin-users-wide {
+    display: none;
+  }
+  .admin-users-narrow {
+    display: grid;
+  }
+}
+
+/* Very narrow phone: single-column fields inside cards */
+@media (max-width: 380px) {
+  .admin-user-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ——— Mileage alerts: table on wide, cards on phone ——— */
+.alerts-page {
+  max-width: 100%;
+}
+
+.alerts-wide {
+  display: none;
+}
+
+.alerts-narrow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.alert-card {
+  border: 1px solid var(--border, var(--line));
+  border-radius: 14px;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface, var(--card));
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.alert-card.severity-critical {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.alert-card.severity-warning {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--line));
+}
+
+.alert-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.alert-card-title {
+  min-width: 0;
+  flex: 1 1 10rem;
+}
+
+.alert-unit {
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1.25;
+  display: block;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+.alert-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.alert-card-message {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+  word-break: normal;
+  hyphens: none;
+}
+
+.alert-fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem 0.75rem;
+}
+
+.alert-field {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.alert-field dt {
+  margin: 0;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.alert-field dd {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.alert-actions {
+  display: grid;
+  gap: 0.4rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.alert-note-input {
+  width: 100%;
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--input-bg, var(--bg-elevated));
+  color: var(--ink);
+  min-height: 40px;
+}
+
+.alert-action-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.alert-msg {
+  overflow-wrap: break-word;
+  word-break: normal;
+  line-height: 1.4;
+}
+
+.alert-type {
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+}
+
+@media (min-width: 900px) {
+  .alerts-wide {
+    display: block;
+  }
+  .alerts-narrow {
+    display: none;
+  }
+  .alerts-table-wrap {
+    overflow-x: auto;
+  }
+  .alerts-table {
+    min-width: 780px;
+    width: 100%;
+  }
+  .alerts-table th {
+    white-space: nowrap;
+  }
+  .alerts-table th,
+  .alerts-table td {
+    overflow-wrap: break-word;
+    word-break: normal;
+    hyphens: none;
+  }
+  .alerts-table .badge {
+    white-space: nowrap;
+  }
+  .alerts-table .alert-actions {
+    border-top: none;
+    padding-top: 0;
+    min-width: 9rem;
+  }
+}
+
+@media (max-width: 380px) {
+  .alert-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ——— Vehicles: table on wide, cards on phone ——— */
+.vehicles-page {
+  max-width: 100%;
+}
+
+.vehicles-wide {
+  display: none;
+}
+
+.vehicles-narrow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.vehicle-card {
+  border: 1px solid var(--border, var(--line));
+  border-radius: 14px;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface, var(--card));
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.vehicle-card.is-off {
+  opacity: 0.72;
+}
+
+.vehicle-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.45rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.vehicle-card-title {
+  min-width: 0;
+  flex: 1 1 10rem;
+}
+
+.vehicle-card-unit {
+  font-size: 1.1rem;
+  font-weight: 800;
+  line-height: 1.25;
+  display: block;
+  /* Never split unit numbers mid-digit */
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+.vehicle-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.vehicle-fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+}
+
+.vehicle-field {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.vehicle-field-wide {
+  grid-column: 1 / -1;
+}
+
+.vehicle-field dt {
+  margin: 0;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.vehicle-field dd {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  /* Break at spaces, not mid-word like "working" */
+  overflow-wrap: break-word;
+  word-break: normal;
+  hyphens: none;
+}
+
+.vehicle-phone {
+  color: var(--brand, var(--info));
+  text-decoration: none;
+  font-size: 0.88rem;
+}
+
+.vehicles-needs {
+  font-size: 0.82rem;
+  color: var(--danger);
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.vehicles-sub,
+.vehicles-vin {
+  font-size: 0.78rem;
+  margin-top: 0.15rem;
+}
+
+.vehicles-vin {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  word-break: break-all;
+}
+
+/* Wide screens: real table; hide cards */
+@media (min-width: 900px) {
+  .vehicles-wide {
+    display: block;
+  }
+  .vehicles-narrow {
+    display: none;
+  }
+
+  .vehicles-table-wrap {
+    overflow-x: auto;
+  }
+
+  .vehicles-table {
+    min-width: 920px;
+    width: 100%;
+  }
+
+  .vehicles-table th,
+  .vehicles-table td {
+    /* Prefer horizontal scroll over letter-by-letter wrap */
+    overflow-wrap: break-word;
+    word-break: normal;
+    hyphens: none;
+  }
+
+  .vehicles-table th {
+    white-space: nowrap;
+  }
+
+  .vehicles-table td strong {
+    white-space: nowrap;
+  }
+
+  .vehicles-table .badge {
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 380px) {
+  .vehicle-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Employee list: readable stacked rows */
+.emp-account-list {
+  max-height: none;
+}
+
+.emp-account-row {
+  grid-template-columns: 0.7rem 1fr;
+  grid-template-rows: auto auto;
+  gap: 0.15rem 0.5rem;
+  padding: 0.45rem 0.25rem;
+}
+
+.emp-account-row .emp-dot {
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.emp-account-name {
+  white-space: normal;
+  font-size: 0.92rem;
+}
+
+.emp-account-phone {
+  grid-column: 2;
+  font-size: 0.82rem;
+  white-space: nowrap;
 }
 
 .btn-sm {
@@ -2888,26 +3686,108 @@ tr.row-dup td {
   font-size: 0.9rem;
 }
 
+/* ——— Yard walk (compact) ——— */
+.yard-page-header {
+  margin-bottom: 0.55rem;
+  gap: 0.5rem;
+}
+
+.yard-page-header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.yard-page-header p {
+  margin: 0.15rem 0 0;
+  font-size: 0.82rem;
+}
+
+.yard-filters {
+  margin-bottom: 0.65rem;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.yard-search {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1 1 8rem;
+  max-width: 12rem;
+  min-width: 6.5rem;
+}
+
+.yard-search input {
+  width: 100%;
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, var(--line));
+  background: var(--input-bg, var(--bg-elevated));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.92rem;
+  min-height: 36px;
+}
+
+.yard-search-clear {
+  flex-shrink: 0;
+  min-height: 36px !important;
+  padding: 0.25rem 0.45rem !important;
+}
+
+.yard-search-hint {
+  margin: 0 0 0.45rem !important;
+  font-size: 0.8rem !important;
+}
+
+.chip-sm {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  min-height: 34px;
+}
+
+.badge-sm {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.68rem;
+}
+
 .yard-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 0.45rem;
+}
+
+@media (min-width: 600px) {
+  .yard-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.55rem;
+  }
+}
+
+@media (min-width: 1000px) {
+  .yard-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
 }
 
 .yard-card {
-  border-radius: 16px;
-  border: 2px solid var(--line);
+  border-radius: 10px;
+  border: 1.5px solid var(--line);
   background: var(--surface);
-  padding: 1rem;
+  padding: 0.5rem 0.55rem 0.55rem;
   cursor: pointer;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
   text-align: left;
   color: inherit;
   width: 100%;
+  display: grid;
+  gap: 0.2rem;
+  min-height: 0;
 }
 
 .yard-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   box-shadow: var(--shadow);
 }
 
@@ -2923,10 +3803,74 @@ tr.row-dup td {
   border-color: rgba(180, 35, 24, 0.5);
 }
 
+.yard-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
 .yard-card .unit {
-  font-size: 1.35rem;
+  font-size: 1.05rem;
   font-weight: 800;
   color: var(--brand);
+  line-height: 1.15;
+  word-break: keep-all;
+}
+
+.yard-card-driver {
+  font-size: 0.78rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yard-card-vehicle {
+  font-size: 0.72rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yard-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  margin-top: 0.1rem;
+}
+
+.yard-card-dates {
+  display: grid;
+  gap: 0.08rem;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  margin-top: 0.1rem;
+  color: var(--ink);
+}
+
+.yard-card-dates strong {
+  font-weight: 700;
+  color: var(--muted);
+  margin-right: 0.2rem;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Print: denser multi-column list */
+@media print {
+  .yard-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.35rem;
+  }
+  .yard-card {
+    break-inside: avoid;
+    box-shadow: none;
+    padding: 0.35rem 0.4rem;
+  }
 }
 
 .filters {
@@ -3402,39 +4346,56 @@ tr.row-low td {
   max-width: 960px;
 }
 
-/* Notification bell + messenger panel */
+/* Notification inbox control + panel */
 .topbar-actions {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 40;
+  overflow: visible;
+}
+
+.topbar-mobile {
+  overflow: visible;
 }
 
 .notif-bell {
   position: relative;
+  z-index: 50;
 }
 
 .notif-bell-btn {
   position: relative;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.12);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.15rem;
-  color: var(--ink);
+  color: #fff;
+  padding: 0;
+}
+
+.notif-bell-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.notif-bell-svg {
+  display: block;
 }
 
 .notif-bell-badge {
   position: absolute;
   top: 2px;
   right: 2px;
-  min-width: 1.1rem;
-  height: 1.1rem;
-  padding: 0 0.25rem;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.28rem;
   border-radius: 999px;
   background: #c8102e;
   color: #fff;
@@ -3444,39 +4405,50 @@ tr.row-low td {
   align-items: center;
   justify-content: center;
   line-height: 1;
+  border: 1.5px solid var(--nav, #0f1c33);
+}
+
+.notif-panel-scrim {
+  display: none;
 }
 
 .notif-panel {
   position: absolute;
   right: 0;
-  top: calc(100% + 6px);
-  width: min(92vw, 22rem);
+  top: calc(100% + 8px);
+  width: min(22rem, calc(100vw - 1rem));
   max-height: min(70vh, 28rem);
-  overflow: auto;
-  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 90;
   background: var(--surface);
+  color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
-  padding: 0.65rem 0.75rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  padding: 0.65rem 0.75rem 0.55rem;
 }
 
 .notif-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.5rem;
   margin-bottom: 0.45rem;
+  flex-shrink: 0;
 }
 
 .notif-panel-links {
   display: grid;
   gap: 0.3rem;
-  margin-bottom: 0.55rem;
+  margin-bottom: 0.45rem;
+  flex-shrink: 0;
 }
 
 .notif-panel-link {
   display: block;
-  padding: 0.45rem 0.55rem;
+  padding: 0.5rem 0.6rem;
   border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--bg-elevated, var(--surface));
@@ -3491,23 +4463,106 @@ tr.row-low td {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 0.4rem;
+  gap: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(42vh, 16rem);
 }
 
 .notif-panel-item {
-  padding: 0.4rem 0.35rem;
   border-top: 1px solid var(--line);
-  font-size: 0.82rem;
+  font-size: 0.84rem;
+  padding: 0;
+}
+
+.notif-panel-item-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.55rem 0.4rem;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.notif-panel-item-btn:hover,
+.notif-panel-item-btn:active {
+  background: color-mix(in srgb, var(--brand, #3b82f6) 10%, transparent);
+}
+
+.notif-panel-empty {
+  padding: 0.65rem 0.35rem;
+  font-size: 0.85rem;
 }
 
 .notif-panel-title {
   font-weight: 700;
+  word-break: break-word;
 }
 
 .notif-panel-body {
   font-size: 0.78rem;
-  margin-top: 0.15rem;
-  line-height: 1.3;
+  margin-top: 0.2rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.notif-panel-go {
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+  font-weight: 700;
+  color: var(--brand, var(--info));
+}
+
+.notif-panel-footer {
+  display: block;
+  flex-shrink: 0;
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--line);
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--brand, var(--info));
+  text-decoration: none;
+}
+
+/* Mobile: full-width sheet under top bar — never clipped by logo/overflow */
+@media (max-width: 720px) {
+  .notif-panel-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+  }
+
+  .notif-panel {
+    position: fixed;
+    left: max(0.5rem, env(safe-area-inset-left, 0px));
+    right: max(0.5rem, env(safe-area-inset-right, 0px));
+    top: max(4.75rem, calc(env(safe-area-inset-top, 0px) + 3.75rem));
+    bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-width: none;
+    max-height: none;
+    z-index: 95;
+    border-radius: 16px;
+  }
+
+  .notif-panel-list {
+    max-height: none;
+    flex: 1 1 auto;
+  }
 }
 
 /* Inventory advanced (collapsed for warehouse day-to-day) */
@@ -3991,20 +5046,87 @@ tr.row-low td {
 
 .handbook-ack-form {
   display: grid;
-  gap: 0.45rem;
-  margin-top: 0.35rem;
-  padding-top: 0.55rem;
+  gap: 0.55rem;
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
   border-top: 1px solid var(--line);
 }
 
+.handbook-ack-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.handbook-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  border: 1.5px solid var(--border, var(--line));
+  background: var(--bg-elevated, var(--card));
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.handbook-check-row input {
+  width: 1.2rem;
+  height: 1.2rem;
+  min-height: 0;
+  margin-top: 0.1rem;
+  flex-shrink: 0;
+  accent-color: var(--ok, #22c55e);
+}
+
+.handbook-check-row.is-locked {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
 .handbook-ack-done {
-  margin-top: 0.55rem;
-  padding: 0.5rem 0.65rem;
-  border-radius: 8px;
+  margin-top: 0.65rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 12px;
   background: color-mix(in srgb, #22c55e 12%, var(--surface));
   border: 1px solid color-mix(in srgb, #22c55e 35%, var(--line));
-  font-size: 0.88rem;
-  font-weight: 600;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.handbook-ack-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, #22c55e 28%, transparent);
+  color: var(--ok, #067647);
+  font-weight: 900;
+  font-size: 1.05rem;
+  flex-shrink: 0;
+}
+
+.handbook-roster-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.handbook-roster-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  min-width: 0;
 }
 
 .handbook-pending-banner {
@@ -4022,6 +5144,30 @@ tr.row-low td {
 }
 
 /* Admin view-as — single compact top line */
+/* Viewer explores admin UI without write access */
+.viewer-readonly-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
+  background: color-mix(in srgb, #6366f1 16%, var(--bg-elevated, #121b2e));
+  border-bottom: 1px solid color-mix(in srgb, #6366f1 35%, var(--line));
+  color: var(--ink);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.viewer-readonly-bar strong {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.viewer-readonly-bar span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .view-as-bar {
   display: flex;
   flex-wrap: nowrap;
@@ -4135,6 +5281,208 @@ tr.row-low td {
   gap: 0.4rem;
   font-size: 0.88rem;
   line-height: 1.4;
+}
+
+/* ——— How-to / instructionals ——— */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.howto-page {
+  max-width: 720px;
+}
+
+.howto-intro {
+  margin-bottom: 0.85rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.howto-toolbar {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.howto-search input {
+  width: 100%;
+  font: inherit;
+  padding: 0.65rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--input-bg, var(--bg-elevated));
+  color: var(--ink);
+}
+
+.howto-role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.howto-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated, var(--surface));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 650;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.howto-chip.is-active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+.howto-chip.is-mine:not(.is-active) {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--line));
+}
+
+.howto-role-blurb {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.howto-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.howto-section {
+  margin-bottom: 1.25rem;
+}
+
+.howto-section-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.95rem;
+  font-weight: 750;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.howto-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.howto-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.howto-card-toggle {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  text-align: left;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.85rem 0.95rem;
+  cursor: pointer;
+  min-height: 48px;
+}
+
+.howto-card-title-block {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.howto-card-title-block strong {
+  font-size: 0.98rem;
+  font-weight: 750;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.howto-card-summary {
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.howto-card-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 0.15rem;
+}
+
+.howto-card-body {
+  padding: 0 0.95rem 0.95rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.howto-steps {
+  margin: 0 0 0.75rem;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.howto-tips {
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--info) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--info) 22%, var(--line));
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.howto-tips strong {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--info);
+}
+
+.howto-tips ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.howto-open-page {
+  display: inline-flex;
+}
+
+.howto-footer {
+  margin-top: 0.5rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
 }
 
 /* Messages */
@@ -4371,6 +5719,33 @@ tr.row-low td {
   z-index: 1;
 }
 
+.inv-stage-units {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.inv-stage-unit-block {
+  padding: 0.65rem 0.75rem 0.75rem;
+  margin: 0;
+}
+
+.inv-stage-unit-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.inv-stage-unit-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
 /* Sticky first column — allow wrap so labels aren't cut */
 .table-wrap th:first-child,
 .table-wrap td:first-child {
@@ -4397,72 +5772,193 @@ tr.row-low td {
   gap: 1rem;
 }
 
-/* Priority focus cards (admin command center / role homes) */
+/* Priority tiles — same left-digit layout as Do now buttons */
+.focus-all-grid {
+  margin-top: 0.15rem;
+}
+
+.status-tile.tone-bad,
+.status-tile.is-hot.tone-bad {
+  border-color: color-mix(in srgb, #ef4444 50%, var(--line));
+  background: color-mix(in srgb, #ef4444 12%, var(--surface));
+}
+
+.status-tile.tone-bad .status-tile-icon,
+.status-tile.tone-bad .home-action-icon {
+  color: #b91c1c;
+  font-weight: 800;
+  border-color: color-mix(in srgb, #ef4444 35%, var(--line));
+  background: color-mix(in srgb, #ef4444 10%, var(--surface));
+}
+
+.status-tile.tone-warn,
+.status-tile.is-hot.tone-warn {
+  border-color: color-mix(in srgb, #eab308 50%, var(--line));
+  background: color-mix(in srgb, #eab308 12%, var(--surface));
+}
+
+.status-tile.tone-warn .status-tile-icon,
+.status-tile.tone-warn .home-action-icon {
+  color: #a16207;
+  font-weight: 800;
+  border-color: color-mix(in srgb, #eab308 35%, var(--line));
+  background: color-mix(in srgb, #eab308 10%, var(--surface));
+}
+
+.status-tile.tone-ok .status-tile-icon {
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-tile-icon {
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+}
+
+/* Collapsible home feed sections */
+.home-collapse-head {
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.home-collapse-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  cursor: pointer;
+  min-height: 36px;
+  text-align: left;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.home-collapse-toggle h2 {
+  font-size: 1rem;
+}
+
+.home-collapse-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  width: 1rem;
+  text-align: center;
+}
+
+.home-collapse-count {
+  flex-shrink: 0;
+}
+
+.home-collapse-body {
+  margin-top: 0.35rem;
+}
+
+/* Legacy focus-card (unused on home; keep minimal for safety) */
 .focus-hot-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
-  gap: 0.55rem;
-  margin-bottom: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
 }
 
 .focus-card {
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.75rem 0.8rem;
-  border-radius: 12px;
-  border: 2px solid var(--line);
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
   background: var(--surface);
   color: inherit;
   text-decoration: none;
-  min-height: 5.5rem;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
-}
-
-.focus-card:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--shadow);
+  min-height: 0;
 }
 
 .focus-card-value {
-  font-size: 1.75rem;
+  font-size: 1.15rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+  flex-shrink: 0;
+  min-width: 1.75rem;
+  text-align: center;
 }
 
 .focus-card-label {
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   font-weight: 700;
   line-height: 1.25;
+  display: block;
 }
 
 .focus-card-hint {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: var(--muted);
   line-height: 1.3;
+  display: block;
 }
 
 .focus-card.tone-bad {
-  border-color: color-mix(in srgb, #ef4444 55%, var(--line));
-  background: color-mix(in srgb, #ef4444 14%, var(--surface));
-}
-
-.focus-card.tone-bad .focus-card-value {
-  color: #b91c1c;
+  border-color: color-mix(in srgb, #ef4444 50%, var(--line));
+  background: color-mix(in srgb, #ef4444 12%, var(--surface));
 }
 
 .focus-card.tone-warn {
-  border-color: color-mix(in srgb, #eab308 55%, var(--line));
-  background: color-mix(in srgb, #eab308 16%, var(--surface));
+  border-color: color-mix(in srgb, #eab308 50%, var(--line));
+  background: color-mix(in srgb, #eab308 12%, var(--surface));
 }
 
-.focus-card.tone-warn .focus-card-value {
-  color: #a16207;
+.admin-handbook-ack-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
 }
 
-.focus-rest-grid {
-  margin-top: 0.15rem;
+.admin-handbook-ack-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem 0.65rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated, var(--surface));
+}
+
+.admin-handbook-ack-row.is-pending {
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--line));
+}
+
+.admin-handbook-ack-main {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1 1 10rem;
+}
+
+.admin-handbook-ack-main strong {
+  font-size: 0.92rem;
+}
+
+.admin-handbook-ack-main .muted {
+  font-size: 0.78rem;
+}
+
+.admin-handbook-ack-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .home-role-admin .home-hero {
@@ -5190,21 +6686,12 @@ tr.row-low td {
   min-width: 1.75rem;
 }
 
-.home-clean .focus-card {
-  min-height: 4.5rem;
-  padding: 0.55rem 0.65rem;
+.home-clean .focus-all-grid {
+  gap: 0.4rem;
 }
 
-.home-clean .focus-card-value {
-  font-size: 1.45rem;
-}
-
-.home-clean .focus-card-label {
-  font-size: 0.8rem;
-}
-
-.home-clean .focus-card-hint {
-  font-size: 0.7rem;
+.home-clean .status-tile.is-hot {
+  /* slightly stronger border already from tone-* */
 }
 
 .common-tags {
@@ -5274,6 +6761,10 @@ tr.row-low td {
   background: color-mix(in srgb, var(--brand-2) 6%, var(--surface));
 }
 
+.notify-item.is-clickable:hover {
+  border-color: color-mix(in srgb, var(--brand, #3b82f6) 40%, var(--line));
+}
+
 .notify-item.read {
   background: var(--surface);
   opacity: 0.88;
@@ -5284,9 +6775,36 @@ tr.row-low td {
   min-width: 0;
 }
 
+.notify-main-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
 .notify-main p {
   margin: 0.25rem 0;
   font-size: 0.9rem;
+}
+
+.notify-meta {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+}
+
+.notify-open-hint {
+  font-weight: 700;
+  color: var(--brand, var(--info));
+}
+
+.notify-item-actions {
+  flex-shrink: 0;
 }
 
 .receipt-drop {
@@ -5760,9 +7278,9 @@ tr.row-low td {
 .live-status-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: 0.45rem 0.65rem;
   align-items: center;
-  padding: 0.75rem 1rem;
+  padding: 0.55rem 0.75rem;
 }
 
 .live-status-item {
@@ -5771,12 +7289,57 @@ tr.row-low td {
   gap: 0.4rem;
 }
 
+button.live-provider-toggle {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated, var(--surface));
+  color: inherit;
+  font: inherit;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+  min-height: 36px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+button.live-provider-toggle:hover {
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--line));
+}
+
+button.live-provider-toggle.is-active {
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--line));
+  background: color-mix(in srgb, var(--brand) 12%, var(--surface));
+  font-weight: 650;
+}
+
+.live-status-updated {
+  margin-left: auto;
+  font-size: 0.8rem;
+}
+
 .live-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
   gap: 0.85rem;
   min-height: 62vh;
   max-width: 100%;
+  align-items: start;
+}
+
+.live-map-column {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+/* Single card: map on top, search flush underneath */
+.live-map-block {
+  padding: 0;
+  overflow: hidden;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .live-map-wrap {
@@ -5786,7 +7349,12 @@ tr.row-low td {
   min-height: 320px;
   max-width: 100%;
   min-width: 0;
-  border-radius: var(--radius);
+  border-radius: 0;
+  flex: 0 0 auto;
+}
+
+.live-map-block .live-map-wrap {
+  border-bottom: 1px solid var(--line);
 }
 
 .live-map {
@@ -5796,6 +7364,7 @@ tr.row-low td {
   max-width: 100%;
   z-index: 1;
   background: var(--map-bg);
+  display: block;
 }
 
 .live-map-overlay {
@@ -5814,6 +7383,168 @@ tr.row-low td {
 .live-list {
   max-height: min(70vh, 640px);
   overflow: auto;
+}
+
+/* ——— Company reviews board ——— */
+.reviews-page {
+  max-width: 720px;
+}
+
+.reviews-hero {
+  margin-bottom: 0.85rem;
+  text-align: center;
+  padding: 1rem 1.1rem;
+}
+
+.reviews-hero-copy {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.reviews-google-btn {
+  display: inline-flex;
+  min-width: min(100%, 16rem);
+  justify-content: center;
+}
+
+.reviews-hero-hint {
+  margin: 0.55rem 0 0;
+  font-size: 0.8rem;
+}
+
+.reviews-post-card {
+  margin-bottom: 1rem;
+}
+
+.reviews-notify-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.reviews-notify-check input {
+  width: auto;
+  min-height: 0;
+}
+
+.reviews-feed-title {
+  margin: 0 0 0.55rem;
+  font-size: 1rem;
+}
+
+.reviews-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.review-card {
+  padding: 0.85rem 0.95rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.review-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.review-stars {
+  display: block;
+  color: #eab308;
+  letter-spacing: 0.05em;
+  font-size: 0.95rem;
+  margin-bottom: 0.15rem;
+}
+
+.review-author {
+  font-size: 1rem;
+  margin-right: 0.4rem;
+}
+
+.review-date {
+  font-size: 0.8rem;
+}
+
+.review-text {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.review-shoutout {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.review-card-foot {
+  font-size: 0.8rem;
+}
+
+.live-filters {
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Flush under the map tile — keyboard sits below the map, not over it */
+.live-tech-search-bar {
+  padding: 0.5rem 0.65rem 0.55rem;
+  display: grid;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  background: var(--surface);
+  border-radius: 0;
+}
+
+.live-tech-search {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+}
+
+.live-tech-search input {
+  width: 100%;
+  font: inherit;
+  font-size: 1rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--input-bg, var(--bg-elevated));
+  color: var(--ink);
+  min-height: 44px;
+}
+
+.live-search-hint {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.live-vehicle-driver {
+  font-size: 0.88rem;
+  font-weight: 650;
+  color: var(--ink);
+  line-height: 1.3;
+  margin-top: 0.1rem;
 }
 
 .live-vehicle-list {
@@ -5920,10 +7651,10 @@ tr.row-low td {
 .live-list {
   max-height: 280px;
 }
-.live-map,
-.live-map-wrap {
+.live-map-block .live-map,
+.live-map-block .live-map-wrap {
   min-height: 280px;
-  height: min(55vh, 420px);
+  height: min(50vh, 400px);
 }
 .modal {
   width: min(100%, calc(100vw - 1.25rem));
@@ -6022,8 +7753,8 @@ svg {
   .live-list {
     max-height: min(70vh, 640px);
   }
-  .live-map,
-  .live-map-wrap {
+  .live-map-block .live-map,
+  .live-map-block .live-map-wrap {
     min-height: 420px;
     height: min(70vh, 640px);
   }

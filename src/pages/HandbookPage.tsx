@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api, can } from "../api";
+import { api, can, roleLabel } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 
@@ -25,10 +25,11 @@ interface RosterRow {
 export function HandbookPage() {
   const { user } = useAuth();
   const canUpload = can(user, "manageEmployees") || user?.role === "admin";
+  const isAdmin = user?.role === "admin";
   const [book, setBook] = useState<Handbook | null>(null);
   const [pending, setPending] = useState(false);
   const [ackAt, setAckAt] = useState<string | null>(null);
-  const [ackName, setAckName] = useState(user?.display_name || "");
+  const [ackName, setAckName] = useState<string | null>(null);
   const [roster, setRoster] = useState<RosterRow[]>([]);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
@@ -37,15 +38,28 @@ export function HandbookPage() {
   const [version, setVersion] = useState("");
   const [file, setFile] = useState<File | null>(null);
 
+  /** Must open/view handbook before the checkmark is available */
+  const [hasViewed, setHasViewed] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+
   const load = useCallback(async () => {
     const d = await api<{
       handbook: Handbook | null;
       pending: boolean;
       acknowledged_at?: string | null;
+      ack_name?: string | null;
     }>("/handbook");
     setBook(d.handbook);
     setPending(!!d.pending);
     setAckAt(d.acknowledged_at || null);
+    setAckName(d.ack_name || null);
+    if (!d.pending) {
+      setHasViewed(true);
+      setConfirmed(true);
+    } else {
+      setHasViewed(false);
+      setConfirmed(false);
+    }
     if (canUpload) {
       const s = await api<{ roster: RosterRow[] }>("/handbook/status").catch(() => ({
         roster: [] as RosterRow[],
@@ -86,15 +100,12 @@ export function HandbookPage() {
 
   async function acknowledge(e: FormEvent) {
     e.preventDefault();
-    if (!ackName.trim()) {
-      setError("Type your full name to confirm you read the handbook.");
+    if (!hasViewed) {
+      setError("Open and read the handbook first, then check the box to confirm.");
       return;
     }
-    if (
-      !confirm(
-        `I confirm I have read and understand “${book?.title || "the employee handbook"}”.`
-      )
-    ) {
+    if (!confirmed) {
+      setError("Check the box to confirm you have read and understand the handbook.");
       return;
     }
     setBusy(true);
@@ -104,7 +115,8 @@ export function HandbookPage() {
         method: "POST",
         body: JSON.stringify({
           handbook_id: book?.id,
-          ack_name: ackName.trim(),
+          confirmed: true,
+          ack_name: user?.display_name || user?.username || "",
         }),
       });
       setOk("Thank you — your acknowledgment is on file.");
@@ -125,8 +137,8 @@ export function HandbookPage() {
         <div>
           <h1>Employee handbook</h1>
           <p>
-            Read the company handbook in the app and acknowledge that you understand it. New
-            versions require a fresh acknowledgment.
+            Read the company handbook below. When you’re finished, check the box to confirm you
+            understand it.
           </p>
         </div>
       </div>
@@ -145,44 +157,82 @@ export function HandbookPage() {
               </p>
             </div>
             {fileUrl && (
-              <a className="btn" href={fileUrl} target="_blank" rel="noreferrer">
-                Open handbook
+              <a
+                className="btn"
+                href={fileUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => setHasViewed(true)}
+              >
+                Open full screen
               </a>
             )}
           </div>
-          {fileUrl && book.content_type?.includes("pdf") && (
+
+          {/* Read first — viewer is always above the confirm control */}
+          {fileUrl && book.content_type?.includes("pdf") ? (
             <iframe
               className="handbook-frame"
               title={book.title}
               src={fileUrl}
+              onLoad={() => setHasViewed(true)}
             />
-          )}
+          ) : fileUrl ? (
+            <p className="muted">
+              <a href={fileUrl} target="_blank" rel="noreferrer" onClick={() => setHasViewed(true)}>
+                Open the handbook file
+              </a>{" "}
+              to read it, then confirm below.
+            </p>
+          ) : null}
 
           {pending ? (
-            <form className="handbook-ack-form" onSubmit={acknowledge}>
-              <h3 className="inv-section-title">Acknowledge</h3>
-              <p className="muted" style={{ fontSize: "0.85rem" }}>
-                After you’ve read the handbook, type your name and confirm. This is logged with the
-                date and time for company records.
-              </p>
-              <label>
-                Full name (as signature) *
+            <form className="handbook-ack-form" onSubmit={(ev) => void acknowledge(ev)}>
+              <h3 className="inv-section-title">Confirm after reading</h3>
+              {!hasViewed ? (
+                <p className="muted handbook-ack-hint">
+                  Scroll through the handbook above (or open full screen). When you’ve finished
+                  reading, you can check the box below.
+                </p>
+              ) : (
+                <p className="muted handbook-ack-hint">
+                  Check the box only after you have read the handbook.
+                </p>
+              )}
+
+              <label
+                className={`handbook-check-row${!hasViewed ? " is-locked" : ""}`}
+              >
                 <input
-                  value={ackName}
-                  onChange={(e) => setAckName(e.target.value)}
-                  required
-                  autoComplete="name"
+                  type="checkbox"
+                  checked={confirmed}
+                  disabled={!hasViewed || busy}
+                  onChange={(e) => setConfirmed(e.target.checked)}
                 />
+                <span>
+                  I have read and understand this handbook
+                  {!hasViewed ? (
+                    <span className="muted"> — available after you open it</span>
+                  ) : null}
+                </span>
               </label>
-              <button className="btn" type="submit" disabled={busy}>
-                {busy ? "Saving…" : "I have read and understand the handbook"}
+
+              <button className="btn" type="submit" disabled={busy || !hasViewed || !confirmed}>
+                {busy ? "Saving…" : "Submit confirmation"}
               </button>
             </form>
           ) : (
-            <div className="handbook-ack-done">
-              ✓ Acknowledged
-              {ackAt ? ` · ${String(ackAt).replace("T", " ").slice(0, 16)}` : ""}
-              {ackName ? ` as ${ackName}` : ""}
+            <div className="handbook-ack-done" role="status">
+              <span className="handbook-ack-check" aria-hidden>
+                ✓
+              </span>
+              <div>
+                <strong>Confirmed</strong>
+                <div className="muted" style={{ fontSize: "0.82rem", fontWeight: 500 }}>
+                  {ackAt ? String(ackAt).replace("T", " ").slice(0, 16) : "On file"}
+                  {ackName ? ` · ${ackName}` : ""}
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -198,11 +248,11 @@ export function HandbookPage() {
 
       {canUpload && (
         <>
-          <form className="card" onSubmit={upload}>
+          <form className="card" onSubmit={(ev) => void upload(ev)}>
             <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Upload / replace handbook</h2>
             <p className="muted" style={{ fontSize: "0.82rem" }}>
-              Uploading a new file retires the old one and asks everyone to acknowledge again. Prefer
-              PDF. Keep under ~900KB without R2 storage, or enable R2 for larger files.
+              Uploading a new file retires the old one and asks everyone to confirm again. Prefer PDF
+              (up to about 20MB).
             </p>
             <label>
               Title
@@ -233,30 +283,41 @@ export function HandbookPage() {
           {roster.length > 0 && (
             <div className="card">
               <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>
-                Acknowledgments
+                Team confirmations
                 <span className="muted" style={{ fontWeight: 500, fontSize: "0.85rem" }}>
                   {" "}
                   · {roster.length - pendingCount} done · {pendingCount} pending
                 </span>
               </h2>
+              {isAdmin && (
+                <p className="muted" style={{ margin: "0 0 0.65rem", fontSize: "0.82rem" }}>
+                  To require someone to re-read and sign again, clear their acknowledgment under{" "}
+                  <strong>Admin → People &amp; settings → Handbook acknowledgments</strong> (not
+                  here — avoids accidental clears).
+                </p>
+              )}
               <LogList>
                 {roster.map((r) => (
                   <LogItem
                     key={r.id}
                     tone={r.acknowledged ? "ok" : "warn"}
                     summary={
-                      <>
-                        <strong>{r.display_name}</strong>
-                        <span className="log-item-badge">
-                          {r.acknowledged ? "Done" : "Pending"}
-                        </span>
-                        <span className="log-item-meta">{r.role}</span>
-                        {r.acknowledged_at ? (
-                          <span className="log-item-meta">
-                            {String(r.acknowledged_at).replace("T", " ").slice(0, 16)}
+                      <div className="handbook-roster-row">
+                        <div className="handbook-roster-main">
+                          <strong>{r.display_name}</strong>
+                          <span className="log-item-badge">
+                            {r.acknowledged ? "Confirmed" : "Pending"}
                           </span>
-                        ) : null}
-                      </>
+                          <span className="log-item-meta">
+                            {roleLabel(r.role as never) || r.role}
+                          </span>
+                          {r.acknowledged_at ? (
+                            <span className="log-item-meta">
+                              {String(r.acknowledged_at).replace("T", " ").slice(0, 16)}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
                     }
                   />
                 ))}

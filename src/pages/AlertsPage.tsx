@@ -14,12 +14,20 @@ interface Alert {
   status: string;
 }
 
+function typeLabel(t: string): string {
+  return (t || "").replace(/_/g, " ");
+}
+
 export function AlertsPage() {
   const { user } = useAuth();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [status, setStatus] = useState("open");
   const [error, setError] = useState("");
   const [note, setNote] = useState<Record<number, string>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const canManage = can(user, "manageAlerts");
+  const showActions = canManage && status === "open";
 
   async function load(s = status) {
     const data = await api<{ alerts: Alert[] }>(`/alerts?status=${s}`);
@@ -31,6 +39,8 @@ export function AlertsPage() {
   }, [status]);
 
   async function ack(id: number, next: "acknowledged" | "dismissed") {
+    setBusyId(id);
+    setError("");
     try {
       await api(`/alerts/${id}/ack`, {
         method: "POST",
@@ -39,11 +49,45 @@ export function AlertsPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusyId(null);
     }
   }
 
+  function ActionBlock({ a }: { a: Alert }) {
+    return (
+      <div className="alert-actions no-print">
+        <input
+          className="alert-note-input"
+          placeholder="Note (optional)"
+          value={note[a.id] || ""}
+          onChange={(e) => setNote((n) => ({ ...n, [a.id]: e.target.value }))}
+          disabled={busyId === a.id}
+        />
+        <div className="alert-action-btns">
+          <button
+            type="button"
+            className="btn secondary btn-sm"
+            disabled={busyId === a.id}
+            onClick={() => ack(a.id, "acknowledged")}
+          >
+            {busyId === a.id ? "…" : "Ack"}
+          </button>
+          <button
+            type="button"
+            className="btn secondary btn-sm"
+            disabled={busyId === a.id}
+            onClick={() => ack(a.id, "dismissed")}
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div>
+    <div className="alerts-page">
       <div className="page-header">
         <div>
           <h1>Mileage red flags</h1>
@@ -51,68 +95,106 @@ export function AlertsPage() {
         </div>
         <div className="filters no-print">
           {["open", "acknowledged", "dismissed"].map((s) => (
-            <button key={s} className={`chip ${status === s ? "active" : ""}`} onClick={() => setStatus(s)}>
+            <button
+              key={s}
+              type="button"
+              className={`chip ${status === s ? "active" : ""}`}
+              onClick={() => setStatus(s)}
+            >
               {s}
             </button>
           ))}
         </div>
       </div>
       {error && <div className="error">{error}</div>}
-      <div className="card">
-        {!alerts.length && <div className="empty">No {status} alerts.</div>}
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Severity</th>
-                <th>Unit</th>
-                <th>Date</th>
-                <th>Employee</th>
-                <th>Miles</th>
-                <th>Message</th>
-                {can(user, "manageAlerts") && status === "open" && <th className="no-print">Action</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {alerts.map((a) => (
-                <tr key={a.id}>
-                  <td>
-                    <span className={`badge ${a.severity}`}>{a.severity}</span>
-                  </td>
-                  <td>{a.unit_number}</td>
-                  <td>{a.fuel_date}</td>
-                  <td>{a.employee_name}</td>
-                  <td>{a.odometer.toLocaleString()}</td>
-                  <td>
-                    <div>{a.message}</div>
-                    <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      {a.alert_type}
-                    </div>
-                  </td>
-                  {can(user, "manageAlerts") && status === "open" && (
-                    <td className="no-print">
-                      <input
-                        placeholder="Note (optional)"
-                        value={note[a.id] || ""}
-                        onChange={(e) => setNote((n) => ({ ...n, [a.id]: e.target.value }))}
-                        style={{ marginBottom: "0.4rem" }}
-                      />
-                      <div className="toolbar">
-                        <button className="btn secondary" onClick={() => ack(a.id, "acknowledged")}>
-                          Ack
-                        </button>
-                        <button className="btn secondary" onClick={() => ack(a.id, "dismissed")}>
-                          Dismiss
-                        </button>
-                      </div>
-                    </td>
-                  )}
+
+      {!alerts.length && (
+        <div className="card empty">No {status} alerts.</div>
+      )}
+
+      {/* Desktop: table */}
+      {alerts.length > 0 && (
+        <div className="card alerts-wide">
+          <div className="table-wrap alerts-table-wrap">
+            <table className="alerts-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Unit</th>
+                  <th>Date</th>
+                  <th>Employee</th>
+                  <th>Miles</th>
+                  <th>Message</th>
+                  {showActions && <th className="no-print">Action</th>}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {alerts.map((a) => (
+                  <tr key={a.id}>
+                    <td>
+                      <span className={`badge ${a.severity}`}>{a.severity}</span>
+                    </td>
+                    <td>
+                      <strong className="alert-unit">{a.unit_number}</strong>
+                    </td>
+                    <td>{a.fuel_date}</td>
+                    <td>{a.employee_name}</td>
+                    <td>{a.odometer.toLocaleString()}</td>
+                    <td>
+                      <div className="alert-msg">{a.message}</div>
+                      <div className="muted alert-type">{typeLabel(a.alert_type)}</div>
+                    </td>
+                    {showActions && (
+                      <td className="no-print">
+                        <ActionBlock a={a} />
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Phone: readable cards */}
+      {alerts.length > 0 && (
+        <ul className="alerts-narrow">
+          {alerts.map((a) => (
+            <li key={a.id} className={`alert-card severity-${a.severity}`}>
+              <div className="alert-card-header">
+                <div className="alert-card-title">
+                  <strong className="alert-unit">Unit {a.unit_number}</strong>
+                  <div className="alert-card-badges">
+                    <span className={`badge ${a.severity}`}>{a.severity}</span>
+                    <span className="badge">{typeLabel(a.alert_type)}</span>
+                  </div>
+                </div>
+              </div>
+              <p className="alert-card-message">{a.message}</p>
+              <dl className="alert-fields">
+                <div className="alert-field">
+                  <dt>Date</dt>
+                  <dd>{a.fuel_date || "—"}</dd>
+                </div>
+                <div className="alert-field">
+                  <dt>Employee</dt>
+                  <dd>{a.employee_name || "—"}</dd>
+                </div>
+                <div className="alert-field">
+                  <dt>Odometer</dt>
+                  <dd>{a.odometer.toLocaleString()} mi</dd>
+                </div>
+                <div className="alert-field">
+                  <dt>Status</dt>
+                  <dd>{a.status}</dd>
+                </div>
+              </dl>
+              {showActions && <ActionBlock a={a} />}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

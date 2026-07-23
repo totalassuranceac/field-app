@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { notificationLink } from "../notificationLinks";
 
 interface Note {
   id: number;
@@ -16,6 +17,7 @@ interface Note {
 
 export function NotificationsPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [list, setList] = useState<Note[]>([]);
   const [unread, setUnread] = useState(0);
   const [error, setError] = useState("");
@@ -37,8 +39,18 @@ export function NotificationsPage() {
   }
 
   async function markOne(id: number) {
-    await api("/notifications/read", { method: "POST", body: JSON.stringify({ id }) });
+    try {
+      await api("/notifications/read", { method: "POST", body: JSON.stringify({ id }) });
+    } catch {
+      /* still navigate */
+    }
     await load();
+  }
+
+  async function openNote(n: Note) {
+    const to = notificationLink(n);
+    if (!n.read_at) await markOne(n.id);
+    if (to) navigate(to);
   }
 
   async function sendWeekly() {
@@ -52,51 +64,39 @@ export function NotificationsPage() {
     }
   }
 
-  function linkFor(n: Note): string | null {
-    if (n.kind === "weekly_check") return "/inspections";
-    if (n.kind === "message") return "/messages";
-    if (
-      n.kind === "warranty_dropoff" ||
-      n.kind === "warranty_processed" ||
-      n.kind === "warranty_vendor_return"
-    ) {
-      return "/warranties";
-    }
-    if (
-      n.kind === "flat_emergency" ||
-      n.kind === "repair_request" ||
-      n.kind === "oil_change_due"
-    ) {
-      return "/issues";
-    }
-    return null;
-  }
-
   return (
     <div>
       <div className="page-header">
         <div>
           <h1>Notifications</h1>
           <p>
-            {unread ? `${unread} unread` : "You’re caught up"} · weekly checks &amp; repair alerts
+            {unread ? `${unread} unread` : "You’re caught up"} · tap an alert to open it
           </p>
         </div>
         <div className="toolbar">
           {unread > 0 && (
-            <button className="btn secondary" type="button" onClick={() => markAll()}>
+            <button className="btn secondary" type="button" onClick={() => void markAll()}>
               Mark all read
             </button>
           )}
           {can(user, "manageIssues") && (
-            <button className="btn" type="button" onClick={() => sendWeekly()}>
+            <button className="btn" type="button" onClick={() => void sendWeekly()}>
               Send weekly check reminders
             </button>
           )}
         </div>
       </div>
 
-      {ok && <div className="success" style={{ marginBottom: "1rem" }}>{ok}</div>}
-      {error && <div className="error" style={{ marginBottom: "1rem" }}>{error}</div>}
+      {ok && (
+        <div className="success" style={{ marginBottom: "1rem" }}>
+          {ok}
+        </div>
+      )}
+      {error && (
+        <div className="error" style={{ marginBottom: "1rem" }}>
+          {error}
+        </div>
+      )}
 
       <div className="card">
         {!list.length ? (
@@ -104,24 +104,53 @@ export function NotificationsPage() {
         ) : (
           <ul className="notify-list">
             {list.map((n) => {
-              const to = linkFor(n);
+              const to = notificationLink(n);
+              const clickable = Boolean(to);
               return (
-                <li key={n.id} className={n.read_at ? "notify-item read" : "notify-item"}>
-                  <div className="notify-main">
-                    <strong>{n.title}</strong>
-                    {n.body && <p className="muted">{n.body}</p>}
-                    <span className="muted" style={{ fontSize: "0.78rem" }}>
-                      {n.created_at?.replace("T", " ").slice(0, 16)} · {n.kind}
-                    </span>
-                  </div>
-                  <div className="toolbar">
+                <li
+                  key={n.id}
+                  className={`notify-item${n.read_at ? " read" : ""}${
+                    clickable ? " is-clickable" : ""
+                  }`}
+                >
+                  {clickable ? (
+                    <button
+                      type="button"
+                      className="notify-main notify-main-btn"
+                      onClick={() => void openNote(n)}
+                    >
+                      <strong>{n.title}</strong>
+                      {n.body && <p className="muted">{n.body}</p>}
+                      <span className="muted notify-meta">
+                        {n.created_at?.replace("T", " ").slice(0, 16)}
+                        <span className="notify-open-hint"> · Tap to open</span>
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="notify-main">
+                      <strong>{n.title}</strong>
+                      {n.body && <p className="muted">{n.body}</p>}
+                      <span className="muted notify-meta">
+                        {n.created_at?.replace("T", " ").slice(0, 16)} · {n.kind}
+                      </span>
+                    </div>
+                  )}
+                  <div className="toolbar notify-item-actions">
                     {to && (
-                      <Link className="btn secondary" to={to} onClick={() => markOne(n.id)}>
+                      <Link
+                        className="btn secondary btn-sm"
+                        to={to}
+                        onClick={() => void markOne(n.id)}
+                      >
                         Open
                       </Link>
                     )}
                     {!n.read_at && (
-                      <button className="btn ghost" type="button" onClick={() => markOne(n.id)}>
+                      <button
+                        className="btn ghost btn-sm"
+                        type="button"
+                        onClick={() => void markOne(n.id)}
+                      >
                         Mark read
                       </button>
                     )}

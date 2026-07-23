@@ -2,8 +2,10 @@
  * Client-side receipt OCR tuned for Total Assurance local fuel stops:
  *  - Stripes (Corpus / Port Aransas) — GALLONS: / 29.531G / ST#2213 / DATE …
  *  - Circle K — "16.238 Gallons @ $x" / XXXXXXXXXXXX5017 / store site #
+ *  - Murphy USA / Murphy Express — SITE: / QTY(GAL): / ************0058
  *
  * Extracts: date+time, store, card last 4, gallons, total.
+ * Rule: prefer printed labels over reverse-math (total÷price invents 0.001 errors).
  * Odometer is never read from the receipt (handwritten notes ignored).
  */
 
@@ -89,6 +91,11 @@ export function parseReceiptDateTime(text: string): { fuel_date: string | null; 
     {
       re: /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.|am|pm)/gi,
       score: 17,
+    },
+    // Murphy USA header: 07-17-26  08:37  (2-digit year, 24h, no AM/PM)
+    {
+      re: /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\b/g,
+      score: 18,
     },
     // Footer with junk prefix: "0 2/23/26 12:00:59 pM" / "CSH: 0 2/23/26 …"
     {
@@ -245,9 +252,17 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
     candidates.push({ n, score });
   };
 
+  // Murphy / Walmart fuel: QTY(GAL): 22.679 — highest trust (printed pump qty, never invent)
+  const printedQty = extractPrintedQtyGallons(lines, joined);
+  if (printedQty != null) tryAdd(String(printedQty), 50);
+
   // Stripes / 7-Eleven: GALLONS: 21.701 or GALLONS      5.167 (spaces, no colon)
   for (const line of lines) {
-    if (!/GALLON|GAL\s*:|BprLEN|GALL|BALLON/i.test(line)) continue;
+    // Skip pure price/gal lines (Murphy PRICE/GAL: $3.429)
+    if (/PRICE\s*\/\s*GAL|NET\s*\/\s*GAL|\$\s*\/\s*GAL/i.test(line) && !/QTY|GALLONS?\s*[:#]/i.test(line)) {
+      continue;
+    }
+    if (!/GALLON|GAL\s*:|QTY|BprLEN|GALL|BALLON|UNLEAD/i.test(line)) continue;
     // Clean common OCR: ] } l I as trailing 1; O as 0; BALLONS → GALLONS
     const cleaned = line
       .replace(/BALLONS?/gi, "GALLONS")
@@ -256,6 +271,7 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
       .replace(/(\d+\.\d{2})[\]\}lI|]/g, "$11")
       .replace(/(\d),(\d)/g, "$1.$2"); // 5,167 → 5.167 rare
     const m =
+      cleaned.match(/QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
       cleaned.match(/GALLONS?\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
       cleaned.match(/(?:GALLON|GAL)\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
       // 7-Eleven: GALLONS right-aligned qty without colon
@@ -336,7 +352,7 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
     if (/\/\s*G(?:AL)?\b/i.test(line) && !/\b\d{1,2}\.\d{2,4}\s*G\b/i.test(line)) continue;
 
     // Fuel product lines: only accept a number that is clearly gallons (…G)
-    if (/DSL|UNLD|NLD|DIESEL|UNLEADED|CR\s*#|RUL|REG|PREM/i.test(line)) {
+    if (/DSL|UNLD|NLD|DIESEL|UNLEAD|CR\s*#|RUL|REG|PREM/i.test(line)) {
       const withG =
         line.match(/\b(\d{1,2}\.\d{2,4})\s*G\b/i) ||
         line.match(/\b(\d{1,2}\.\d{2,4})G\b/i) ||
@@ -367,14 +383,22 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
 
   if (candidates.length) {
     // Prefer realistic fill sizes over price-per-gal noise; prefer 3-decimal pump qty
+    // Strongly prefer labeled QTY / GALLONS (score ≥ 30) over reverse-math noise
     candidates.sort((a, b) => {
       const aPpg = looksLikePricePerGal(a.n) ? -8 : 0;
       const bPpg = looksLikePricePerGal(b.n) ? -8 : 0;
       const a3 = (String(a.n).split(".")[1] || "").length >= 3 ? 2 : 0;
       const b3 = (String(b.n).split(".")[1] || "").length >= 3 ? 2 : 0;
-      return b.score + bPpg + b3 - (a.score + aPpg + a3) || b.n - a.n;
+      const aLabeled = a.score >= 30 ? 10 : 0;
+      const bLabeled = b.score >= 30 ? 10 : 0;
+      return b.score + bPpg + b3 + bLabeled - (a.score + aPpg + a3 + aLabeled) || b.n - a.n;
     });
     let best = candidates[0].n;
+    const bestScore = candidates[0].score;
+    // Printed / labeled qty always wins — never replace with total÷price
+    if (bestScore >= 30) {
+      return roundGallons(best);
+    }
     // If top pick still looks like $/gal and we have total, derive instead
     if (looksLikePricePerGal(best) && totalCost != null && totalCost > 5) {
       const derived = totalCost / best;
@@ -390,8 +414,9 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
     return roundGallons(best);
   }
 
-  // Fallback: gallons ≈ total ÷ price/gal
-  // Critical for Stripes when OCR drops "20.220G" but keeps SELF @ 2.759 and USD$55.79
+  // Fallback: gallons ≈ total ÷ price/gal ONLY when no printed qty exists
+  // (Murphy: 85.48÷3.769 ≈ 22.680 but slip says QTY 22.679 — never invent)
+  if (printedQty != null) return roundGallons(printedQty);
   if (totalCost != null && totalCost > 5) {
     const ppg = ppgKnown || parsePricePerGal(joined, lines);
     if (ppg) {
@@ -399,6 +424,61 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
       if (derived > 1 && derived < 100) {
         return roundGallons(derived);
       }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Pull the exact printed gallons from QTY(GAL) / GALLONS labels.
+ * OCR-tolerant for Murphy Express / USA slips. Never invent from math.
+ */
+function extractPrintedQtyGallons(lines: string[], joined: string): number | null {
+  const softLine = (line: string) =>
+    line
+      // OCR: 0TY → QTY, QIY → QTY
+      .replace(/\b[O0]TY\b/gi, "QTY")
+      .replace(/\bQIY\b/gi, "QTY")
+      .replace(/\bQTYCGAL\b/gi, "QTY(GAL)")
+      .replace(/QTY\s*[Cc]\s*GAL/gi, "QTY(GAL)")
+      .replace(/[Oo](?=\d)/g, "0");
+
+  const tryParse = (raw: string): number | null => {
+    const n = parseFloat(String(raw).replace(/,/g, "").replace(/O/gi, "0"));
+    if (!(n > 0.5 && n < 120)) return null;
+    if (looksLikePricePerGal(n)) return null;
+    return roundGallons(n);
+  };
+
+  // Line-by-line: labeled qty is ground truth
+  for (const raw of lines) {
+    const line = softLine(raw);
+    // Skip pure price lines
+    if (/PRICE\s*\/\s*GAL|NET\s*\/\s*GAL/i.test(line) && !/QTY/i.test(line)) continue;
+    const m =
+      line.match(/QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
+      line.match(/QTY\s*[:#]\s*(\d+\.\d{1,4})/i) ||
+      line.match(/QTY\s+GAL(?:LON)?S?\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
+      line.match(/QUANTITY\s*\(?\s*GAL(?:LON)?S?\s*\)?\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
+      // "QTY(GAL) 22.679" with odd spacing / missing colon
+      line.match(/QTY[^\d]{0,12}(\d{1,2}\.\d{3})\b/i);
+    if (m) {
+      const n = tryParse(m[1]);
+      if (n != null) return n;
+    }
+  }
+
+  // Full text
+  const softJoined = softLine(joined);
+  for (const re of [
+    /QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/gi,
+    /QTY\s*[:#]\s*(\d+\.\d{1,4})\s*(?:GAL)?/gi,
+  ]) {
+    const m = re.exec(softJoined);
+    if (m) {
+      const n = tryParse(m[1]);
+      if (n != null) return n;
     }
   }
 
@@ -502,7 +582,9 @@ function consensusLabeledTotal(lines: string[], joined: string): number | null {
     const n = monies[monies.length - 1];
     // Allow OCR of FUEL SAE / FUEL SA E
     if (/FUEL\s*SA/i.test(line)) bump(n, 4);
-    if (/FUEL\s*TOTAL/i.test(line)) bump(n, 5); // 7-Eleven
+    if (/FUEL\s*TOTAL/i.test(line)) bump(n, 5); // 7-Eleven / Murphy
+    if (/NET\s*TOTAL/i.test(line)) bump(n, 5); // Murphy USA
+    if (/CARD\s*AMT/i.test(line)) bump(n, 4); // Murphy card charge
     if (/CREDIT\s*DE/i.test(line)) bump(n, 4);
     if (/USD\s*\$/i.test(line)) bump(n, 5);
     if (/\bTOTAL\b/i.test(line) && !/SUB/i.test(line) && !/PRICE/i.test(line)) bump(n, 2);
@@ -564,7 +646,9 @@ function parseTotalCost(
     const n = monies[monies.length - 1];
 
     let score = 0;
-    if (/FUEL\s*TOTAL/i.test(line)) score = 32; // 7-Eleven
+    if (/FUEL\s*TOTAL/i.test(line)) score = 32; // 7-Eleven / Murphy
+    else if (/NET\s*TOTAL/i.test(line)) score = 31; // Murphy USA
+    else if (/CARD\s*AMT/i.test(line)) score = 30; // Murphy card charge line
     else if (/FUEL\s*SA/i.test(line)) score = 30;
     else if (/\bCREDIT\s*DE\b/i.test(line)) score = 28;
     else if (/\bTOTAL\s*SALE\b/i.test(line)) score = 27;
@@ -574,7 +658,7 @@ function parseTotalCost(
     else if (/\bTOTAL\b/i.test(line) && !/SUB\s*TOTAL|SUBTOTAL/i.test(line)) score = 22;
     else if (/^CREDIT\b/i.test(line.trim()) || /\bCREDIT\b/i.test(line)) score = 20;
     else if (/\bSUBTOTAL|SUB\s*TOTAL\b/i.test(line)) score = 12;
-    else if (/\bAMOUNT\b/i.test(line)) score = 14;
+    else if (/\bamount\b/i.test(line)) score = 14;
     else if (/\$\s*\d+\.\d{2}/.test(line) && monies.length === 1 && n >= 10) score = 8;
     else continue;
 
@@ -725,9 +809,77 @@ function isSevenEleven(text: string): boolean {
   );
 }
 
+/** Murphy USA, Murphy Express, and same-format SITE/QTY slips. */
+function isMurphyReceipt(text: string): boolean {
+  return (
+    /\bMURPHY\s*(?:USA|EXPRESS|DRIVE)\b/i.test(text) ||
+    /\bmurphyusa\.com\b/i.test(text) ||
+    /\bmurphydrive\b/i.test(text) ||
+    (/\bMURPHY\b/i.test(text) && /\bSITE\s*[:#]/i.test(text)) ||
+    // Same layout without brand OCR: SITE + QTY(GAL) or FUEL TOTAL + PRICE/GAL
+    (/\bSITE\s*[:#]\s*\d{3,5}\b/i.test(text) &&
+      (/\bQTY\s*\(\s*GAL/i.test(text) ||
+        (/\bFUEL\s*TOTAL\b/i.test(text) && /\bPRICE\s*\/\s*GAL\b/i.test(text))))
+  );
+}
+
+/** Printed brand on Murphy slips (Express vs USA). */
+function murphyBrandLabel(text: string): string {
+  if (/\bMURPHY\s*EXPRESS\b/i.test(text)) return "Murphy Express";
+  if (/\bMURPHY\s*USA\b/i.test(text)) return "Murphy USA";
+  if (/\bMURPHY\s*DRIVE\b/i.test(text)) return "Murphy";
+  if (/\bMURPHY\b/i.test(text)) return "Murphy";
+  return "Murphy";
+}
+
+/** SITE / store IDs that must never become card last-4 (Murphy, Stripes ST#, etc.). */
+function extractSiteStoreIds(text: string, lines: string[]): Set<string> {
+  const ids = new Set<string>();
+  const push = (raw: string | undefined | null) => {
+    const id = cleanStoreDigits(raw);
+    if (id && id.length >= 3 && id.length <= 6) ids.add(id);
+  };
+  for (const m of text.matchAll(/\bSITE\s*[:#]?\s*(\d{3,5})\b/gi)) push(m[1]);
+  for (const m of text.matchAll(/\bMURPHY\s*(?:USA|EXPRESS)\s*(\d{3,5})\b/gi)) push(m[1]);
+  for (const m of text.matchAll(/\bST\s*#\s*(\d{3,6})\b/gi)) push(m[1]);
+  for (const m of text.matchAll(/\bSTORE\s*[:#]\s*(\d{3,6})\b/gi)) push(m[1]);
+  // "Murphy Express 8691" / "Murphy USA 7738" on header
+  for (const line of lines.slice(0, 8)) {
+    const m = line.match(/MURPHY\s*(?:USA|EXPRESS)\s*(\d{3,5})\b/i);
+    if (m) push(m[1]);
+  }
+  return ids;
+}
+
 function parseStore(text: string, lines: string[]): { store_number: string | null; store_name: string | null } {
-  // --- Brand first: never apply Stripes address hints to a 7-Eleven / Circle K slip ---
+  // --- Brand first: never apply Stripes address hints to a 7-Eleven / Circle K / Murphy slip ---
   // (Previously Navy/NAS → Stripes 9386 ran before 7-Eleven and hijacked Kingsville slips.)
+
+  // --- Murphy Express 8691 / Murphy USA 7738 / SITE: #### ---
+  if (isMurphyReceipt(text)) {
+    const brand = murphyBrandLabel(text);
+    // Header brand + store id (exact as printed when possible)
+    const header =
+      text.match(/\bMURPHY\s*EXPRESS\s*(\d{3,5})\b/i) ||
+      text.match(/\bMURPHY\s*USA\s*(\d{3,5})\b/i) ||
+      text.match(/\bMURPHY\s+(\d{3,5})\b/i);
+    let id = cleanStoreDigits(header?.[1]);
+    if (!id) {
+      const site = text.match(/\bSITE\s*[:#]?\s*(\d{3,5})\b/i);
+      id = cleanStoreDigits(site?.[1]);
+    }
+    if (!id) {
+      for (const line of lines.slice(0, 14)) {
+        const m =
+          line.match(/MURPHY\s*(?:USA|EXPRESS)?\s*(\d{3,5})\b/i) ||
+          line.match(/SITE\s*[:#]?\s*(\d{3,5})\b/i);
+        id = cleanStoreDigits(m?.[1]);
+        if (id) break;
+      }
+    }
+    if (id) return { store_number: id, store_name: `${brand} ${id}` };
+    return { store_number: null, store_name: brand };
+  }
 
   // --- 7-Eleven: STORE:42360 ---
   if (isSevenEleven(text)) {
@@ -897,6 +1049,7 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
       .replace(/S/g, "5")
       .replace(/B/g, "8");
 
+  const siteIds = extractSiteStoreIds(text, lineList);
   const candidates: { n: string; score: number }[] = [];
   const push = (raw: string, score: number) => {
     let n = fixDigits(raw);
@@ -906,10 +1059,12 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
       n = fixed;
     }
     if (n === "0000" || n === "1111") return;
+    // Never treat store / SITE / ST# as the gas card
+    if (siteIds.has(n)) return;
     // Common non-card IDs on Stripes slips (store / zip fragments)
     if (n === "2221" || n === "5216" || n === "7841" || n === "8405") return;
-    // Auth # 0051… style — reject only when score is weak
-    if (/^00\d{2}$/.test(n) && score < 25) return;
+    // Auth # 00xx style — only reject weak non-mask hits (mask pan 0058 is real on Capital One)
+    if (/^00\d{2}$/.test(n) && score < 18) return;
     candidates.push({ n, score });
   };
 
@@ -959,9 +1114,9 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
     const next = i + 1 < lineList.length ? lineList[i + 1] : "";
     const prev2 = i > 1 ? lineList[i - 2] : "";
 
-    // Never treat store # / auth / invoice lines as card last 4
+    // Never treat store # / auth / invoice / SITE / merchant lines as card last 4
     if (
-      /TRAN\s*#|AUTH\s*#|INVOICE|STAN:|PUMP|GALLON|PRICE\s*\/|SHIFT|PHONE|DATE\s|AID:|REF:|BATCH|SEQ:|STAN\s|STRIPES?|ST\s*#|STORE\s*#|WELCOME|WEBER|EVERHART|CORPUS|SELF\s*@|UNLD|DIESEL/i.test(
+      /TRAN\s*#|AUTH\s*#|INVOICE|STAN:|PUMP|GALLON|PRICE\s*\/|SHIFT|PHONE|DATE\s|AID:|REF:|BATCH|SEQ:|STAN\s|STRIPES?|ST\s*#|STORE\s*#|SITE\s*[:#]|MERCH|TRACE\s*[:#]|MURPHY|WELCOME|WEBER|EVERHART|CORPUS|SELF\s*@|UNLD|DIESEL|QTY\s*\(|FUEL\s*TOTAL|NET\s*TOTAL/i.test(
         raw
       )
     ) {
@@ -1009,7 +1164,8 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
     m = L.replace(/\s+/g, "").match(/^\*{4,}(\d{4})$/);
     if (m) {
       let score = 22;
-      if (/USD|TOTAL|CREDIT/i.test(prev)) score = 34;
+      if (/USD|TOTAL|CREDIT|VISA|SALE/i.test(prev)) score = 34;
+      if (/ENTRY|CHIP|CONTACT|METHOD/i.test(next)) score = Math.max(score, 36);
       push(m[1], score);
       continue;
     }
@@ -1017,20 +1173,34 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
     m = L.match(/(?:ACCT|CARD)[^\d]{0,24}\*{1,}\s*(\d{4})\b/i);
     if (m) push(m[1], 26);
 
+    // Murphy / chip: ************0058 directly under Visa / SALE
+    if (/^\*{4,}\s*\d{4}\s*$/.test(L) || /^\*{6,}\d{4}$/.test(L.replace(/\s+/g, ""))) {
+      const pan = L.match(/\*{2,}\s*(\d{4})\b/);
+      if (pan) {
+        let score = 28;
+        if (/VISA|SALE|MASTERCARD|DEBIT/i.test(prev + " " + prev2)) score = 38;
+        if (/ENTRY|CHIP|METHOD|INVOICE/i.test(next)) score = Math.max(score, 40);
+        push(pan[1], score);
+        continue;
+      }
+    }
+
     if (/VISA|MASTERCARD|CAPITAL\s*ONE/i.test(raw)) {
       const same = raw.match(/(\d{4})\s*$/);
-      if (same && !/AID|AUTH/i.test(raw)) push(same[1], 10);
+      if (same && !/AID|AUTH|MERCH/i.test(raw)) push(same[1], 10);
       // Card last 4 is often ABOVE the VISA line on Stripes (mask line then Entry then AppName)
       const p4 =
         prev.match(/\*{2,}\s*(\d{4})\b/) ||
         prev.match(/^[^0-9]{2,}(\d{4})\s*$/) ||
         toMask(prev).match(/\*{2,}(\d{4})/);
       if (p4) push(p4[1], 28);
+      // Murphy: VISA then next line is ************0058
       const n4 =
         next.match(/\*{2,}\s*(\d{4})\b/) ||
+        toMask(next).match(/\*{2,}\s*(\d{4})\b/) ||
         next.match(/^[^0-9]{2,}(\d{4})\s*$/) ||
         next.match(/^(\d{4})\s*$/);
-      if (n4) push(n4[1], 16);
+      if (n4) push(n4[1], 36);
     }
 
     // After USD$ amount, next non-empty line often is the pan last4
@@ -1064,17 +1234,17 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
       }
     }
 
-    // Line immediately before "Entry: Chip/Contactless" is almost always the pan
-    if (/ENTRY\s*:|CHIP\s*READ|CONTACTLESS/i.test(raw)) {
+    // Line immediately before "Entry: Chip/Contactless" / "Entry Method" is almost always the pan
+    if (/ENTRY\s*:|ENTRY\s*METHOD|CHIP\s*READ|CONTACTLESS/i.test(raw)) {
       const prevL = toMask(prev);
       const pan =
         prevL.match(/\*{2,}\s*(\d{4})\b/) ||
         prev.match(/[XxKk*#]{4,}(\d{4})\b/) ||
         prev.match(/([0-9OIlBGQS()g]{4,6})\s*$/);
-      if (pan) push(pan[1], 36);
+      if (pan) push(pan[1], 40);
       else {
         const t = confusableToCardDigits(prev.slice(-8));
-        if (t) push(t, 33);
+        if (t && !siteIds.has(t)) push(t, 33);
       }
     }
   }
@@ -1133,12 +1303,24 @@ function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
 
   const { store_number, store_name } = parseStore(normalized, lines);
   let card_last4 = parseCardLast4(normalized, lines);
-  // Don't use store site number as card (Stripes 2221 ≠ card 2221)
+  // Don't use store / SITE number as card (Murphy 7738 ≠ card 0058; Stripes 2221 ≠ card)
+  const siteIds = extractSiteStoreIds(normalized, lines);
   if (card_last4 && store_number && card_last4 === store_number) {
+    card_last4 = null;
+  }
+  if (card_last4 && siteIds.has(card_last4)) {
     card_last4 = null;
   }
   if (card_last4 && store_name && new RegExp(`\\b${card_last4}\\b`).test(store_name)) {
     card_last4 = null;
+  }
+  // Merchant terminal tails (Merch*******5001) are not gas cards
+  if (card_last4 && new RegExp(`Merch[^\\n]{0,20}${card_last4}`, "i").test(normalized)) {
+    // Only kill if no real pan mask also has this last4
+    const panHas =
+      new RegExp(`\\*{4,}\\s*${card_last4}\\b`).test(normalized.replace(/[xX#•·]/g, "*")) ||
+      new RegExp(`\\*{6,}${card_last4}\\b`).test(normalized.replace(/[xX#•·]/g, "*"));
+    if (!panHas) card_last4 = null;
   }
   // Flag any prepay/pre-auth slip (even if OCR invents a gallon number)
   const is_prepay = detectPrepay(normalized);
@@ -1246,6 +1428,17 @@ function storeKeyClient(store: string | null | undefined, raw: string): string {
     const m = rawL.match(/store\s*[:#]?\s*(\d{3,6})/) || s.match(/(\d{3,6})/);
     return m ? `7eleven_${m[1]}` : "7eleven";
   }
+  if (
+    /murphy/.test(s) ||
+    /murphy\s*(usa|express)/.test(rawL) ||
+    (/\bsite\s*[:#]/.test(rawL) && (/qty\s*\(\s*gal/.test(rawL) || /fuel\s*total/.test(rawL)))
+  ) {
+    const m =
+      (s + " " + rawL).match(/murphy\s*(?:usa|express)\s*(\d{3,5})/) ||
+      rawL.match(/\bsite\s*[:#]?\s*(\d{3,5})/) ||
+      s.match(/(\d{3,5})/);
+    return m ? `murphy_${m[1]}` : "murphy";
+  }
   return "global";
 }
 
@@ -1261,6 +1454,7 @@ function moneyFromLine(line: string): number | null {
 
 function gallonsFromLine(line: string): number | null {
   const m =
+    line.match(/QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
     line.match(/GALLONS?\s*[:#]?\s*(\d+\.\d{1,4})/i) ||
     line.match(/\b(\d{1,2}\.\d{2,4})\s*G\b/i) ||
     line.match(/\b(\d{1,2}\.\d{2,4})G\b/i) ||
@@ -1331,15 +1525,35 @@ export function applyOcrLearning(
   const d0 = applySub("fuel_date", out.fuel_date);
   out.fuel_date = d0 == null || d0 === "" ? out.fuel_date : String(d0);
 
-  // 2) Pattern: gallons OCR was $/gal — re-scan for xx.xxxG in product lines
+  // 2) Pattern: gallons OCR was $/gal — re-scan for xx.xxxG / QTY(GAL) in product lines
   const gPatterns = patternsFor("gallons");
   const rejectPpg = gPatterns.includes("reject_ppg") || gPatterns.includes("prefer_G_token");
+  const preferQtyGal = gPatterns.includes("prefer_qty_gal");
   const galLooksPpg =
     out.gallons != null && out.gallons >= 1.2 && out.gallons <= 9.5;
+  // Murphy: always prefer explicit QTY(GAL) when present
+  if (preferQtyGal || /QTY\s*\(\s*GAL/i.test(rawText)) {
+    for (const line of lines) {
+      const m = line.match(/QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/i);
+      if (m) {
+        const n = parseFloat(m[1]);
+        if (n > 0.5 && n < 120) {
+          out.gallons = Math.round(n * 1000) / 1000;
+          break;
+        }
+      }
+    }
+  }
   if (rejectPpg || galLooksPpg || out.gallons == null) {
     const gCandidates: number[] = [];
     for (const line of lines) {
-      if (/SELF\s*@|PRICE\s*\/|\/\s*G(?:AL)?\b/i.test(line) && !/\d+\.\d+\s*G\b/i.test(line)) {
+      if (/SELF\s*@|PRICE\s*\/|\/\s*G(?:AL)?\b/i.test(line) && !/\d+\.\d+\s*G\b|QTY\s*\(/i.test(line)) {
+        continue;
+      }
+      const qty = line.match(/QTY\s*\(\s*GAL(?:LON)?S?\s*\)\s*[:#]?\s*(\d+\.\d{1,4})/i);
+      if (qty) {
+        const n = parseFloat(qty[1]);
+        if (n > 0.5 && n < 120) gCandidates.push(n);
         continue;
       }
       const m =
@@ -1368,6 +1582,33 @@ export function applyOcrLearning(
       const derived = out.total_cost / out.gallons;
       if (derived > 5 && derived < 100) {
         out.gallons = Math.round(derived * 1000) / 1000;
+      }
+    }
+  }
+
+  // 2b) Card was store/SITE number — force pan-mask re-read
+  const cardPatsEarly = patternsFor("card_last4");
+  if (
+    cardPatsEarly.includes("reject_site_as_card") ||
+    (out.card_last4 &&
+      (out.store_number?.includes(out.card_last4) ||
+        new RegExp(`SITE\\s*[:#]?\\s*${out.card_last4}\\b`, "i").test(rawText) ||
+        new RegExp(`MURPHY\\s*USA\\s*${out.card_last4}\\b`, "i").test(rawText)))
+  ) {
+    const siteIds = extractSiteStoreIds(rawText, lines);
+    if (out.card_last4 && siteIds.has(out.card_last4)) {
+      out.card_last4 = null;
+    }
+    // Prefer ************XXXX near Visa / Entry Method
+    for (let i = 0; i < lines.length; i++) {
+      const L = lines[i].replace(/[xX#•·]/g, "*");
+      if (/SITE|MERCH|TRACE|MURPHY|TRAN\s*#|AUTH/i.test(lines[i])) continue;
+      const pan = L.match(/\*{3,}\s*(\d{4})\b/);
+      if (!pan) continue;
+      const ctx = `${lines[i - 1] || ""} ${lines[i]} ${lines[i + 1] || ""}`;
+      if (/VISA|ENTRY|CHIP|SALE|MASTERCARD/i.test(ctx) && !siteIds.has(pan[1])) {
+        out.card_last4 = pan[1];
+        break;
       }
     }
   }

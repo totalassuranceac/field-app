@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 
@@ -55,6 +55,38 @@ function equipmentNotes(v: Vehicle): string[] {
   if (v.gps_status === "missing") notes.push("Install GPS");
   else if (v.gps_status === "not_working") notes.push("Repair GPS");
   return notes;
+}
+
+function equipBadgeClass(status: string | null | undefined): string {
+  const s = status || "n/a";
+  return s === "working" || s === "n/a" ? "ok" : "danger";
+}
+
+function equipLabel(status: string | null | undefined): string {
+  const s = status || "n/a";
+  if (s === "n/a") return "N/A";
+  return s.replace(/_/g, " ");
+}
+
+function vehicleTitle(v: Vehicle): string {
+  return [v.year, v.make, v.model].filter(Boolean).join(" ") || "—";
+}
+
+function Field({
+  label,
+  children,
+  wide,
+}: {
+  label: string;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`vehicle-field${wide ? " vehicle-field-wide" : ""}`}>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
 }
 
 export function VehiclesPage() {
@@ -137,23 +169,27 @@ export function VehiclesPage() {
     }
   }
 
+  const canEdit = can(user, "manageVehicles");
+
   return (
-    <div>
+    <div className="vehicles-page">
       <div className="page-header">
         <div>
           <h1>Vehicles</h1>
           <p>Fleet registry, dash cams, and equipment notes</p>
         </div>
-        {can(user, "manageVehicles") && (
+        {canEdit && (
           <button className="btn no-print" onClick={openCreate}>
             Add vehicle
           </button>
         )}
       </div>
       {error && <div className="error">{error}</div>}
-      <div className="card">
-        <div className="table-wrap">
-          <table>
+
+      {/* Desktop / wide: compact table */}
+      <div className="card vehicles-wide">
+        <div className="table-wrap vehicles-table-wrap">
+          <table className="vehicles-table">
             <thead>
               <tr>
                 <th>Unit</th>
@@ -168,87 +204,151 @@ export function VehiclesPage() {
               </tr>
             </thead>
             <tbody>
-              {vehicles.map((v) => (
-                <tr key={v.id}>
-                  <td>
-                    <strong>{v.unit_number}</strong>
-                    <div className="muted">{v.status}</div>
-                  </td>
-                  <td>
-                    {v.assigned_driver || "—"}
-                    {v.phone && <div className="muted">{v.phone}</div>}
-                  </td>
-                  <td>
-                    {[v.year, v.make, v.model].filter(Boolean).join(" ") || "—"}
-                    {v.modifications && <div className="muted">{v.modifications}</div>}
-                  </td>
-                  <td>
-                    {v.plate || "—"}
-                    {v.vin && <div className="muted" style={{ fontSize: "0.78rem" }}>{v.vin}</div>}
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        v.dash_cam_status === "working" || v.dash_cam_status === "n/a"
-                          ? "ok"
-                          : "danger"
-                      }`}
-                    >
-                      {v.dash_cam_status === "n/a" ? "N/A" : v.dash_cam_status.replace(/_/g, " ")}
-                    </span>
-                    {v.cam_type && (
-                      <div className="muted" style={{ fontSize: "0.78rem" }}>
-                        {v.cam_type}
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        v.gps_status === "working" ||
-                        v.gps_status === "n/a" ||
-                        !v.gps_status
-                          ? "ok"
-                          : "danger"
-                      }`}
-                    >
-                      {v.gps_status === "n/a" || !v.gps_status
-                        ? "N/A"
-                        : v.gps_status.replace(/_/g, " ")}
-                    </span>
-                    {v.gps_tracker && (
-                      <div className="muted" style={{ fontSize: "0.78rem" }}>
-                        {v.gps_tracker}
-                      </div>
-                    )}
-                    {equipmentNotes(v).length > 0 && (
-                      <div style={{ fontSize: "0.75rem", color: "var(--danger)", marginTop: "0.2rem" }}>
-                        {equipmentNotes(v).join(" · ")}
-                      </div>
-                    )}
-                  </td>
-                  <td>{v.registration_expires || "—"}</td>
-                  <td>
-                    {v.insurance_expires || "—"}
-                    {v.insurance_card && (
-                      <div className="muted" style={{ fontSize: "0.78rem" }}>
-                        card: {v.insurance_card}
-                      </div>
-                    )}
-                  </td>
-                  <td className="no-print">
-                    {can(user, "manageVehicles") && (
-                      <button className="btn secondary" onClick={() => openEdit(v)}>
-                        Edit
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {vehicles.map((v) => {
+                const needs = equipmentNotes(v);
+                return (
+                  <tr key={v.id}>
+                    <td>
+                      <strong>{v.unit_number}</strong>
+                      <div className="muted">{v.status}</div>
+                    </td>
+                    <td>
+                      {v.assigned_driver || "—"}
+                      {v.phone && <div className="muted">{v.phone}</div>}
+                    </td>
+                    <td>
+                      {vehicleTitle(v)}
+                      {v.modifications && <div className="muted">{v.modifications}</div>}
+                    </td>
+                    <td>
+                      {v.plate || "—"}
+                      {v.vin && (
+                        <div className="muted vehicles-vin">{v.vin}</div>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`badge ${equipBadgeClass(v.dash_cam_status)}`}>
+                        {equipLabel(v.dash_cam_status)}
+                      </span>
+                      {v.cam_type && <div className="muted vehicles-sub">{v.cam_type}</div>}
+                    </td>
+                    <td>
+                      <span className={`badge ${equipBadgeClass(v.gps_status)}`}>
+                        {equipLabel(v.gps_status)}
+                      </span>
+                      {v.gps_tracker && (
+                        <div className="muted vehicles-sub">{v.gps_tracker}</div>
+                      )}
+                      {needs.length > 0 && (
+                        <div className="vehicles-needs">{needs.join(" · ")}</div>
+                      )}
+                    </td>
+                    <td>{v.registration_expires || "—"}</td>
+                    <td>
+                      {v.insurance_expires || "—"}
+                      {v.insurance_card && (
+                        <div className="muted vehicles-sub">card: {v.insurance_card}</div>
+                      )}
+                    </td>
+                    <td className="no-print">
+                      {canEdit && (
+                        <button className="btn secondary btn-sm" onClick={() => openEdit(v)}>
+                          Edit
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Phone: readable cards — no mid-word column crush */}
+      <ul className="vehicles-narrow">
+        {vehicles.map((v) => {
+          const needs = equipmentNotes(v);
+          return (
+            <li
+              key={v.id}
+              className={`vehicle-card${v.status !== "active" ? " is-off" : ""}`}
+            >
+              <div className="vehicle-card-header">
+                <div className="vehicle-card-title">
+                  <strong className="vehicle-card-unit">Unit {v.unit_number}</strong>
+                  <div className="vehicle-card-badges">
+                    <span className="badge">{v.status.replace(/_/g, " ")}</span>
+                    {needs.length > 0 && <span className="badge danger">needs work</span>}
+                  </div>
+                </div>
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm no-print"
+                    onClick={() => openEdit(v)}
+                  >
+                    Edit
+                  </button>
+                )}
+              </div>
+              <dl className="vehicle-fields">
+                <Field label="Driver">
+                  {v.assigned_driver || "—"}
+                  {v.phone ? (
+                    <>
+                      <br />
+                      <a className="vehicle-phone" href={`tel:${v.phone.replace(/\D/g, "")}`}>
+                        {v.phone}
+                      </a>
+                    </>
+                  ) : null}
+                </Field>
+                <Field label="Vehicle">{vehicleTitle(v)}</Field>
+                <Field label="Plate">{v.plate || "—"}</Field>
+                <Field label="VIN">{v.vin || "—"}</Field>
+                <Field label="Dash cam">
+                  <span className={`badge ${equipBadgeClass(v.dash_cam_status)}`}>
+                    {equipLabel(v.dash_cam_status)}
+                  </span>
+                  {v.cam_type ? ` · ${v.cam_type}` : ""}
+                </Field>
+                <Field label="GPS">
+                  <span className={`badge ${equipBadgeClass(v.gps_status)}`}>
+                    {equipLabel(v.gps_status)}
+                  </span>
+                  {v.gps_tracker ? ` · ${v.gps_tracker}` : ""}
+                </Field>
+                <Field label="Registration">{v.registration_expires || "—"}</Field>
+                <Field label="Insurance">
+                  {v.insurance_expires || "—"}
+                  {v.insurance_card ? (
+                    <span className="muted"> · card: {v.insurance_card}</span>
+                  ) : null}
+                </Field>
+                {v.modifications ? (
+                  <Field label="Mods" wide>
+                    {v.modifications}
+                  </Field>
+                ) : null}
+                {needs.length > 0 ? (
+                  <Field label="Shop notes" wide>
+                    <span className="vehicles-needs">{needs.join(" · ")}</span>
+                  </Field>
+                ) : null}
+                {v.notes ? (
+                  <Field label="Notes" wide>
+                    {v.notes}
+                  </Field>
+                ) : null}
+              </dl>
+            </li>
+          );
+        })}
+      </ul>
+      {!vehicles.length && (
+        <div className="card empty">No vehicles yet.</div>
+      )}
 
       {showForm && (
         <div className="modal-backdrop" onClick={() => setShowForm(false)}>

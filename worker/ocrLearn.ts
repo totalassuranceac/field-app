@@ -37,6 +37,10 @@ export function storeKeyFrom(store: string | null | undefined, rawText?: string 
     const m = s.match(/(\d{3,6})/);
     return m ? `7eleven_${m[1]}` : "7eleven";
   }
+  if (/murphy/.test(s)) {
+    const m = s.match(/(\d{3,5})/);
+    return m ? `murphy_${m[1]}` : "murphy";
+  }
   const raw = (rawText || "").toLowerCase();
   if (/stripes?/.test(raw) || /\bst\s*#\s*\d{3,5}\b/.test(raw)) {
     const m =
@@ -52,6 +56,15 @@ export function storeKeyFrom(store: string | null | undefined, rawText?: string 
   if (/7[\s\-]?eleven/.test(raw)) {
     const m = raw.match(/store\s*[:#]?\s*(\d{3,6})/);
     return m ? `7eleven_${m[1]}` : "7eleven";
+  }
+  if (
+    /murphy\s*(usa|express)/.test(raw) ||
+    (/\bsite\s*[:#]/.test(raw) && (/qty\s*\(\s*gal/.test(raw) || /fuel\s*total/.test(raw)))
+  ) {
+    const m =
+      raw.match(/murphy\s*(?:usa|express)\s*(\d{3,5})/) ||
+      raw.match(/\bsite\s*[:#]?\s*(\d{3,5})/);
+    return m ? `murphy_${m[1]}` : "murphy";
   }
   return "global";
 }
@@ -115,38 +128,52 @@ function lineLabelHint(line: string, field?: string): string | null {
     "CREDIT DE",
     "TOTAL SALE",
     "TOTAL FUEL",
+    "FUEL TOTAL",
+    "NET TOTAL",
+    "CARD AMT",
     "FUEL TO",
     "USD$",
     "USD",
     "GALLONS",
+    "QTY(GAL)",
+    "QTY",
     "PRICE/G",
+    "PRICE/GAL",
     "SUBTOTAL",
     "CONTACTLESS",
+    "ENTRY METHOD",
     "ENTRY:",
     "CAPITAL ONE",
     "VISA",
-    "QTY",
     "AMOUNT",
     "CREDIT",
     "TOTAL",
     "ST#",
     "STORE",
+    "SITE",
+    "MURPHY EXPRESS",
+    "MURPHY USA",
+    "MURPHY",
   ];
   const u = line.toUpperCase();
   for (const l of labels) {
     if (u.includes(l.toUpperCase())) {
-      // For gallons, prefer product labels over TOTAL
-      if (field === "gallons" && /TOTAL|SUBTOTAL|CREDIT|USD|VISA|ENTRY|CONTACT/i.test(l)) {
+      // For gallons, prefer product labels over TOTAL / price
+      if (field === "gallons" && /TOTAL|SUBTOTAL|CREDIT|USD|VISA|ENTRY|CONTACT|PRICE|SITE|MURPHY|CARD AMT/i.test(l)) {
         continue;
       }
-      if (field === "card_last4" && /UNLD|DSL|SELF|GALLON|QTY|AMOUNT|ST#/i.test(l)) {
+      if (field === "card_last4" && /UNLD|DSL|SELF|GALLON|QTY|AMOUNT|ST#|SITE|MURPHY|PRICE|FUEL TOTAL|NET TOTAL/i.test(l)) {
+        continue;
+      }
+      if (field === "store_number" && /VISA|GALLON|QTY|CARD AMT|ENTRY/i.test(l)) {
         continue;
       }
       return l;
     }
   }
-  // Gallons often on lines with "xx.xxxG"
+  // Gallons often on lines with "xx.xxxG" or Murphy QTY(GAL)
   if (field === "gallons" && /\d+\.\d{2,4}\s*G\b/i.test(line)) return "QTY_G";
+  if (field === "gallons" && /QTY\s*\(\s*GAL/i.test(line)) return "QTY(GAL)";
   // Card mask lines
   if (field === "card_last4" && /[*xX#•·]{4,}\s*\d{4}/.test(line)) return "PAN_MASK";
   return null;
@@ -249,6 +276,29 @@ export async function recordOcrFeedback(
           await bumpMemory(db, storeKey, field, "pattern", "prefer_G_token", "1");
           await bumpMemory(db, "global", field, "pattern", "prefer_G_token", "1");
         }
+        if (storeKey.startsWith("murphy") || /murphy|qty\s*\(\s*gal/i.test(rawText || "")) {
+          await bumpMemory(db, storeKey, field, "pattern", "prefer_qty_gal", "1");
+          await bumpMemory(db, "global", field, "pattern", "prefer_qty_gal", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "QTY(GAL)", "1");
+        }
+      }
+      // Card: SITE/store number misread as last4 (Murphy 7738 → 0058)
+      if (field === "card_last4" && /^\d{4}$/.test(ocrS) && /^\d{4}$/.test(correct)) {
+        await bumpMemory(db, storeKey, field, "pattern", "reject_site_as_card", "1");
+        await bumpMemory(db, "global", field, "pattern", "reject_site_as_card", "1");
+        await bumpMemory(db, storeKey, field, "pattern", "pan_mask", "1");
+        await bumpMemory(db, storeKey, field, "pattern", "after:VISA", "1");
+        await bumpMemory(db, storeKey, field, "pattern", "before:ENTRY METHOD", "1");
+      }
+      if (field === "store_number") {
+        if (storeKey.startsWith("murphy") || /murphy|site\s*[:#]/i.test(rawText || "")) {
+          await bumpMemory(db, storeKey, field, "pattern", "prefer_site", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "MURPHY USA", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "SITE", "1");
+        }
+      }
+      if (field === "fuel_time" && (storeKey.startsWith("murphy") || /murphy/i.test(rawText || ""))) {
+        await bumpMemory(db, storeKey, field, "pattern", "date_time_same_line", "1");
       }
     } else {
       // OCR missed field entirely — still learn where the answer lives
@@ -257,14 +307,29 @@ export async function recordOcrFeedback(
         await bumpMemory(db, "global", field, "pattern", "after_usd", "1");
         await bumpMemory(db, storeKey, field, "pattern", "pan_mask", "1");
         await bumpMemory(db, "global", field, "pattern", "pan_mask", "1");
+        await bumpMemory(db, storeKey, field, "pattern", "after:VISA", "1");
+        await bumpMemory(db, storeKey, field, "pattern", "before:ENTRY METHOD", "1");
       }
       if (field === "gallons") {
         await bumpMemory(db, storeKey, field, "pattern", "prefer_G_token", "1");
         await bumpMemory(db, "global", field, "pattern", "prefer_G_token", "1");
+        if (storeKey.startsWith("murphy") || /murphy|qty\s*\(\s*gal/i.test(rawText || "")) {
+          await bumpMemory(db, storeKey, field, "pattern", "prefer_qty_gal", "1");
+          await bumpMemory(db, "global", field, "pattern", "prefer_qty_gal", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "QTY(GAL)", "1");
+        }
       }
       if (field === "store_number") {
         await bumpMemory(db, storeKey, field, "pattern", "prefer_st_hash", "1");
         await bumpMemory(db, "global", field, "pattern", "prefer_st_hash", "1");
+        if (storeKey.startsWith("murphy") || /murphy|site\s*[:#]/i.test(rawText || "")) {
+          await bumpMemory(db, storeKey, field, "pattern", "prefer_site", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "MURPHY USA", "1");
+          await bumpMemory(db, storeKey, field, "line_label", "SITE", "1");
+        }
+      }
+      if (field === "fuel_time" && (storeKey.startsWith("murphy") || /murphy/i.test(rawText || ""))) {
+        await bumpMemory(db, storeKey, field, "pattern", "date_time_same_line", "1");
       }
     }
 

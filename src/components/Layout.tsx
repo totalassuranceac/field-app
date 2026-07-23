@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { api, appBrandName, can, roleLabel, type Role } from "../api";
+import { api, appBrandName, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
 import { useAuth } from "../auth";
 import { NotificationBell } from "./NotificationBell";
 import { OfflineBanner } from "./OfflineBanner";
@@ -120,6 +120,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/roles") ||
     pathname.startsWith("/audit") ||
     pathname.startsWith("/handbook") ||
+    pathname.startsWith("/howto") ||
+    pathname.startsWith("/reviews") ||
     pathname.startsWith("/messages") ||
     pathname.startsWith("/notifications") ||
     pathname.startsWith("/settings")
@@ -136,6 +138,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [unread, setUnread] = useState(0);
   const [adminOpen, setAdminOpen] = useState<string>(() => pathCategory(location.pathname));
   const sidebarClass = open ? "sidebar open" : "sidebar";
+  // White/light logo artwork on dark navy sidebar
   const logoSrc = "/logo-light.png";
   const isDriver = user?.role === "driver";
   const isOffice = user?.role === "office";
@@ -171,12 +174,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
     document.title = `${brand} · Total Assurance`;
   }, [brand]);
 
+  const adminShell = usesAdminShell(user) && !viewAsRole;
+  const readOnly = isViewer(user);
+
   // Keep the category matching the page open while browsing
   useEffect(() => {
-    if (user?.role === "admin" && !viewAsRole) {
+    if (adminShell) {
       setAdminOpen(pathCategory(location.pathname));
     }
-  }, [location.pathname, user?.role, viewAsRole]);
+  }, [location.pathname, adminShell]);
 
   const officeNav: NavItem[] = [
     { to: "/", label: "Home", show: true },
@@ -185,6 +191,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/inventory", label: "Inventory", show: can(user, "viewInventory") },
     { to: "/assets", label: "Assets", show: can(user, "viewCompanyAssets") },
     { to: "/warranties", label: "Warranties", show: true },
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
@@ -203,6 +211,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
   ];
   const warehouseAccount: NavItem[] = [
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     { to: "/settings", label: "Settings", show: true },
   ];
@@ -212,6 +222,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/warranties", label: "Warranties", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     {
       to: "/fuel",
@@ -277,6 +289,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
       label: "Assets",
       show: can(user, "viewCompanyAssets") && !isDriver,
     },
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     { to: "/audit", label: "Audit log", show: can(user, "viewAudit") },
   ];
@@ -308,11 +322,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const adminCompany: NavItem[] = [
     { to: "/admin", label: "People & settings", show: true },
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
-    { to: "/roles", label: "Role simulator", show: true },
-    { to: "/audit", label: "Audit log", show: true },
+    { to: "/roles", label: "Role simulator", show: isTrueAdmin && !viewAsRole },
+    { to: "/audit", label: "Audit log", show: can(user, "viewAudit") },
   ];
 
   function toggleAdminCat(id: string) {
@@ -345,7 +361,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <NavGroup title="Office" items={officeNav} />
               <NavGroup title="Account" items={officeAccount} />
             </>
-          ) : user?.role === "admin" && !viewAsRole ? (
+          ) : adminShell ? (
             <>
               <NavGroup title="Home" items={adminHome} />
               <NavCategory
@@ -404,6 +420,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </aside>
       <div className="content-column">
         <OfflineBanner />
+        {readOnly && (
+          <div className="viewer-readonly-bar no-print" role="status">
+            <strong>Viewer · look around only</strong>
+            <span>Same layout as Admin — you can’t change or submit data</span>
+          </div>
+        )}
         {isTrueAdmin && (
           <div
             className={`view-as-bar no-print${viewAsRole ? " is-preview" : ""}`}

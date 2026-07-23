@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, can, roleLabel } from "../api";
 import { useAuth } from "../auth";
@@ -80,6 +80,71 @@ function toneForCount(n: number, warnAt = 1, badAt = 3): Tone {
   return "ok";
 }
 
+function useHomeCollapse(key: string, defaultOpen = false) {
+  const storageKey = `home_collapse_${key}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      const v = sessionStorage.getItem(storageKey);
+      if (v === "1") return true;
+      if (v === "0") return false;
+    } catch {
+      /* ignore */
+    }
+    return defaultOpen;
+  });
+  function toggle() {
+    setOpen((prev) => {
+      const next = !prev;
+      try {
+        sessionStorage.setItem(storageKey, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+  return [open, toggle] as const;
+}
+
+function CollapsibleHomeSection({
+  id,
+  title,
+  count,
+  link,
+  defaultOpen = false,
+  children,
+}: {
+  id: string;
+  title: string;
+  count?: number;
+  link?: { to: string; label: string };
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, toggle] = useHomeCollapse(id, defaultOpen);
+  return (
+    <section className={`home-section home-collapse${open ? " is-open" : ""}`} aria-label={title}>
+      <div className="home-section-head home-collapse-head">
+        <button type="button" className="home-collapse-toggle" onClick={toggle} aria-expanded={open}>
+          <span className="home-collapse-chevron" aria-hidden>
+            {open ? "▾" : "▸"}
+          </span>
+          <h2 style={{ margin: 0 }}>{title}</h2>
+          {count != null && count > 0 ? (
+            <span className="badge warning home-collapse-count">{count}</span>
+          ) : null}
+        </button>
+        {link ? (
+          <Link to={link.to} className="home-mini-link">
+            {link.label}
+          </Link>
+        ) : null}
+      </div>
+      {open ? <div className="home-collapse-body">{children}</div> : null}
+    </section>
+  );
+}
+
 function FocusGrid({
   items,
   title,
@@ -118,32 +183,26 @@ function FocusGrid({
           <span className="badge ok">All clear</span>
         )}
       </div>
-      {hot.length > 0 && (
-        <div className="focus-hot-grid">
-          {hot.map((t) => (
-            <Link key={t.key} to={t.to} className={`focus-card tone-${t.tone}`}>
-              <span className="focus-card-value">{t.value}</span>
-              <span className="focus-card-label">{t.label}</span>
-              <span className="focus-card-hint">{t.hint}</span>
-            </Link>
-          ))}
-        </div>
-      )}
-      {rest.length > 0 && (
-        <div className="home-actions status-tiles focus-rest-grid">
-          {rest.map((t) => (
-            <Link key={t.key} to={t.to} className={`home-action status-tile tone-${t.tone}`}>
-              <span className="home-action-icon status-tile-icon" aria-hidden>
-                {t.value}
-              </span>
-              <span className="home-action-text">
-                <strong>{t.label}</strong>
-                <span>{t.hint}</span>
-              </span>
-            </Link>
-          ))}
-        </div>
-      )}
+      {/* Hot + rest share the same left-digit button layout (compact) */}
+      <div className="home-actions status-tiles focus-all-grid">
+        {sorted.map((t) => (
+          <Link
+            key={t.key}
+            to={t.to}
+            className={`home-action status-tile tone-${t.tone}${
+              t.tone === "bad" || t.tone === "warn" ? " is-hot" : ""
+            }`}
+          >
+            <span className="home-action-icon status-tile-icon" aria-hidden>
+              {t.value}
+            </span>
+            <span className="home-action-text">
+              <strong>{t.label}</strong>
+              <span>{t.hint}</span>
+            </span>
+          </Link>
+        ))}
+      </div>
     </section>
   );
 }
@@ -188,6 +247,8 @@ export function DashboardPage() {
   const isAdmin = role === "admin";
   const isMechanic = role === "mechanic";
   const isViewer = role === "viewer";
+  /** Same home / command-center UI as admin */
+  const isAdminShell = isAdmin || isViewer;
 
   const [data, setData] = useState<Dash | null>(null);
   const [error, setError] = useState("");
@@ -243,7 +304,7 @@ export function DashboardPage() {
               </span>
             </Link>
           )}
-          {isAdmin && (
+          {isAdminShell && (
             <>
               <Link className="home-action primary" to="/inventory">
                 <span className="home-action-text">
@@ -259,7 +320,7 @@ export function DashboardPage() {
               </Link>
             </>
           )}
-          {!isWarehouse && !isAdmin && (
+          {!isWarehouse && !isAdminShell && (
             <Link className="home-action primary" to={isDriver ? "/fuel" : "/issues"}>
               <span className="home-action-text">
                 <strong>{isDriver ? "Log fuel" : "Continue"}</strong>
@@ -596,31 +657,33 @@ export function DashboardPage() {
         { to: "/inspections", icon: "✓", title: "Weekly checks", hint: "Status board" },
       ];
     }
-    if (isViewer) {
+    // Admin shell (admin + viewer) — same hub; viewer is read-only via API/UI gates
+    if (isAdminShell) {
       return [
-        { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations", primary: true },
-        { to: "/reports", icon: "📈", title: "Reports", hint: "Browse numbers" },
-        { to: "/inspections", icon: "✓", title: "Weekly checks", hint: "Status only" },
-        { to: "/alerts", icon: "🚩", title: "Mileage flags", hint: "Open flags" },
+        { to: "/issues", icon: "🔧", title: "Repairs", hint: "Shop + field requests", primary: true },
+        { to: "/inventory", icon: "📦", title: "Warehouse", hint: "Stock · pickup · stage" },
+        { to: "/warranties", icon: "🧾", title: "Warranties", hint: "Drop-offs to process" },
+        { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet on the road" },
+        { to: "/assets", icon: "🧰", title: "Assets", hint: "Bottles · ladders · tools" },
+        { to: "/alerts", icon: "🚩", title: "Flags", hint: "Mileage / fuel oddities" },
+        { to: "/yard", icon: "📋", title: "Yard", hint: "Compliance walk" },
+        ...(isAdmin
+          ? [{ to: "/roles", icon: "👁", title: "Role simulator", hint: "Preview staff screens" }]
+          : []),
+        { to: "/admin", icon: "👥", title: "People", hint: "Users · settings" },
+        { to: "/audit", icon: "📜", title: "Audit", hint: "Who changed what" },
       ];
     }
-    // Admin — operations hub actions
     return [
-      { to: "/issues", icon: "🔧", title: "Repairs", hint: "Shop + field requests", primary: true },
-      { to: "/inventory", icon: "📦", title: "Warehouse", hint: "Stock · pickup · stage" },
-      { to: "/warranties", icon: "🧾", title: "Warranties", hint: "Drop-offs to process" },
-      { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet on the road" },
-      { to: "/assets", icon: "🧰", title: "Assets", hint: "Bottles · ladders · tools" },
-      { to: "/alerts", icon: "🚩", title: "Flags", hint: "Mileage / fuel oddities" },
-      { to: "/yard", icon: "📋", title: "Yard", hint: "Compliance walk" },
-      { to: "/roles", icon: "👁", title: "Role simulator", hint: "Preview staff screens" },
-      { to: "/admin", icon: "👥", title: "People", hint: "Users · settings" },
-      { to: "/audit", icon: "📜", title: "Audit", hint: "Who changed what" },
+      { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations", primary: true },
+      { to: "/reports", icon: "📈", title: "Reports", hint: "Browse numbers" },
     ];
   })();
 
-  const kicker = isAdmin
-    ? "Command center"
+  const kicker = isAdminShell
+    ? isViewer
+      ? "Explorer (read-only)"
+      : "Command center"
     : isWarehouse
       ? "Warehouse"
       : isMechanic
@@ -664,7 +727,7 @@ export function DashboardPage() {
           <h1 className="home-title">Hi, {first}</h1>
           <p className="home-sub">{subtitle}</p>
         </div>
-        {isAdmin && (
+        {isAdminShell && (
           <button type="button" className="btn secondary home-refresh" onClick={load}>
             Refresh
           </button>
@@ -741,15 +804,15 @@ export function DashboardPage() {
 
       <ActionRow items={actions} />
 
-      {/* Admin / shop: tracking list when hot */}
+      {/* Admin / shop: tracking — collapsed by default for a cleaner home */}
       {!isDriver && !isWarehouse && trackingList.length > 0 && (
-        <section className="home-section" aria-label="Tracking">
-          <div className="home-section-head">
-            <h2>Tracking issues</h2>
-            <Link to="/live" className="home-mini-link">
-              Map →
-            </Link>
-          </div>
+        <CollapsibleHomeSection
+          id="tracking"
+          title="Tracking issues"
+          count={trackingList.length}
+          link={{ to: "/live", label: "Map →" }}
+          defaultOpen={false}
+        >
           <ul className="home-feed card" style={{ padding: "0.55rem 0.75rem" }}>
             {trackingList.slice(0, 6).map((t, i) => (
               <li key={`${t.code}-${t.vehicle_id ?? i}`}>
@@ -763,30 +826,25 @@ export function DashboardPage() {
               </li>
             ))}
           </ul>
-        </section>
+        </CollapsibleHomeSection>
       )}
 
-      {/* Recent fuel / flags for admin & mechanic */}
-      {data && (isAdmin || isMechanic || isViewer) && (
-        <section className="home-section" aria-label="Recent">
-          <div className="home-section-head">
-            <h2>Recent activity</h2>
-          </div>
-          <div className="home-activity-grid">
+      {/* Recent fuel + mileage flags — each collapsible */}
+      {data && (isAdminShell || isMechanic) && (
+        <>
+          <CollapsibleHomeSection
+            id="recent_fuel"
+            title="Recent activity"
+            count={data.recent_fuel.length || undefined}
+            link={can(user, "logFuel") ? { to: "/fuel", label: "Log →" } : undefined}
+            defaultOpen={false}
+          >
             <div className="card home-activity-card">
-              <div className="home-collapse-label" style={{ padding: "0.15rem 0 0.35rem" }}>
-                <strong>Fuel</strong>
-                {can(user, "logFuel") && (
-                  <Link className="home-mini-link" to="/fuel" style={{ marginLeft: "0.5rem" }}>
-                    Log →
-                  </Link>
-                )}
-              </div>
               {!data.recent_fuel.length ? (
-                <p className="muted empty-tight">No entries yet.</p>
+                <p className="muted empty-tight">No fuel entries yet.</p>
               ) : (
                 <ul className="home-feed">
-                  {data.recent_fuel.slice(0, 4).map((f) => (
+                  {data.recent_fuel.slice(0, 6).map((f) => (
                     <li key={f.id}>
                       <span className="home-feed-main">
                         <strong>{f.unit_number}</strong> · {f.employee_name}
@@ -800,18 +858,21 @@ export function DashboardPage() {
                 </ul>
               )}
             </div>
+          </CollapsibleHomeSection>
+
+          <CollapsibleHomeSection
+            id="mileage_flags"
+            title="Mileage flags"
+            count={data.recent_alerts.length || undefined}
+            link={{ to: "/alerts", label: "All →" }}
+            defaultOpen={false}
+          >
             <div className="card home-activity-card">
-              <div className="home-collapse-label" style={{ padding: "0.15rem 0 0.35rem" }}>
-                <strong>Mileage flags</strong>
-                <Link className="home-mini-link" to="/alerts" style={{ marginLeft: "0.5rem" }}>
-                  All →
-                </Link>
-              </div>
               {!data.recent_alerts.length ? (
                 <p className="muted empty-tight">None open.</p>
               ) : (
                 <ul className="home-feed">
-                  {data.recent_alerts.slice(0, 4).map((a) => (
+                  {data.recent_alerts.slice(0, 6).map((a) => (
                     <li key={a.id}>
                       <span className="home-feed-main">
                         <span className={`badge ${a.severity}`}>{a.severity}</span>{" "}
@@ -823,8 +884,8 @@ export function DashboardPage() {
                 </ul>
               )}
             </div>
-          </div>
-        </section>
+          </CollapsibleHomeSection>
+        </>
       )}
     </div>
   );

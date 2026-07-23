@@ -3,6 +3,7 @@ import { useAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LoginPage } from "./pages/LoginPage";
+import { JoinPage } from "./pages/JoinPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { FuelPage } from "./pages/FuelPage";
 import { AlertsPage } from "./pages/AlertsPage";
@@ -23,6 +24,8 @@ import { AssetsPage } from "./pages/AssetsPage";
 import { MessagesPage } from "./pages/MessagesPage";
 import { WarrantiesPage } from "./pages/WarrantiesPage";
 import { HandbookPage } from "./pages/HandbookPage";
+import { HowToPage } from "./pages/HowToPage";
+import { ReviewsPage } from "./pages/ReviewsPage";
 import { RolesPage } from "./pages/RolesPage";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -68,6 +71,7 @@ export default function App() {
     <ErrorBoundary title="App error">
       <Routes>
         <Route path="/login" element={<LoginRoute />} />
+        <Route path="/join/:token" element={<JoinPage />} />
         <Route
           path="/*"
           element={
@@ -208,6 +212,22 @@ export default function App() {
                     element={
                       <Page title="Employee handbook">
                         <HandbookPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/howto"
+                    element={
+                      <Page title="How-to">
+                        <HowToPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/reviews"
+                    element={
+                      <Page title="Our reviews">
+                        <ReviewsPage />
                       </Page>
                     }
                   />

@@ -146,25 +146,27 @@ export const ROLE_PERMS = {
   manageAlerts: ["admin", "office", "mechanic"] as Role[],
   reportIssues: ["admin", "office", "driver", "mechanic"] as Role[],
   manageIssues: ["admin", "mechanic", "office"] as Role[],
-  /** Audit trail is admin-only */
-  viewAudit: ["admin"] as Role[],
+  /** Audit trail: admin + viewer (browse only; mutations still admin-only) */
+  viewAudit: ["admin", "viewer"] as Role[],
   viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"] as Role[],
   manageSettings: ["admin"] as Role[],
+  /** Read company settings / people lists without write (viewer explores app) */
+  browseAdmin: ["admin", "viewer"] as Role[],
   /**
    * Inventory
-   * - view: admin, office, warehouse (techs do not browse full catalog)
+   * - view: admin, office, warehouse, viewer (techs do not browse full catalog)
    * - manage: issue/receive, transfers, import (admin + warehouse; office view-only helpers)
    * - levels: min/max only admin + warehouse
    */
-  viewInventory: ["admin", "office", "warehouse"] as Role[],
+  viewInventory: ["admin", "office", "warehouse", "viewer"] as Role[],
   manageInventory: ["admin", "warehouse"] as Role[],
   manageInventoryLevels: ["admin", "warehouse"] as Role[],
   /**
    * Company assets (bottles, ladders, tools) — outside pricebook
-   * - view: warehouse/office/admin full; field + mechanic can see (field scoped in routes)
+   * - view: warehouse/office/admin/viewer full; field + mechanic can see (field scoped in routes)
    * - manage: warehouse + admin only
    */
-  viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic"] as Role[],
+  viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic", "viewer"] as Role[],
   manageCompanyAssets: ["admin", "warehouse"] as Role[],
 };
 

@@ -1305,5 +1305,26 @@ export async function lowStockReport(db: D1Database): Promise<{
     }
   }
 
+  // Stage list: group by truck unit first so warehouse can fill one unit at a time
+  trucks.sort((a, b) => {
+    const au = String(a.unit_number || a.location_name || "");
+    const bu = String(b.unit_number || b.location_name || "");
+    const byUnit = au.localeCompare(bu, undefined, { numeric: true, sensitivity: "base" });
+    if (byUnit !== 0) return byUnit;
+    return (a.name || a.code || "").localeCompare(b.name || b.code || "", undefined, {
+      sensitivity: "base",
+    });
+  });
+
+  warehouse.sort((a, b) => {
+    const byLoc = (a.location_name || "").localeCompare(b.location_name || "", undefined, {
+      sensitivity: "base",
+    });
+    if (byLoc !== 0) return byLoc;
+    return (a.name || a.code || "").localeCompare(b.name || b.code || "", undefined, {
+      sensitivity: "base",
+    });
+  });
+
   return { warehouse, trucks };
 }

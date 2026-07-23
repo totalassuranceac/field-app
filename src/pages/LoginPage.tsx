@@ -33,8 +33,8 @@ export function LoginPage() {
         <h1>Field App</h1>
         <p className="sub">
           Trucks, warehouse, repairs, and parts — one place for the team. Sign in with your
-          username. First time? Use the temporary password from your admin, then choose your own
-          in Settings.
+          username and password. First time? Open the invite link your admin sent you — enter
+          the username they gave you and create your password.
         </p>
         {error && (
           <div className="error" style={{ marginBottom: "0.85rem" }}>
@@ -79,7 +79,7 @@ export function LoginPage() {
           </>
         )}
         <p className="muted" style={{ marginTop: "1rem", fontSize: "0.8rem", textAlign: "center" }}>
-          Forgot password? Contact your admin — they can reset it in Settings / Admin.
+          Forgot password? Ask your admin for a new join link (Admin → Invite).
         </p>
         <p className="muted" style={{ marginTop: "0.5rem", fontSize: "0.72rem", textAlign: "center" }}>
           Open: total-assurance-fleet.totalassurance.workers.dev

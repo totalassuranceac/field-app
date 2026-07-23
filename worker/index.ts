@@ -14,6 +14,7 @@ import {
   isGoogleEmailAllowed,
   ROLE_PERMS,
   roleAtLeast,
+  randomToken,
   sessionCookie,
   sqlInIds,
   toPublicUser,
@@ -269,6 +270,182 @@ app.post("/api/auth/logout", async (c) => {
   return c.json({ ok: true });
 });
 
+/** Build a one-time join link for a user (invite / password setup). */
+async function issueInviteToken(
+  db: D1Database,
+  opts: { userId: number; username: string; createdByUserId?: number | null }
+): Promise<{ token: string; expires_at: string; invite_path: string }> {
+  const token = randomToken(24);
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  // Invalidate prior unused invites for this user
+  try {
+    await db
+      .prepare(
+        `UPDATE invite_tokens SET used_at = datetime('now')
+         WHERE user_id = ? AND used_at IS NULL`
+      )
+      .bind(opts.userId)
+      .run();
+  } catch {
+    /* table may not exist yet */
+  }
+  await db
+    .prepare(
+      `INSERT INTO invite_tokens (id, user_id, username, expires_at, created_by_user_id)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .bind(
+      token,
+      opts.userId,
+      opts.username.trim().toLowerCase(),
+      expires,
+      opts.createdByUserId ?? null
+    )
+    .run();
+  return {
+    token,
+    expires_at: expires,
+    invite_path: `/join/${token}`,
+  };
+}
+
+/** Public: load invite details for the join page (no auth). */
+app.get("/api/auth/invite/:token", async (c) => {
+  const token = c.req.param("token")?.trim();
+  if (!token) return c.json({ error: "Invalid invite" }, 400);
+  try {
+    const row = await c.env.DB.prepare(
+      `SELECT t.id, t.username, t.expires_at, t.used_at, t.user_id,
+              u.display_name, u.active, u.must_change_password
+       FROM invite_tokens t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.id = ?`
+    )
+      .bind(token)
+      .first<{
+        id: string;
+        username: string;
+        expires_at: string;
+        used_at: string | null;
+        user_id: number;
+        display_name: string;
+        active: number;
+        must_change_password: number;
+      }>();
+    if (!row || !row.active) {
+      return c.json({ error: "This invite link is not valid." }, 404);
+    }
+    if (row.used_at) {
+      return c.json({ error: "This invite was already used. Sign in with your password." }, 410);
+    }
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return c.json({ error: "This invite has expired. Ask your admin for a new link." }, 410);
+    }
+    return c.json({
+      ok: true,
+      username: row.username,
+      display_name: row.display_name,
+      expires_at: row.expires_at,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Invite system not ready. Run migration 030_invite_tokens.sql" }, 503);
+    }
+    return c.json({ error: "Could not load invite" }, 500);
+  }
+});
+
+/**
+ * Public: finish invite — confirm username admin gave them, set password, log in.
+ */
+app.post("/api/auth/invite/complete", async (c) => {
+  const body = await c.req.json<{
+    token?: string;
+    username?: string;
+    password?: string;
+  }>();
+  const token = (body.token || "").trim();
+  const username = (body.username || "").trim().toLowerCase();
+  const password = body.password || "";
+  if (!token || !username || !password) {
+    return c.json({ error: "Username and new password are required" }, 400);
+  }
+  if (password.length < 8) {
+    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  }
+  try {
+    const row = await c.env.DB.prepare(
+      `SELECT t.id, t.username, t.expires_at, t.used_at, t.user_id, u.active
+       FROM invite_tokens t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.id = ?`
+    )
+      .bind(token)
+      .first<{
+        id: string;
+        username: string;
+        expires_at: string;
+        used_at: string | null;
+        user_id: number;
+        active: number;
+      }>();
+    if (!row || !row.active) {
+      return c.json({ error: "This invite link is not valid." }, 404);
+    }
+    if (row.used_at) {
+      return c.json({ error: "This invite was already used. Sign in with your password." }, 410);
+    }
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return c.json({ error: "This invite has expired. Ask your admin for a new link." }, 410);
+    }
+    if (username !== String(row.username).toLowerCase()) {
+      return c.json(
+        { error: "Username does not match. Use the exact username your admin gave you." },
+        400
+      );
+    }
+
+    const p = await hashPassword(password);
+    await c.env.DB.prepare(
+      `UPDATE users SET
+         password_hash = ?, password_salt = ?, must_change_password = 0,
+         auth_provider = CASE WHEN auth_provider = 'google' THEN 'both' ELSE 'password' END,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(p.hash, p.salt, row.user_id)
+      .run();
+    await c.env.DB.prepare(
+      `UPDATE invite_tokens SET used_at = datetime('now') WHERE id = ?`
+    )
+      .bind(token)
+      .run();
+    // Invalidate any other open invites for this user
+    await c.env.DB.prepare(
+      `UPDATE invite_tokens SET used_at = datetime('now')
+       WHERE user_id = ? AND used_at IS NULL AND id != ?`
+    )
+      .bind(row.user_id, token)
+      .run();
+
+    const session = await createSession(c.env.DB, row.user_id);
+    const full = await c.env.DB.prepare(`SELECT * FROM users WHERE id = ?`)
+      .bind(row.user_id)
+      .first<UserRow>();
+    const pub = toPublicUser(full!);
+    await writeAudit(c.env.DB, pub, "login", "user", row.user_id, "Joined via invite link");
+    c.header("Set-Cookie", sessionCookie(session, 14 * 24 * 3600, isSecure(c)));
+    return c.json({ ok: true, user: pub });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Invite system not ready. Run migration 030." }, 503);
+    }
+    return c.json({ error: msg.slice(0, 160) }, 500);
+  }
+});
+
 
 app.get("/api/auth/google", async (c) => {
   if (!googleConfigured(c.env)) {
@@ -385,7 +562,30 @@ api.use("*", async (c, next) => {
   const token = getSessionToken(c);
   const user = await getUserFromSession(c.env.DB, token);
   if (!user) return c.json({ error: "Unauthorized" }, 401);
-  c.set("user", toPublicUser(user));
+  const pub = toPublicUser(user);
+  c.set("user", pub);
+
+  // Viewer = same browse surface as admin, but never mutate (except own password)
+  if (pub.role === "viewer") {
+    const method = c.req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      const path = new URL(c.req.url).pathname;
+      const allowed =
+        path.includes("/auth/change-password") ||
+        path.includes("/auth/logout") ||
+        path.endsWith("/auth/change-password");
+      if (!allowed) {
+        return c.json(
+          {
+            error:
+              "Viewer accounts are look-around only. You can explore the app but not save changes.",
+          },
+          403
+        );
+      }
+    }
+  }
+
   await next();
 });
 
@@ -784,18 +984,292 @@ api.get("/employees", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
   return c.json({ employees: rows.results });
 });
 
+/**
+ * Find existing users/employees that might be the same person (name / phone / login).
+ * Used when adding an employee so admin can confirm before creating a duplicate.
+ */
+function peopleMatchScore(
+  inputName: string,
+  inputPhone: string | null | undefined,
+  candidate: {
+    name: string;
+    phone?: string | null;
+    username?: string | null;
+    email?: string | null;
+  }
+): { score: number; reasons: string[] } {
+  const norm = (s: string) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const digits = (s: string | null | undefined) => String(s || "").replace(/\D/g, "");
+  const a = norm(inputName);
+  const b = norm(candidate.name);
+  if (!a || !b) return { score: 0, reasons: [] };
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (a === b) {
+    score = Math.max(score, 100);
+    reasons.push("exact name");
+  }
+
+  const aTokens = a.split(" ").filter((t) => t.length >= 2);
+  const bTokens = b.split(" ").filter((t) => t.length >= 2);
+  if (aTokens.length && bTokens.length) {
+    const allIn =
+      aTokens.every((t) => bTokens.includes(t)) || bTokens.every((t) => aTokens.includes(t));
+    if (allIn && a !== b) {
+      score = Math.max(score, 92);
+      reasons.push("same name parts");
+    }
+    const aLast = aTokens[aTokens.length - 1];
+    const bLast = bTokens[bTokens.length - 1];
+    if (aLast && aLast === bLast && aLast.length >= 3) {
+      score = Math.max(score, 72);
+      reasons.push(`same last name “${aLast}”`);
+      if (aTokens[0] && bTokens[0] && aTokens[0][0] === bTokens[0][0]) {
+        score = Math.max(score, 85);
+        reasons.push("same first initial");
+      }
+    }
+    // First name only match when both multi-part (avoid "Chris" matching everyone named Chris…)
+    // still useful when last names are missing
+    if (aTokens.length === 1 && bTokens.includes(aTokens[0]) && aTokens[0].length >= 4) {
+      score = Math.max(score, 55);
+      reasons.push(`first name “${aTokens[0]}”`);
+    }
+  }
+
+  // Login / email looks like the person
+  const un = norm(candidate.username || "").replace(/\s/g, "");
+  const em = norm(candidate.email || "").split("@")[0] || "";
+  const compact = a.replace(/\s/g, "");
+  const dotted = aTokens.join(".");
+  if (un && (un === compact || un === dotted || un === aTokens[0])) {
+    score = Math.max(score, 88);
+    reasons.push(`login “${candidate.username}”`);
+  }
+  if (em && (em === compact || em === dotted || em === aTokens[0])) {
+    score = Math.max(score, 80);
+    reasons.push("email local part");
+  }
+
+  const pIn = digits(inputPhone);
+  const pCand = digits(candidate.phone);
+  if (pIn.length >= 7 && pCand.length >= 7) {
+    const tail = (s: string) => s.slice(-10);
+    if (tail(pIn) === tail(pCand)) {
+      score = Math.max(score, 96);
+      reasons.push("same phone");
+    }
+  }
+
+  // Simple edit distance for short close names (typos)
+  if (score < 70 && a.length >= 4 && b.length >= 4 && Math.abs(a.length - b.length) <= 2) {
+    let dist = 0;
+    const m = Math.max(a.length, b.length);
+    for (let i = 0; i < m; i++) {
+      if (a[i] !== b[i]) dist++;
+    }
+    // rough: only count if very close
+    if (dist <= 2 && a[0] === b[0]) {
+      score = Math.max(score, 78);
+      reasons.push("very similar spelling");
+    }
+  }
+
+  return { score, reasons: [...new Set(reasons)] };
+}
+
+api.get("/employees/check-matches", requireRoles(ROLE_PERMS.manageEmployees), async (c) => {
+  const name = (c.req.query("name") || "").trim();
+  const phone = (c.req.query("phone") || "").trim() || null;
+  if (!name) return c.json({ error: "name required" }, 400);
+
+  const users = await c.env.DB.prepare(
+    `SELECT id, display_name, username, email, role, employee_id, phone, active
+     FROM users ORDER BY display_name`
+  ).all<{
+    id: number;
+    display_name: string;
+    username: string | null;
+    email: string | null;
+    role: string;
+    employee_id: number | null;
+    phone: string | null;
+    active: number;
+  }>();
+
+  const emps = await c.env.DB.prepare(
+    `SELECT id, name, phone, active FROM employees ORDER BY name`
+  ).all<{ id: number; name: string; phone: string | null; active: number }>();
+
+  const userMatches = (users.results || [])
+    .map((u) => {
+      const { score, reasons } = peopleMatchScore(name, phone, {
+        name: u.display_name,
+        phone: u.phone,
+        username: u.username,
+        email: u.email,
+      });
+      return { ...u, score, reasons, kind: "user" as const };
+    })
+    .filter((u) => u.score >= 55)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+
+  const employeeMatches = (emps.results || [])
+    .map((e) => {
+      const { score, reasons } = peopleMatchScore(name, phone, {
+        name: e.name,
+        phone: e.phone,
+      });
+      return { ...e, score, reasons, kind: "employee" as const };
+    })
+    .filter((e) => e.score >= 55)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+
+  return c.json({
+    name,
+    phone,
+    users: userMatches,
+    employees: employeeMatches,
+    has_matches: userMatches.length > 0 || employeeMatches.length > 0,
+  });
+});
+
 api.post("/employees", requireRoles(ROLE_PERMS.manageEmployees), async (c) => {
-  const body = await c.req.json<{ name: string; notes?: string; phone?: string }>();
+  const body = await c.req.json<{
+    name: string;
+    notes?: string;
+    phone?: string;
+    /** Skip match warning and create anyway */
+    force?: boolean;
+    /** After create, link this existing user login to the new employee */
+    link_user_id?: number | null;
+  }>();
   if (!body.name?.trim()) return c.json({ error: "Name required" }, 400);
+  const name = body.name.trim();
+  const phone = body.phone?.trim() || null;
+
+  // Unless force / explicit link, block possible duplicates for client confirmation
+  if (!body.force && body.link_user_id == null) {
+    const users = await c.env.DB.prepare(
+      `SELECT id, display_name, username, email, role, employee_id, phone, active FROM users`
+    ).all<{
+      id: number;
+      display_name: string;
+      username: string | null;
+      email: string | null;
+      role: string;
+      employee_id: number | null;
+      phone: string | null;
+      active: number;
+    }>();
+    const emps = await c.env.DB.prepare(`SELECT id, name, phone, active FROM employees`).all<{
+      id: number;
+      name: string;
+      phone: string | null;
+      active: number;
+    }>();
+    const userMatches = (users.results || [])
+      .map((u) => {
+        const { score, reasons } = peopleMatchScore(name, phone, {
+          name: u.display_name,
+          phone: u.phone,
+          username: u.username,
+          email: u.email,
+        });
+        return { ...u, score, reasons, kind: "user" as const };
+      })
+      .filter((u) => u.score >= 55)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+    const employeeMatches = (emps.results || [])
+      .map((e) => {
+        const { score, reasons } = peopleMatchScore(name, phone, {
+          name: e.name,
+          phone: e.phone,
+        });
+        return { ...e, score, reasons, kind: "employee" as const };
+      })
+      .filter((e) => e.score >= 70) // higher bar for existing employee dups
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+
+    if (userMatches.length || employeeMatches.length) {
+      return c.json(
+        {
+          needs_confirm: true,
+          message:
+            "Someone similar already exists — confirm this is a new person or link an existing login.",
+          users: userMatches,
+          employees: employeeMatches,
+        },
+        409
+      );
+    }
+  }
+
   const result = await c.env.DB.prepare(
     "INSERT INTO employees (name, phone, notes) VALUES (?, ?, ?)"
   )
-    .bind(body.name.trim(), body.phone || null, body.notes || null)
+    .bind(name, phone, body.notes || null)
     .run();
-  const id = result.meta.last_row_id;
-  await writeAudit(c.env.DB, c.get("user"), "create", "employee", id, `Created employee ${body.name}`);
+  const id = Number(result.meta.last_row_id);
+
+  let linkedUser: { id: number; display_name: string; username: string | null } | null = null;
+  if (body.link_user_id != null && Number(body.link_user_id) > 0) {
+    const uid = Number(body.link_user_id);
+    const u = await c.env.DB.prepare(
+      `SELECT id, display_name, username, employee_id FROM users WHERE id = ?`
+    )
+      .bind(uid)
+      .first<{
+        id: number;
+        display_name: string;
+        username: string | null;
+        employee_id: number | null;
+      }>();
+    if (u) {
+      await c.env.DB.prepare(
+        `UPDATE users SET employee_id = ?, updated_at = datetime('now') WHERE id = ?`
+      )
+        .bind(id, uid)
+        .run();
+      if (phone) {
+        await c.env.DB.prepare(
+          `UPDATE employees SET phone = COALESCE(phone, ?), updated_at = datetime('now') WHERE id = ?`
+        )
+          .bind(phone, id)
+          .run();
+      }
+      linkedUser = { id: u.id, display_name: u.display_name, username: u.username };
+      await writeAudit(
+        c.env.DB,
+        c.get("user"),
+        "update",
+        "user",
+        uid,
+        `Linked login to new employee #${id} (${name})`
+      );
+    }
+  }
+
+  await writeAudit(
+    c.env.DB,
+    c.get("user"),
+    "create",
+    "employee",
+    id,
+    `Created employee ${name}${linkedUser ? ` · linked user ${linkedUser.display_name}` : ""}`
+  );
   const emp = await c.env.DB.prepare("SELECT * FROM employees WHERE id = ?").bind(id).first();
-  return c.json({ employee: emp }, 201);
+  return c.json({ employee: emp, linked_user: linkedUser }, 201);
 });
 
 api.patch("/employees/:id", requireRoles(ROLE_PERMS.manageEmployees), async (c) => {
@@ -1462,6 +1936,108 @@ api.post("/uploads/receipt", async (c) => {
   }
 });
 
+/** D1 cell ~2MB; keep chunks under 700KB for reliable inserts. */
+const D1_BLOB_CHUNK = 700 * 1024;
+/** Without R2, handbooks may be stored as multipart chunks in receipt_blobs. */
+const D1_HANDBOOK_MAX = 20 * 1024 * 1024;
+
+async function putD1BlobChunked(
+  db: D1Database,
+  key: string,
+  contentType: string,
+  bytes: Uint8Array
+): Promise<void> {
+  // Clear prior parts for this key
+  try {
+    await db
+      .prepare(`DELETE FROM receipt_blobs WHERE key = ? OR key LIKE ?`)
+      .bind(key, `${key}.part.%`)
+      .run();
+  } catch {
+    /* ok */
+  }
+
+  if (bytes.byteLength <= D1_BLOB_CHUNK) {
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO receipt_blobs (key, content_type, data, size) VALUES (?, ?, ?, ?)`
+      )
+      .bind(key, contentType, bytes, bytes.byteLength)
+      .run();
+    return;
+  }
+
+  const n = Math.ceil(bytes.byteLength / D1_BLOB_CHUNK);
+  // Meta row: multipart/<count>;<real content-type>
+  await db
+    .prepare(
+      `INSERT OR REPLACE INTO receipt_blobs (key, content_type, data, size) VALUES (?, ?, ?, ?)`
+    )
+    .bind(key, `multipart/${n};${contentType}`, new Uint8Array(0), bytes.byteLength)
+    .run();
+
+  for (let i = 0; i < n; i++) {
+    const start = i * D1_BLOB_CHUNK;
+    const slice = bytes.subarray(start, Math.min(start + D1_BLOB_CHUNK, bytes.byteLength));
+    const copy = new Uint8Array(slice.byteLength);
+    copy.set(slice);
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO receipt_blobs (key, content_type, data, size) VALUES (?, ?, ?, ?)`
+      )
+      .bind(`${key}.part.${i}`, contentType, copy, copy.byteLength)
+      .run();
+  }
+}
+
+async function getD1BlobChunked(
+  db: D1Database,
+  key: string
+): Promise<{ contentType: string; bytes: Uint8Array } | null> {
+  let row: { content_type: string; data: unknown; size: number } | null = null;
+  try {
+    row = await db
+      .prepare(`SELECT content_type, data, size FROM receipt_blobs WHERE key = ?`)
+      .bind(key)
+      .first<{ content_type: string; data: unknown; size: number }>();
+  } catch {
+    return null;
+  }
+  if (!row) return null;
+
+  const ct = row.content_type || "application/octet-stream";
+  const multi = /^multipart\/(\d+);(.+)$/i.exec(ct);
+  if (!multi) {
+    const bytes = blobToUint8Array(row.data);
+    if (!bytes?.byteLength) return null;
+    return { contentType: ct, bytes };
+  }
+
+  const n = Number(multi[1]);
+  const realCt = multi[2] || "application/pdf";
+  if (!Number.isFinite(n) || n < 1 || n > 200) return null;
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const part = await db
+      .prepare(`SELECT data FROM receipt_blobs WHERE key = ?`)
+      .bind(`${key}.part.${i}`)
+      .first<{ data: unknown }>();
+    const b = blobToUint8Array(part?.data);
+    if (!b?.byteLength) return null;
+    chunks.push(b);
+    total += b.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return { contentType: realCt, bytes: out };
+}
+
 api.get("/uploads/*", async (c) => {
   const full = new URL(c.req.url).pathname;
   const key = full.replace(/^\/api\/uploads\//, "");
@@ -1493,6 +2069,32 @@ api.get("/uploads/*", async (c) => {
     }
   }
 
+  // Handbooks / large files may be multipart in D1
+  for (const cand of candidates) {
+    try {
+      const blob = await getD1BlobChunked(c.env.DB, cand);
+      if (blob) {
+        const isImage = blob.contentType.startsWith("image/");
+        if (isImage) {
+          const res = imageResponse(blob.bytes, blob.contentType);
+          if (res.status === 200) return res;
+        }
+        return new Response(blob.bytes, {
+          headers: {
+            "Content-Type": blob.contentType,
+            "Cache-Control": "private, max-age=3600",
+            "Content-Length": String(blob.bytes.byteLength),
+            "Content-Disposition": blob.contentType.includes("pdf")
+              ? "inline"
+              : "attachment",
+          },
+        });
+      }
+    } catch {
+      /* try next */
+    }
+  }
+
   // Part photos + receipts (check both blob tables + key variants)
   for (const table of ["receipt_blobs", "part_image_blobs"] as const) {
     try {
@@ -1503,8 +2105,23 @@ api.get("/uploads/*", async (c) => {
           .bind(cand)
           .first<{ content_type: string; data: unknown }>();
         if (row?.data != null) {
-          const res = imageResponse(row.data, row.content_type || "image/jpeg");
-          if (res.status === 200) return res;
+          const ct = row.content_type || "image/jpeg";
+          if (ct.startsWith("multipart/")) continue; // handled above
+          if (ct.startsWith("image/") || ct.includes("jpeg") || ct.includes("png")) {
+            const res = imageResponse(row.data, ct);
+            if (res.status === 200) return res;
+          } else {
+            const bytes = blobToUint8Array(row.data);
+            if (bytes?.byteLength) {
+              return new Response(bytes, {
+                headers: {
+                  "Content-Type": ct,
+                  "Cache-Control": "private, max-age=3600",
+                  "Content-Length": String(bytes.byteLength),
+                },
+              });
+            }
+          }
         }
       }
     } catch {
@@ -2207,6 +2824,148 @@ api.post("/notifications/weekly-remind", requireRoles(ROLE_PERMS.manageIssues), 
   return c.json({ created: n });
 });
 
+// ——— Company reviews board (Google highlights + team celebration) ———
+const DEFAULT_GOOGLE_REVIEWS_URL = "https://share.google/p9PJud1fI4iSmPCpq";
+
+api.get("/reviews", async (c) => {
+  const googleUrl =
+    (await getSetting(c.env.DB, "google_reviews_url", DEFAULT_GOOGLE_REVIEWS_URL)) ||
+    DEFAULT_GOOGLE_REVIEWS_URL;
+  try {
+    const rows = await c.env.DB.prepare(
+      `SELECT r.id, r.author_name, r.rating, r.review_text, r.tech_mentioned, r.review_date,
+              r.source_url, r.created_at, r.posted_by_user_id, u.display_name as posted_by_name
+       FROM company_reviews r
+       LEFT JOIN users u ON u.id = r.posted_by_user_id
+       WHERE r.active = 1
+       ORDER BY datetime(r.created_at) DESC
+       LIMIT 100`
+    ).all();
+    return c.json({
+      reviews: rows.results || [],
+      google_reviews_url: googleUrl,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        reviews: [],
+        google_reviews_url: googleUrl,
+        error: "Run migration 031_company_reviews.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/reviews", requireRoles(["admin", "office"]), async (c) => {
+  const admin = c.get("user");
+  const body = await c.req.json<{
+    author_name?: string;
+    rating?: number;
+    review_text?: string;
+    tech_mentioned?: string;
+    review_date?: string;
+    source_url?: string;
+    notify?: boolean;
+  }>();
+  const text = (body.review_text || "").trim();
+  if (!text) return c.json({ error: "Review text is required" }, 400);
+  if (text.length > 4000) return c.json({ error: "Review text is too long" }, 400);
+  let rating: number | null = null;
+  if (body.rating != null && String(body.rating).trim() !== "") {
+    const n = Number(body.rating);
+    if (!Number.isFinite(n) || n < 1 || n > 5) {
+      return c.json({ error: "Rating must be 1–5 stars" }, 400);
+    }
+    rating = Math.round(n);
+  }
+  const googleUrl =
+    (await getSetting(c.env.DB, "google_reviews_url", DEFAULT_GOOGLE_REVIEWS_URL)) ||
+    DEFAULT_GOOGLE_REVIEWS_URL;
+  try {
+    const result = await c.env.DB.prepare(
+      `INSERT INTO company_reviews (
+         author_name, rating, review_text, tech_mentioned, review_date, source_url, posted_by_user_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        body.author_name?.trim() || null,
+        rating,
+        text,
+        body.tech_mentioned?.trim() || null,
+        body.review_date?.trim() || null,
+        body.source_url?.trim() || googleUrl,
+        admin.id
+      )
+      .run();
+    const id = Number(result.meta.last_row_id);
+    await writeAudit(
+      c.env.DB,
+      admin,
+      "create",
+      "review",
+      id,
+      `Posted company review${body.tech_mentioned ? ` · ${body.tech_mentioned}` : ""}`
+    );
+
+    // Notify whole team so everyone can celebrate (default on)
+    if (body.notify !== false) {
+      const all = await c.env.DB.prepare(`SELECT id FROM users WHERE active = 1`)
+        .all<{ id: number }>()
+        .catch(() => ({ results: [] as { id: number }[] }));
+      const ids = (all.results || []).map((r) => r.id).filter((uid) => uid !== admin.id);
+      const stars = rating ? `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ` : "";
+      const who = body.tech_mentioned?.trim()
+        ? ` · shout-out: ${body.tech_mentioned.trim()}`
+        : "";
+      const preview = text.length > 120 ? `${text.slice(0, 117)}…` : text;
+      await notifyUsers(
+        c.env.DB,
+        ids,
+        "company_review",
+        `${stars}New Google review${who}`,
+        preview,
+        { type: "review", id }
+      );
+    }
+
+    const row = await c.env.DB.prepare(
+      `SELECT r.id, r.author_name, r.rating, r.review_text, r.tech_mentioned, r.review_date,
+              r.source_url, r.created_at, r.posted_by_user_id, u.display_name as posted_by_name
+       FROM company_reviews r
+       LEFT JOIN users u ON u.id = r.posted_by_user_id
+       WHERE r.id = ?`
+    )
+      .bind(id)
+      .first();
+    return c.json({ review: row }, 201);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 031_company_reviews.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.delete("/reviews/:id", requireRoles(["admin"]), async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!id) return c.json({ error: "Invalid id" }, 400);
+  try {
+    await c.env.DB.prepare(
+      `UPDATE company_reviews SET active = 0 WHERE id = ?`
+    )
+      .bind(id)
+      .run();
+    await writeAudit(c.env.DB, c.get("user"), "delete", "review", id, "Hid company review");
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed" }, 500);
+  }
+});
+
+
 // ——— In-app messenger ———
 api.get("/messages", async (c) => {
   const user = c.get("user");
@@ -2751,7 +3510,7 @@ api.get("/handbook", async (c) => {
   }
 });
 
-api.get("/handbook/status", requireRoles(["admin", "office"]), async (c) => {
+api.get("/handbook/status", requireRoles(["admin", "office", "viewer"]), async (c) => {
   try {
     const book = await c.env.DB.prepare(
       `SELECT id, title, version_label, created_at FROM employee_handbooks
@@ -2799,13 +3558,14 @@ api.post("/handbook", requireRoles(["admin", "office"]), async (c) => {
     const version = String(form.get("version_label") || "").trim() || null;
     const notes = String(form.get("notes") || "").trim() || null;
 
-    const maxBytes = c.env.RECEIPTS ? 25 * 1024 * 1024 : 900 * 1024;
+    // R2: up to 25MB. Without R2: chunked D1 storage up to 20MB (was ~900KB single-row limit).
+    const maxBytes = c.env.RECEIPTS ? 25 * 1024 * 1024 : D1_HANDBOOK_MAX;
     if (file.size > maxBytes) {
       return c.json(
         {
           error: c.env.RECEIPTS
             ? "File too large (max 25MB)"
-            : "File too large for current storage (~900KB). Enable R2 receipts storage or upload a smaller PDF.",
+            : `File too large (max ${Math.round(D1_HANDBOOK_MAX / (1024 * 1024))}MB). Compress the PDF or enable R2 storage in Cloudflare.`,
         },
         400
       );
@@ -2823,17 +3583,24 @@ api.post("/handbook", requireRoles(["admin", "office"]), async (c) => {
         : "bin";
     const key = `handbooks/${Date.now()}-${crypto.randomUUID()}.${ext}`;
     const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
 
     if (c.env.RECEIPTS) {
       await c.env.RECEIPTS.put(key, buf, {
         httpMetadata: { contentType },
       });
     } else {
-      await c.env.DB.prepare(
-        `INSERT INTO receipt_blobs (key, content_type, data, size) VALUES (?, ?, ?, ?)`
-      )
-        .bind(key, contentType, new Uint8Array(buf), buf.byteLength)
-        .run();
+      try {
+        await putD1BlobChunked(c.env.DB, key, contentType, bytes);
+      } catch (storeErr) {
+        const sm = storeErr instanceof Error ? storeErr.message : String(storeErr);
+        return c.json(
+          {
+            error: `Could not store handbook (${sm.slice(0, 140)}). Try a smaller PDF or enable R2.`,
+          },
+          500
+        );
+      }
     }
 
     // Deactivate prior versions (new upload becomes the one to acknowledge)
@@ -2871,7 +3638,7 @@ api.post("/handbook", requireRoles(["admin", "office"]), async (c) => {
 
 api.post("/handbook/acknowledge", async (c) => {
   const user = c.get("user");
-  let body: { handbook_id?: number; ack_name?: string } = {};
+  let body: { handbook_id?: number; ack_name?: string; confirmed?: boolean } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -2886,15 +3653,31 @@ api.post("/handbook/acknowledge", async (c) => {
       bookId = book?.id || 0;
     }
     if (!bookId) return c.json({ error: "No handbook to acknowledge" }, 400);
-    const name = (body.ack_name || user.display_name || "").trim();
-    if (!name) return c.json({ error: "Type your name to acknowledge" }, 400);
+
+    // Already acknowledged — leave first stamp (no re-ack / no self-clear)
+    const existing = await c.env.DB.prepare(
+      `SELECT acknowledged_at, ack_name FROM handbook_acknowledgments
+       WHERE handbook_id = ? AND user_id = ?`
+    )
+      .bind(bookId, user.id)
+      .first<{ acknowledged_at: string; ack_name: string | null }>();
+    if (existing) {
+      return c.json({
+        ok: true,
+        already: true,
+        acknowledged_at: existing.acknowledged_at,
+        ack_name: existing.ack_name,
+      });
+    }
+
+    if (body.confirmed === false) {
+      return c.json({ error: "Confirm that you have read the handbook" }, 400);
+    }
+    const name = (body.ack_name || user.display_name || user.username || "Staff").trim();
 
     await c.env.DB.prepare(
       `INSERT INTO handbook_acknowledgments (handbook_id, user_id, acknowledged_at, ack_name)
-       VALUES (?, ?, datetime('now'), ?)
-       ON CONFLICT(handbook_id, user_id) DO UPDATE SET
-         acknowledged_at = datetime('now'),
-         ack_name = excluded.ack_name`
+       VALUES (?, ?, datetime('now'), ?)`
     )
       .bind(bookId, user.id, name)
       .run();
@@ -2907,11 +3690,54 @@ api.post("/handbook/acknowledge", async (c) => {
       bookId,
       `Acknowledged handbook as “${name}”`
     );
-    return c.json({ ok: true });
+    return c.json({ ok: true, already: false });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Acknowledge failed" }, 500);
   }
 });
+
+/** Admin only: clear someone's acknowledgment (staff cannot undo their own). */
+api.delete(
+  "/handbook/acknowledgments/:userId",
+  requireRoles(["admin"]),
+  async (c) => {
+    const admin = c.get("user");
+    const userId = Number(c.req.param("userId"));
+    if (!userId) return c.json({ error: "userId required" }, 400);
+    try {
+      const book = await c.env.DB.prepare(
+        `SELECT id, title FROM employee_handbooks WHERE active = 1 ORDER BY created_at DESC LIMIT 1`
+      ).first<{ id: number; title: string }>();
+      if (!book) return c.json({ error: "No active handbook" }, 404);
+
+      const before = await c.env.DB.prepare(
+        `SELECT user_id, ack_name, acknowledged_at FROM handbook_acknowledgments
+         WHERE handbook_id = ? AND user_id = ?`
+      )
+        .bind(book.id, userId)
+        .first();
+      if (!before) return c.json({ error: "No acknowledgment on file for that user" }, 404);
+
+      await c.env.DB.prepare(
+        `DELETE FROM handbook_acknowledgments WHERE handbook_id = ? AND user_id = ?`
+      )
+        .bind(book.id, userId)
+        .run();
+
+      await writeAudit(
+        c.env.DB,
+        admin,
+        "delete",
+        "handbook",
+        book.id,
+        `Admin cleared handbook ack for user #${userId}`
+      );
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : "Could not clear" }, 500);
+    }
+  }
+);
 
 // ——— SMS (Twilio) ———
 api.get("/sms/status", async (c) => {
@@ -3498,7 +4324,7 @@ api.get("/downtime/summary", requireRoles(ROLE_PERMS.viewReports), async (c) => 
 });
 
 // Users admin
-api.get("/users", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
+api.get("/users", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   try {
     const rows = await c.env.DB.prepare(
       `SELECT u.id, u.email, u.username, u.display_name, u.role, u.employee_id, u.phone,
@@ -3535,23 +4361,27 @@ api.post("/users", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
     return c.json({ error: "display_name and role required" }, 400);
   }
   const username = body.username?.trim().toLowerCase() || null;
-  if (!username && !body.email?.trim()) {
-    return c.json({ error: "Username (login) is required for password login" }, 400);
+  if (!username) {
+    return c.json({ error: "Username (login) is required" }, 400);
   }
-  // Temp password so they can sign in, then choose their own
-  let tempPassword = body.password?.trim() || "";
-  if (!tempPassword) {
-    tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!`;
+  // Optional password only if admin insists; default is invite link (no temp password)
+  const explicitPassword = body.password?.trim() || "";
+  let passwordHash: string | null = null;
+  let passwordSalt: string | null = null;
+  if (explicitPassword) {
+    if (explicitPassword.length < 8) {
+      return c.json({ error: "Password must be at least 8 characters" }, 400);
+    }
+    const p = await hashPassword(explicitPassword);
+    passwordHash = p.hash;
+    passwordSalt = p.salt;
   }
-  if (tempPassword.length < 8) {
-    return c.json({ error: "Temporary password must be at least 8 characters" }, 400);
-  }
-  const p = await hashPassword(tempPassword);
   const managerId =
     body.manager_user_id != null && Number(body.manager_user_id) > 0
       ? Number(body.manager_user_id)
       : null;
   const mapped = dbRoleFor(body.role as Role);
+  const admin = c.get("user");
   try {
     let result;
     try {
@@ -3559,39 +4389,40 @@ api.post("/users", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
         `INSERT INTO users (
            email, username, display_name, password_hash, password_salt, role,
            employee_id, phone, must_change_password, auth_provider, active, manager_user_id, is_warehouse
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'password', 1, ?, ?)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'password', 1, ?, ?)`
       )
         .bind(
           body.email?.trim() || null,
           username,
           body.display_name.trim(),
-          p.hash,
-          p.salt,
+          passwordHash,
+          passwordSalt,
           mapped.role,
           body.employee_id ?? null,
           body.phone?.trim() || null,
+          explicitPassword ? 0 : 1,
           managerId,
           mapped.is_warehouse
         )
         .run();
     } catch {
-      // Fallback without is_warehouse / manager columns
       try {
         result = await c.env.DB.prepare(
           `INSERT INTO users (
              email, username, display_name, password_hash, password_salt, role,
              employee_id, phone, must_change_password, auth_provider, active, manager_user_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'password', 1, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'password', 1, ?)`
         )
           .bind(
             body.email?.trim() || null,
             username,
             body.display_name.trim(),
-            p.hash,
-            p.salt,
+            passwordHash,
+            passwordSalt,
             mapped.role,
             body.employee_id ?? null,
             body.phone?.trim() || null,
+            explicitPassword ? 0 : 1,
             managerId
           )
           .run();
@@ -3600,22 +4431,23 @@ api.post("/users", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
           `INSERT INTO users (
              email, username, display_name, password_hash, password_salt, role,
              employee_id, phone, must_change_password, auth_provider, active
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'password', 1)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'password', 1)`
         )
           .bind(
             body.email?.trim() || null,
             username,
             body.display_name.trim(),
-            p.hash,
-            p.salt,
+            passwordHash,
+            passwordSalt,
             mapped.role,
             body.employee_id ?? null,
-            body.phone?.trim() || null
+            body.phone?.trim() || null,
+            explicitPassword ? 0 : 1
           )
           .run();
       }
     }
-    const id = result.meta.last_row_id;
+    const id = Number(result.meta.last_row_id);
     if (body.phone?.trim() && body.employee_id) {
       await c.env.DB.prepare(
         "UPDATE employees SET phone = ?, updated_at = datetime('now') WHERE id = ?"
@@ -3623,19 +4455,47 @@ api.post("/users", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
         .bind(body.phone.trim(), body.employee_id)
         .run();
     }
+
+    let invite: { token: string; expires_at: string; invite_path: string } | null = null;
+    if (!explicitPassword) {
+      try {
+        invite = await issueInviteToken(c.env.DB, {
+          userId: id,
+          username,
+          createdByUserId: admin.id,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/no such table/i.test(msg)) {
+          return c.json(
+            {
+              error:
+                "User created but invites need migration 030_invite_tokens.sql. Or set a password manually.",
+            },
+            503
+          );
+        }
+        throw e;
+      }
+    }
+
     await writeAudit(
       c.env.DB,
-      c.get("user"),
+      admin,
       "create",
       "user",
       id,
-      `Created user ${body.display_name} (${body.role})`
+      `Created user ${body.display_name} (${body.role})${invite ? " · invite link" : ""}`
     );
     const row = await c.env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first<UserRow>();
+    const base = new URL(c.req.url).origin;
     return c.json(
       {
         user: row ? toPublicUser(row) : null,
-        temporary_password: tempPassword,
+        invite_path: invite?.invite_path || null,
+        invite_url: invite ? `${base}${invite.invite_path}` : null,
+        expires_at: invite?.expires_at || null,
+        temporary_password: explicitPassword || null,
       },
       201
     );
@@ -3708,13 +4568,98 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
   return c.json({ user: after });
 });
 
+/** Issue a fresh join link so the user can set their own password (preferred). */
+api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
+  const id = Number(c.req.param("id"));
+  const admin = c.get("user");
+  const before = await c.env.DB.prepare(
+    `SELECT id, username, display_name, active FROM users WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ id: number; username: string | null; display_name: string; active: number }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (!before.username?.trim()) {
+    return c.json({ error: "User needs a username before you can send an invite link" }, 400);
+  }
+  if (!before.active) return c.json({ error: "Reactivate the user before inviting" }, 400);
+  try {
+    // Clear password so they must use the invite (optional hard lock)
+    await c.env.DB.prepare(
+      `UPDATE users SET password_hash = NULL, password_salt = NULL, must_change_password = 1,
+       updated_at = datetime('now') WHERE id = ?`
+    )
+      .bind(id)
+      .run();
+    await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+    const invite = await issueInviteToken(c.env.DB, {
+      userId: id,
+      username: before.username,
+      createdByUserId: admin.id,
+    });
+    await writeAudit(
+      c.env.DB,
+      admin,
+      "password_reset",
+      "user",
+      id,
+      `Invite link issued for ${before.username}`
+    );
+    const base = new URL(c.req.url).origin;
+    return c.json({
+      ok: true,
+      invite_path: invite.invite_path,
+      invite_url: `${base}${invite.invite_path}`,
+      expires_at: invite.expires_at,
+      username: before.username,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 030_invite_tokens.sql" }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
 api.post("/users/:id/reset-password", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
   const id = Number(c.req.param("id"));
-  const body = await c.req.json<{ password?: string }>();
-  let password = body.password?.trim() || "";
-  if (!password) {
-    password = `Temp${Math.random().toString(36).slice(2, 8)}!`;
+  const body = await c.req.json<{ password?: string; invite?: boolean }>().catch(() => ({} as { password?: string; invite?: boolean }));
+  // Default: issue invite link (no temp password). Pass password only if admin sets one.
+  if (!body.password?.trim() || body.invite) {
+    // Re-use invite endpoint logic
+    const admin = c.get("user");
+    const before = await c.env.DB.prepare(
+      `SELECT id, username, display_name, active FROM users WHERE id = ?`
+    )
+      .bind(id)
+      .first<{ id: number; username: string | null; display_name: string; active: number }>();
+    if (!before) return c.json({ error: "Not found" }, 404);
+    if (!before.username?.trim()) {
+      return c.json({ error: "User needs a username for an invite link" }, 400);
+    }
+    await c.env.DB.prepare(
+      `UPDATE users SET password_hash = NULL, password_salt = NULL, must_change_password = 1,
+       updated_at = datetime('now') WHERE id = ?`
+    )
+      .bind(id)
+      .run();
+    await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+    const invite = await issueInviteToken(c.env.DB, {
+      userId: id,
+      username: before.username,
+      createdByUserId: admin.id,
+    });
+    await writeAudit(c.env.DB, admin, "password_reset", "user", id, `Invite link for password setup`);
+    const base = new URL(c.req.url).origin;
+    return c.json({
+      ok: true,
+      invite_path: invite.invite_path,
+      invite_url: `${base}${invite.invite_path}`,
+      expires_at: invite.expires_at,
+      username: before.username,
+    });
   }
+  const password = body.password!.trim();
   if (password.length < 8) {
     return c.json({ error: "Password must be at least 8 characters" }, 400);
   }
@@ -3743,7 +4688,7 @@ api.post("/users/:id/reset-password", requireRoles(ROLE_PERMS.manageUsers), asyn
 });
 
 // Settings
-api.get("/settings", requireRoles(ROLE_PERMS.manageSettings), async (c) => {
+api.get("/settings", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   const rows = await c.env.DB.prepare("SELECT key, value FROM settings").all();
   const map: Record<string, string> = {};
   for (const r of rows.results as { key: string; value: string }[]) {
@@ -4142,7 +5087,7 @@ api.get("/inventory/parts/codes", requireRoles(ROLE_PERMS.viewInventory), async 
 
 // ——— ServiceTitan API (admin) ———
 
-api.get("/integrations/servicetitan/status", requireRoles(["admin"] as Role[]), async (c) => {
+api.get("/integrations/servicetitan/status", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   const configured = await stConfigured(c.env, c.env.DB);
   const tenant = (await getSetting(c.env.DB, "st_tenant_id", "")).trim() || c.env.ST_TENANT_ID || "";
   const hasClient =

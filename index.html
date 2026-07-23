@@ -32,24 +32,55 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <style>
-      /* Boot only — do NOT set html/body colors (that broke dark theme). */
+      /* Boot: full dark screen + large transparent logo (no icon bubble / white plate). */
+      html,
+      body {
+        margin: 0;
+        background: #0b1220;
+      }
       #boot-shell {
         min-height: 100vh;
+        min-height: 100dvh;
+        width: 100%;
         display: grid;
         place-items: center;
-        padding: 1.5rem;
+        padding: max(1.5rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right))
+          max(1.5rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
         text-align: center;
         box-sizing: border-box;
         font-family: "Segoe UI", system-ui, sans-serif;
         background: #0b1220;
         color: #e8eef6;
       }
+      #boot-shell .boot-inner {
+        width: min(94vw, 42rem);
+        display: grid;
+        gap: 1.1rem;
+        justify-items: center;
+      }
+      /* Full company mark — transparent PNG, no rounded app-icon frame */
+      #boot-shell .boot-logo {
+        display: block;
+        width: min(90vw, 38rem);
+        height: auto;
+        max-height: min(36vh, 14rem);
+        object-fit: contain;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+        filter: drop-shadow(0 8px 28px rgba(0, 0, 0, 0.35));
+      }
       #boot-shell h1 {
-        margin: 0 0 0.5rem;
-        font-size: 1.25rem;
+        margin: 0;
+        font-size: clamp(1.05rem, 3.2vw, 1.35rem);
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(232, 238, 246, 0.88);
       }
       #boot-shell p {
-        margin: 0.35rem 0;
+        margin: 0;
         color: #93a4b8;
         font-size: 0.95rem;
         max-width: 28rem;
@@ -57,8 +88,8 @@
       }
       #boot-shell a {
         display: inline-block;
-        margin-top: 0.85rem;
-        padding: 0.5rem 0.9rem;
+        margin-top: 0.5rem;
+        padding: 0.55rem 1rem;
         border-radius: 10px;
         background: #c8102e;
         color: #fff;
@@ -67,17 +98,27 @@
         font-size: 0.9rem;
       }
       #boot-shell .muted {
-        font-size: 0.8rem;
+        font-size: 0.78rem;
+        opacity: 0.85;
       }
     </style>
   </head>
   <body>
     <div id="root">
       <div id="boot-shell">
-        <div>
+        <div class="boot-inner">
+          <img
+            class="boot-logo"
+            src="/logo-boot.png"
+            alt="Total Assurance A/C &amp; Heating"
+            width="800"
+            height="159"
+            decoding="async"
+            fetchpriority="high"
+          />
           <h1>Field App</h1>
           <p id="boot-msg">Starting…</p>
-          <p class="muted" id="boot-url">total-assurance-fleet.totalassurance.workers.dev</p>
+          <p class="muted" id="boot-url"></p>
         </div>
       </div>
     </div>
@@ -96,7 +137,8 @@
           a.id = "boot-retry";
           a.href = "/?reload=" + Date.now();
           a.textContent = "Retry load";
-          shell.querySelector("div").appendChild(a);
+          var inner = shell.querySelector(".boot-inner") || shell;
+          inner.appendChild(a);
         }
       }, 6000);
       setTimeout(function () {

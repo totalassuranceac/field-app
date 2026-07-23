@@ -319,20 +319,145 @@ export function InventoryPage() {
       order_qty: number;
     }>
   >([]);
-  const [stageTrucks, setStageTrucks] = useState<
-    Array<{
-      part_id: number;
-      code: string;
-      name: string;
-      location_id: number;
-      location_name: string;
-      unit_number: string | null;
-      qty: number;
-      min_qty: number;
-      stage_qty: number;
-    }>
-  >([]);
+  type StageTruckRow = {
+    part_id: number;
+    code: string;
+    name: string;
+    location_id: number;
+    location_name: string;
+    unit_number: string | null;
+    qty: number;
+    min_qty: number;
+    stage_qty: number;
+  };
+  const [stageTrucks, setStageTrucks] = useState<StageTruckRow[]>([]);
   const [stageBusy, setStageBusy] = useState(false);
+
+  /** Group stage lines by unit for pull sheets (unit order already sorted). */
+  const stageByUnit = useMemo(() => {
+    const map = new Map<
+      string,
+      { key: string; label: string; unit_number: string | null; lines: StageTruckRow[] }
+    >();
+    for (const r of stageTrucks) {
+      const key = String(r.location_id);
+      const label = r.unit_number ? `Unit ${r.unit_number}` : r.location_name || `Loc ${r.location_id}`;
+      let g = map.get(key);
+      if (!g) {
+        g = { key, label, unit_number: r.unit_number, lines: [] };
+        map.set(key, g);
+      }
+      g.lines.push(r);
+    }
+    return [...map.values()];
+  }, [stageTrucks]);
+
+  function printTruckPullSheet(
+    groups: Array<{ label: string; unit_number: string | null; lines: StageTruckRow[] }>,
+    opts?: { title?: string }
+  ) {
+    const printedBy = user?.display_name || user?.username || "Warehouse";
+    const when = new Date().toLocaleString();
+    const sheets = groups
+      .map((g) => {
+        const rows = g.lines
+          .map(
+            (r) => `
+          <tr>
+            <td class="chk">☐</td>
+            <td><strong>${escapeHtml(r.name)}</strong><br/><span class="code">${escapeHtml(r.code || "")}</span></td>
+            <td class="num">${r.qty}</td>
+            <td class="num">${r.min_qty}</td>
+            <td class="num stage"><strong>${r.stage_qty}</strong></td>
+          </tr>`
+          )
+          .join("");
+        const totalStage = g.lines.reduce((s, r) => s + (Number(r.stage_qty) || 0), 0);
+        return `
+        <section class="sheet">
+          <header>
+            <div>
+              <h1>Truck pull sheet</h1>
+              <p class="sub">${escapeHtml(g.label)} · stage from warehouse</p>
+            </div>
+            <div class="meta">
+              <div>${escapeHtml(when)}</div>
+              <div>${escapeHtml(printedBy)}</div>
+              <div>${g.lines.length} line${g.lines.length === 1 ? "" : "s"} · ${totalStage} pcs</div>
+            </div>
+          </header>
+          <table>
+            <thead>
+              <tr>
+                <th class="chk"></th>
+                <th>Part</th>
+                <th class="num">On truck</th>
+                <th class="num">Low</th>
+                <th class="num">Pull</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <footer>
+            <div>Pulled by: ________________</div>
+            <div>Loaded / staged: ________________</div>
+            <div>Date: ________________</div>
+          </footer>
+        </section>`;
+      })
+      .join("");
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(opts?.title || "Truck pull sheet")}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 0.6in; color: #111; font-size: 12px; }
+    .sheet { page-break-after: always; }
+    .sheet:last-child { page-break-after: auto; }
+    header { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 2px solid #111; padding-bottom: 0.5rem; margin-bottom: 0.75rem; }
+    h1 { margin: 0; font-size: 1.35rem; }
+    .sub { margin: 0.2rem 0 0; font-size: 1.05rem; font-weight: 700; }
+    .meta { text-align: right; font-size: 0.85rem; color: #333; line-height: 1.4; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #ccc; padding: 0.4rem 0.35rem; text-align: left; vertical-align: top; }
+    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #444; }
+    .num { text-align: right; white-space: nowrap; width: 4.2rem; }
+    .chk { width: 1.4rem; text-align: center; font-size: 1rem; }
+    .code { color: #555; font-size: 0.8rem; }
+    .stage { font-size: 1.05rem; }
+    footer { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 1.25rem; padding-top: 0.75rem; border-top: 1px solid #999; font-size: 0.9rem; }
+    @media print {
+      body { margin: 0.45in; }
+      .sheet { break-after: page; }
+      .sheet:last-child { break-after: auto; }
+    }
+  </style>
+</head>
+<body>${sheets}
+<script>window.onload = function () { window.focus(); window.print(); };</script>
+</body>
+</html>`;
+
+    const w = window.open("", "_blank");
+    if (!w) {
+      setError("Allow pop-ups to print the pull sheet.");
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+  }
+
+  function escapeHtml(s: string) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
 
   const loadSummary = useCallback(async () => {
     const s = await api<{
@@ -433,8 +558,18 @@ export function InventoryPage() {
         warehouse: typeof stageWh;
         trucks: typeof stageTrucks;
       }>("/inventory/low-stock-report");
+      // Unit first so each truck’s staging needs read as a block (not by part #)
+      const trucks = [...(d.trucks || [])].sort((a, b) => {
+        const au = String(a.unit_number || a.location_name || "");
+        const bu = String(b.unit_number || b.location_name || "");
+        const byUnit = au.localeCompare(bu, undefined, { numeric: true, sensitivity: "base" });
+        if (byUnit !== 0) return byUnit;
+        return (a.name || a.code || "").localeCompare(b.name || b.code || "", undefined, {
+          sensitivity: "base",
+        });
+      });
       setStageWh(d.warehouse || []);
-      setStageTrucks(d.trucks || []);
+      setStageTrucks(trucks);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load staging report");
       setStageWh([]);
@@ -2438,7 +2573,8 @@ export function InventoryPage() {
             <div>
               <h2 style={{ marginTop: 0 }}>Stage for truck pickup</h2>
               <p style={{ margin: 0 }}>
-                Trucks below their low — stage from warehouse. Print for the counter.
+                Sorted by unit. Print a pull sheet per truck for the counter, or print every unit
+                as separate pages.
               </p>
             </div>
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -2450,60 +2586,93 @@ export function InventoryPage() {
               >
                 {stageBusy ? "…" : "Refresh"}
               </button>
-              <button className="btn" type="button" onClick={() => window.print()}>
-                Print / PDF
-              </button>
+              {stageByUnit.length > 0 && (
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() =>
+                    printTruckPullSheet(stageByUnit, {
+                      title: `All truck pull sheets · ${new Date().toLocaleDateString()}`,
+                    })
+                  }
+                >
+                  Print all pull sheets
+                </button>
+              )}
             </div>
           </div>
-          <div className="print-only order-print-header">
-            <h1>Truck staging list</h1>
-            <p>
-              {new Date().toLocaleDateString()} · {user?.display_name || "Warehouse"}
-            </p>
-          </div>
-          <h3 className="inv-section-title">Trucks to fill</h3>
-          {!stageTrucks.length ? (
+
+          <h3 className="inv-section-title no-print">Trucks to fill</h3>
+          {!stageByUnit.length ? (
             <p className="muted">No truck lines below low right now.</p>
           ) : (
-            <div className="table-wrap inv-table-wrap">
-              <table className="inv-stage-table">
-                <thead>
-                  <tr>
-                    <th>Unit</th>
-                    <th>Part</th>
-                    <th>On truck</th>
-                    <th>Low</th>
-                    <th>Stage</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stageTrucks.map((r) => (
-                    <tr key={`${r.part_id}-${r.location_id}`}>
-                      <td>{r.unit_number ? `Unit ${r.unit_number}` : r.location_name}</td>
-                      <td>
-                        <strong>{r.name}</strong>
-                        <div className="muted" style={{ fontSize: "0.78rem" }}>
-                          {r.code}
-                        </div>
-                      </td>
-                      <td>{r.qty}</td>
-                      <td>{r.min_qty}</td>
-                      <td>
-                        <strong>{r.stage_qty}</strong>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="inv-stage-units">
+              {stageByUnit.map((g) => {
+                const totalPull = g.lines.reduce((s, r) => s + (Number(r.stage_qty) || 0), 0);
+                return (
+                  <section key={g.key} className="inv-stage-unit-block card">
+                    <div className="inv-stage-unit-head no-print">
+                      <div>
+                        <h3 className="inv-stage-unit-title">{g.label}</h3>
+                        <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                          {g.lines.length} part{g.lines.length === 1 ? "" : "s"} · {totalPull} to
+                          pull
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn secondary btn-sm"
+                        onClick={() =>
+                          printTruckPullSheet([g], {
+                            title: `Pull sheet · ${g.label}`,
+                          })
+                        }
+                      >
+                        Print pull sheet
+                      </button>
+                    </div>
+                    <div className="table-wrap inv-table-wrap">
+                      <table className="inv-stage-table">
+                        <thead>
+                          <tr>
+                            <th>Part</th>
+                            <th>On truck</th>
+                            <th>Low</th>
+                            <th>Pull</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {g.lines.map((r) => (
+                            <tr key={`${r.part_id}-${r.location_id}`}>
+                              <td>
+                                <strong>{r.name}</strong>
+                                <div className="muted" style={{ fontSize: "0.78rem" }}>
+                                  {r.code}
+                                </div>
+                              </td>
+                              <td>{r.qty}</td>
+                              <td>{r.min_qty}</td>
+                              <td>
+                                <strong>{r.stage_qty}</strong>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                );
+              })}
             </div>
           )}
-          <h3 className="inv-section-title" style={{ marginTop: "1rem" }}>
+
+          <h3 className="inv-section-title no-print" style={{ marginTop: "1rem" }}>
             Warehouse / attic orders
           </h3>
           {!stageWh.length ? (
-            <p className="muted">Warehouse is at or above lows.</p>
+            <p className="muted no-print">Warehouse is at or above lows.</p>
           ) : (
-            <div className="table-wrap inv-table-wrap">
+            <div className="table-wrap inv-table-wrap no-print">
               <table className="inv-stage-table">
                 <thead>
                   <tr>

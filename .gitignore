@@ -24,3 +24,6 @@ verizon_account_meta.json
 backups/
 *.sql.bak
 .fleet-session*
+# generated inventory dumps (regenerate via scripts)
+scripts/parts-export.json
+scripts/truck-stock-report.json

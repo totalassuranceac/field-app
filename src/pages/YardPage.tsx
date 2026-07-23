@@ -159,30 +159,19 @@ export function YardPage() {
   }
 
   return (
-    <div>
-      <div className="page-header">
+    <div className="yard-page">
+      <div className="page-header yard-page-header">
         <div>
           <h1>Yard walk</h1>
-          <p>Registration sticker · insurance · dash cam · GPS</p>
+          <p>Reg · insurance · cam · GPS</p>
         </div>
-        <button className="btn secondary no-print" onClick={() => window.print()}>
-          Print list
+        <button className="btn secondary btn-sm no-print" onClick={() => window.print()}>
+          Print
         </button>
       </div>
 
-      <div className="filters no-print" style={{ flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-        <label
-          className="yard-search"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.35rem",
-            marginRight: "0.35rem",
-            flex: "1 1 10rem",
-            maxWidth: "16rem",
-            minWidth: "8rem",
-          }}
-        >
+      <div className="filters yard-filters no-print">
+        <label className="yard-search">
           <input
             type="search"
             inputMode="search"
@@ -191,20 +180,12 @@ export function YardPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             autoComplete="off"
-            style={{
-              width: "100%",
-              padding: "0.45rem 0.65rem",
-              borderRadius: "8px",
-              border: "1px solid var(--border, #ccc)",
-              fontSize: "1rem",
-            }}
             aria-label="Find unit by number"
           />
           {search && (
             <button
               type="button"
-              className="btn secondary"
-              style={{ padding: "0.35rem 0.55rem", flexShrink: 0 }}
+              className="btn secondary btn-sm yard-search-clear"
               onClick={() => setSearch("")}
               aria-label="Clear search"
             >
@@ -214,16 +195,16 @@ export function YardPage() {
         </label>
         {(
           [
-            ["all", "All units"],
-            ["expired", "Expired (reg / insurance)"],
-            ["expiring", `Due ≤${soonDays}d`],
-            ["equipment", "Cam / GPS issues"],
+            ["all", "All"],
+            ["expired", "Expired"],
+            ["expiring", `≤${soonDays}d`],
+            ["equipment", "Cam/GPS"],
           ] as const
         ).map(([k, label]) => (
           <button
             key={k}
             type="button"
-            className={`chip ${filter === k ? "active" : ""}`}
+            className={`chip chip-sm ${filter === k ? "active" : ""}`}
             onClick={() => setFilter(k)}
           >
             {label}
@@ -234,18 +215,25 @@ export function YardPage() {
       {error && <div className="error">{error}</div>}
 
       {search.trim() && (
-        <p className="muted no-print" style={{ margin: "0 0 0.65rem", fontSize: "0.9rem" }}>
+        <p className="muted no-print yard-search-hint">
           {sorted.length === 0
             ? `No unit matching “${search.trim()}”`
             : sorted.length === 1
               ? `1 unit · tap to open`
-              : `${sorted.length} units matching “${search.trim()}”`}
+              : `${sorted.length} match “${search.trim()}”`}
         </p>
       )}
 
       <div className="yard-grid">
         {sorted.map((v) => {
           const status = worstStatus(v, soonDays);
+          const vehicleLine = [v.year, v.make, v.model].filter(Boolean).join(" ") || "—";
+          const camLabel =
+            v.dash_cam_status === "n/a" ? "N/A" : v.dash_cam_status.replace(/_/g, " ");
+          const gpsLabel =
+            v.gps_status === "n/a" || !v.gps_status
+              ? "N/A"
+              : v.gps_status.replace(/_/g, " ");
           return (
             <button
               key={v.id}
@@ -253,60 +241,51 @@ export function YardPage() {
               className={`yard-card status-${status}`}
               onClick={() => openVehicle(v)}
             >
-              <div className="unit">Unit {v.unit_number}</div>
-              <div className="muted" style={{ marginBottom: "0.35rem" }}>
+              <div className="yard-card-top">
+                <span className="unit">{v.unit_number}</span>
+                <span
+                  className={`badge badge-sm ${
+                    status === "bad" ? "expired" : status === "warn" ? "expiring" : "ok"
+                  }`}
+                >
+                  {status === "bad" ? "Attention" : status === "warn" ? "Soon" : "OK"}
+                </span>
+              </div>
+              <div className="yard-card-driver muted">
                 {v.assigned_driver || "Unassigned"}
-                {v.phone ? ` · ${v.phone}` : ""}
               </div>
-              <div className="muted" style={{ marginBottom: "0.5rem" }}>
-                {[v.year, v.make, v.model].filter(Boolean).join(" ") || "—"} · {v.plate || "no plate"}
+              <div className="yard-card-vehicle muted">
+                {vehicleLine}
+                {v.plate ? ` · ${v.plate}` : ""}
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
-                <span className={`badge ${status === "bad" ? "expired" : status === "warn" ? "expiring" : "ok"}`}>
-                  {status === "bad" ? "Needs attention" : status === "warn" ? "Due soon" : "OK"}
+              <div className="yard-card-badges">
+                <span className={`badge badge-sm ${!camOk(v) ? "danger" : "ok"}`}>
+                  Cam {camLabel}
                 </span>
-                <span
-                  className={`badge ${
-                    !camOk(v) ? "danger" : v.dash_cam_status === "working" ? "ok" : "ok"
-                  }`}
-                >
-                  Cam: {v.dash_cam_status === "n/a" ? "N/A" : v.dash_cam_status.replace(/_/g, " ")}
-                </span>
-                <span
-                  className={`badge ${
-                    !gpsOk(v) ? "danger" : v.gps_status === "working" ? "ok" : "ok"
-                  }`}
-                >
-                  GPS:{" "}
-                  {v.gps_status === "n/a" || !v.gps_status
-                    ? "N/A"
-                    : v.gps_status.replace(/_/g, " ")}
-                  {v.gps_tracker ? ` (${v.gps_tracker})` : ""}
+                <span className={`badge badge-sm ${!gpsOk(v) ? "danger" : "ok"}`}>
+                  GPS {gpsLabel}
+                  {v.gps_tracker ? ` · ${v.gps_tracker}` : ""}
                 </span>
                 {!camOk(v) && (
-                  <span className="badge danger">
-                    {v.dash_cam_status === "missing" ? "Install dash cam" : "Fix dash cam"}
+                  <span className="badge badge-sm danger">
+                    {v.dash_cam_status === "missing" ? "Install cam" : "Fix cam"}
                   </span>
                 )}
                 {!gpsOk(v) && (
-                  <span className="badge danger">
+                  <span className="badge badge-sm danger">
                     {v.gps_status === "missing" ? "Install GPS" : "Fix GPS"}
                   </span>
                 )}
-                {equipmentGood(v) &&
-                  (v.dash_cam_status === "working" || v.gps_status === "working") && (
-                    <span className="badge ok">Equipment good</span>
-                  )}
               </div>
-              <div style={{ fontSize: "0.9rem" }}>
-                <div>
-                  <strong>Registration:</strong> {v.registration_expires || "—"}{" "}
+              <div className="yard-card-dates">
+                <span>
+                  <strong>Reg</strong> {v.registration_expires || "—"}
                   {dateHint(v.registration_expires, soonDays)}
-                </div>
-                <div>
-                  <strong>Insurance:</strong> {v.insurance_expires || "—"}{" "}
+                </span>
+                <span>
+                  <strong>Ins</strong> {v.insurance_expires || "—"}
                   {dateHint(v.insurance_expires, soonDays)}
-                </div>
+                </span>
               </div>
             </button>
           );
@@ -455,7 +434,7 @@ export function YardPage() {
 function dateHint(dateStr: string | null, soonDays: number) {
   const d = daysUntil(dateStr);
   if (d == null) return null;
-  if (d < 0) return <span className="badge expired">{Math.abs(d)}d overdue</span>;
-  if (d <= soonDays) return <span className="badge expiring">{d}d left</span>;
+  if (d < 0) return <span className="badge badge-sm expired">{Math.abs(d)}d late</span>;
+  if (d <= soonDays) return <span className="badge badge-sm expiring">{d}d</span>;
   return null;
 }

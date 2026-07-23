@@ -19,16 +19,20 @@ export {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Parsed JSON body when the server returned an error object */
+  data?: unknown;
+  constructor(status: number, message: string, data?: unknown) {
     super(message);
     this.status = status;
+    this.data = data;
   }
 }
 
 function redirectToLogin() {
   if (typeof window === "undefined") return;
-  if (window.location.pathname === "/login") return;
-  const next = window.location.pathname + window.location.search;
+  const path = window.location.pathname;
+  if (path === "/login" || path.startsWith("/join/")) return;
+  const next = path + window.location.search;
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 
@@ -102,15 +106,22 @@ export async function api<T = unknown>(
     return { user: null } as T;
   }
 
-  if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/me")) {
+  if (
+    res.status === 401 &&
+    !path.startsWith("/auth/login") &&
+    !path.startsWith("/auth/me") &&
+    !path.startsWith("/auth/invite")
+  ) {
     redirectToLogin();
     throw new ApiError(401, "Session expired. Please sign in again.");
   }
 
   if (!res.ok) {
     let msg = res.statusText || `Request failed (${res.status})`;
-    if (data && typeof data === "object" && data !== null && "error" in data) {
-      msg = String((data as { error: string }).error);
+    if (data && typeof data === "object" && data !== null) {
+      const obj = data as { error?: string; message?: string };
+      if (obj.error) msg = String(obj.error);
+      else if (obj.message) msg = String(obj.message);
     } else if (looksLikeHtml) {
       msg =
         res.status === 502 || res.status === 503 || res.status === 504
@@ -119,8 +130,8 @@ export async function api<T = unknown>(
     } else if (text && text.length < 200 && !text.includes("<")) {
       msg = text;
     }
-    msg = msg.replace(/\s+/g, " ").trim().slice(0, 160);
-    throw new ApiError(res.status, msg);
+    msg = msg.replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new ApiError(res.status, msg, data);
   }
 
   if (looksLikeHtml) {
@@ -190,9 +201,37 @@ export const ALL_PERMISSIONS = [
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
 
+/** Permissions that change data (viewer never has these). */
+const WRITE_PERMISSIONS = new Set<string>([
+  "manageUsers",
+  "manageEmployees",
+  "manageVehicles",
+  "logFuel",
+  "editFuel",
+  "manageAlerts",
+  "reportIssues",
+  "manageIssues",
+  "manageSettings",
+  "manageInventory",
+  "manageInventoryLevels",
+  "manageCompanyAssets",
+]);
+
+/** True for the explorer role — same UI as admin, no mutations. */
+export function isViewer(user: User | null | undefined): boolean {
+  return user?.role === "viewer";
+}
+
+/** Admin shell (full nav / command center) for admin or viewer. */
+export function usesAdminShell(user: User | null | undefined): boolean {
+  return user?.role === "admin" || user?.role === "viewer";
+}
+
 /**
  * UI permission check.
  * - Effective role "admin" → superuser (all features).
+ * - "viewer" → same browse surface as admin, but never write actions
+ *   (so they can explore the app without changing data).
  * - When admin uses View as, role becomes warehouse/field/etc. so the UI
  *   matches that role (API still runs as admin on the server).
  */
@@ -201,6 +240,13 @@ export function can(user: User | null, action: string): boolean {
   const r = user.role;
   // Superuser only when not previewing another role
   if (r === "admin") return true;
+
+  // Viewer: read-only twin of admin UI
+  if (r === "viewer") {
+    if (WRITE_PERMISSIONS.has(action)) return false;
+    // All non-write capabilities (view*, browse) are allowed
+    return true;
+  }
 
   const map: Record<string, Role[]> = {
     manageUsers: ["admin"],
@@ -212,13 +258,13 @@ export function can(user: User | null, action: string): boolean {
     manageAlerts: ["admin", "office", "mechanic"],
     reportIssues: ["admin", "office", "driver", "mechanic"],
     manageIssues: ["admin", "mechanic", "office"],
-    viewAudit: ["admin"],
+    viewAudit: ["admin", "viewer"],
     viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"],
     manageSettings: ["admin"],
-    viewInventory: ["admin", "office", "warehouse"],
+    viewInventory: ["admin", "office", "warehouse", "viewer"],
     manageInventory: ["admin", "warehouse"],
     manageInventoryLevels: ["admin", "warehouse"],
-    viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic"],
+    viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic", "viewer"],
     manageCompanyAssets: ["admin", "warehouse"],
   };
   return (map[action] || []).includes(r);
@@ -265,7 +311,8 @@ export function roleLabel(role: Role | string | undefined): string {
  * Product name in the shell / tab title.
  * One app for field, warehouse, shop, and office — role is shown on the user card.
  */
-export function appBrandName(_role?: Role | string | undefined): string {
+export function appBrandName(role?: Role | string | undefined): string {
+  if (role === "viewer") return "Field App · Viewer";
   return "Field App";
 }
 
