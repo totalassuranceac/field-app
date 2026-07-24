@@ -7453,28 +7453,99 @@ tr.row-low td {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.5rem;
+}
+
+/* Swipe row: green “Mark read” under the card; swipe left to reveal */
+.notify-swipe-row {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  touch-action: pan-y;
+}
+
+.notify-swipe-actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 1.1rem;
+  background: color-mix(in srgb, #22c55e 75%, #14532d);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.9rem;
+  z-index: 0;
+}
+
+.notify-swipe-label {
+  letter-spacing: 0.02em;
 }
 
 .notify-item {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.85rem;
+  padding: 0.85rem 0.85rem 0.85rem 1.2rem;
   border-radius: 14px;
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--brand-2) 6%, var(--surface));
+  transition: transform 0.12s ease-out, background 0.15s ease, opacity 0.15s ease;
+  will-change: transform;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.notify-item.is-swiping {
+  transition: none;
+  cursor: grabbing;
 }
 
 .notify-item.is-clickable:hover {
   border-color: color-mix(in srgb, var(--brand, #3b82f6) 40%, var(--line));
 }
 
-.notify-item.read {
+/* Gmail-style: unread = bold subject + stronger card; read = regular weight */
+.notify-swipe-row.is-unread .notify-item {
+  background: color-mix(in srgb, var(--brand, #3b82f6) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--brand, #3b82f6) 30%, var(--line));
+}
+
+.notify-item.read,
+.notify-swipe-row.is-read .notify-item {
   background: var(--surface);
+  opacity: 0.92;
+}
+
+.notify-title {
+  display: block;
+  font-size: 0.98rem;
+  line-height: 1.3;
+  color: inherit;
+}
+
+.notify-swipe-row.is-unread .notify-title {
+  font-weight: 700;
+}
+
+.notify-swipe-row.is-read .notify-title {
+  font-weight: 400;
   opacity: 0.88;
+}
+
+.notify-unread-dot {
+  position: absolute;
+  left: 0.4rem;
+  top: 1.15rem;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--brand, #3b82f6);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand, #3b82f6) 25%, transparent);
 }
 
 .notify-main {
@@ -7494,15 +7565,18 @@ tr.row-low td {
   cursor: pointer;
 }
 
+.notify-body,
 .notify-main p {
   margin: 0.25rem 0;
   font-size: 0.9rem;
+  font-weight: 400;
 }
 
 .notify-meta {
   display: block;
   margin-top: 0.35rem;
   font-size: 0.78rem;
+  font-weight: 400;
 }
 
 .notify-open-hint {
@@ -7510,8 +7584,33 @@ tr.row-low td {
   color: var(--brand, var(--info));
 }
 
+.notify-swipe-hint {
+  opacity: 0.75;
+}
+
+@media (min-width: 720px) {
+  .notify-swipe-hint {
+    display: none;
+  }
+}
+
 .notify-item-actions {
   flex-shrink: 0;
+}
+
+/* Bell panel: same unread bold treatment */
+.notif-panel-item.is-unread .notif-panel-title {
+  font-weight: 700;
+}
+
+.notif-panel-item.is-read .notif-panel-title {
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+.notif-panel-item.is-unread {
+  border-left: 3px solid var(--brand, #3b82f6);
+  padding-left: 0.55rem;
 }
 
 .receipt-drop {

@@ -164,8 +164,12 @@ export function NotificationBell() {
               {!preview.length && <li className="muted notif-panel-empty">No recent alerts.</li>}
               {preview.map((n) => {
                 const to = notificationLink(n);
+                const unread = !n.read_at;
                 return (
-                  <li key={n.id} className="notif-panel-item">
+                  <li
+                    key={n.id}
+                    className={`notif-panel-item${unread ? " is-unread" : " is-read"}`}
+                  >
                     <button
                       type="button"
                       className="notif-panel-item-btn"
@@ -175,6 +179,7 @@ export function NotificationBell() {
                       {n.body ? <div className="muted notif-panel-body">{n.body}</div> : null}
                       <div className="muted notif-panel-go">
                         {to ? "Tap to open →" : "Tap for details →"}
+                        {unread ? " · unread" : ""}
                       </div>
                     </button>
                   </li>

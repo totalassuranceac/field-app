@@ -102,9 +102,10 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     path: "/notifications",
     steps: [
       "Open Notifications from the menu (or the inbox icon).",
-      "Unread items are highlighted — open one to go to the related screen (for example handbook).",
+      "Unread subjects are bold (like Gmail); read ones use regular weight.",
+      "Swipe left on an unread alert to mark it read, or tap Mark read / Open.",
+      "Tap a notification to open the related screen (handbook, warranty, etc.).",
       "Use Messages for team chat: start a conversation with a subject, reply in the same thread, and tap 👍 when you got it.",
-      "A chat bubble and sound appear when a new message arrives (toggle sound with the small bell bottom-right).",
     ],
   },
   {
