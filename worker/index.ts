@@ -3984,7 +3984,7 @@ api.post("/messages/read", async (c) => {
   }
 });
 
-/** Delete a conversation (and its messages) — any participant can remove the thread. */
+/** Delete a conversation (and its messages) entirely — any participant. Also removes inbox alerts. */
 api.delete("/messages/conversations/:id", async (c) => {
   const user = c.get("user");
   const convId = Number(c.req.param("id"));
@@ -3998,30 +3998,45 @@ api.delete("/messages/conversations/:id", async (c) => {
     )
       .bind(convId)
       .all<{ id: number }>();
-    for (const m of msgs.results || []) {
-      await c.env.DB.prepare(`DELETE FROM app_message_reads WHERE message_id = ?`).bind(m.id).run();
+    const messageIds = (msgs.results || []).map((m) => m.id);
+
+    for (const mid of messageIds) {
+      await c.env.DB.prepare(`DELETE FROM app_message_reads WHERE message_id = ?`).bind(mid).run();
       try {
-        await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ?`).bind(m.id).run();
+        await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ?`).bind(mid).run();
       } catch {
         /* acks table optional */
       }
     }
+
+    // Remove every inbox alert for this thread so it never reappears after delete.
+    // New: entity_type=conversation, entity_id=conversation id
+    // Legacy: entity_type=message, entity_id=message id
+    try {
+      const idsToClear = new Set<string>([String(convId), ...messageIds.map(String)]);
+      for (const eid of idsToClear) {
+        await c.env.DB.prepare(
+          `DELETE FROM notifications
+           WHERE entity_id = ?
+             AND (
+               entity_type IN ('conversation', 'message')
+               OR kind IN ('message', 'message_ack')
+             )`
+        )
+          .bind(eid)
+          .run();
+      }
+    } catch {
+      /* notifications table always exists in prod */
+    }
+
     await c.env.DB.prepare(`DELETE FROM app_messages WHERE conversation_id = ?`).bind(convId).run();
     await c.env.DB.prepare(`DELETE FROM app_conversation_members WHERE conversation_id = ?`)
       .bind(convId)
       .run();
     await c.env.DB.prepare(`DELETE FROM app_conversations WHERE id = ?`).bind(convId).run();
-    // Clear related inbox alerts for this conversation
-    try {
-      await c.env.DB.prepare(
-        `DELETE FROM notifications WHERE entity_type = 'conversation' AND entity_id = ?`
-      )
-        .bind(String(convId))
-        .run();
-    } catch {
-      /* ignore */
-    }
-    return c.json({ ok: true });
+
+    return c.json({ ok: true, deleted_messages: messageIds.length });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Delete failed" }, 500);
   }
