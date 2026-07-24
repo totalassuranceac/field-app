@@ -58,11 +58,18 @@ function parseTime(h: number, m: number, ampm?: string | null): string | null {
 }
 
 export function parseReceiptDateTime(text: string): { fuel_date: string | null; fuel_time: string | null } {
-  // Soft-clean OCR junk in times: 19:43:5¢ → 19:43:59-ish, keep HH:MM
+  // Soft-clean OCR junk in times/dates (Circle K header + footer are fragile on phones)
   const cleaned = text
     .replace(/\r/g, "\n")
+    // glue spaced dates: 6 / 7 / 2026 → 6/7/2026
+    .replace(/(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})\s*[\/\-\.]\s*(\d{2,4})/g, "$1/$2/$3")
+    // time with space in seconds: 13:44: 44 → 13:44:44
+    .replace(/(\d{1,2}:\d{2}):\s+(\d{2})\b/g, "$1:$2")
     .replace(/(\d{1,2}:\d{2}):(\d)[^\d\s\n]*/g, "$1:0$2") // 19:43:5¢ → 19:43:05
-    .replace(/(\d{1,2}:\d{2}):([^\d\s\n]+)/g, "$1"); // drop fully garbage seconds
+    .replace(/(\d{1,2}:\d{2}):([^\d\s\n]+)/g, "$1") // drop fully garbage seconds
+    // Circle K footer OCR: E2026 15:44:44 / 0G/07/2026 — try to salvage MM/DD/YYYY when 0/O glued
+    .replace(/\b[O0E](\d)[\/\-.](\d{1,2})[\/\-.](\d{4})\b/gi, "0$1/$2/$3")
+    .replace(/\b[O0](\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})\b/g, "$1/$2/$3");
   const candidates: { iso: string; time: string | null; score: number }[] = [];
 
   const push = (y: number, mo: number, d: number, time: string | null, score: number) => {
@@ -72,12 +79,17 @@ export function parseReceiptDateTime(text: string): { fuel_date: string | null; 
 
   // Stripes / Circle K / 7-Eleven datetime patterns
   const patterns: { re: RegExp; score: number }[] = [
+    // Circle K header: 6/7/2026 1:45:05 PM (single-digit month/day + AM/PM)
+    {
+      re: /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.|am|pm)\b/gi,
+      score: 24,
+    },
     // DATE M/D/YY H:MM[:SS] [AM/PM]
     {
       re: /DATE\s*[:#]?\s*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.)?/gi,
       score: 20,
     },
-    // 7-Eleven header: 10/02/2025 19:43:59 (24h, full year) — high priority
+    // 7-Eleven / Circle K footer: 06/07/2026 13:44:44 (24h, full year)
     {
       re: /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM|A\.M\.|P\.M\.|am|pm))?/gi,
       score: 22,
@@ -99,7 +111,7 @@ export function parseReceiptDateTime(text: string): { fuel_date: string | null; 
     },
     // Footer with junk prefix: "0 2/23/26 12:00:59 pM" / "CSH: 0 2/23/26 …"
     {
-      re: /(?:CSH|ST\s*#|DR\s*#|TRAN)[^\n]{0,40}?(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.|am|pm)?/gi,
+      re: /(?:CSH|ST\s*#|DR\s*#|TRAN|Order)[^\n]{0,40}?(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.|am|pm)?/gi,
       score: 16,
     },
     // M/D/YYYY H:MM:SS 24h (no am/pm)
@@ -111,6 +123,11 @@ export function parseReceiptDateTime(text: string): { fuel_date: string | null; 
     {
       re: /(?:DATE|TRAN\s*DATE|TRANS(?:ACTION)?\s*DATE)\s*[:#]?\s*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/gi,
       score: 12,
+    },
+    // Zero-padded footer without word boundary before month: 06/07/2026 13:44:44 glued to junk
+    {
+      re: /(\d{2})[\/\-\.](\d{2})[\/\-\.](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/g,
+      score: 15,
     },
   ];
 
@@ -847,9 +864,13 @@ const STRIPES_LOCATION_HINTS: { re: RegExp; id: string }[] = [
 
 /**
  * Fleet Circle K locations — brand line often OCRs as Cirele/Circte; street+phone still read.
- * 2741849 (Holly Rd) is a frequent stop for this fleet.
+ * Only apply when street/phone match — never invent a store from a wrong prior receipt.
  */
 const CIRCLEK_LOCATION_HINTS: { re: RegExp; id: string }[] = [
+  // Circle K 2706973 — 2730 Agnes St, Corpus Christi
+  { re: /\bagnes\b/i, id: "2706973" },
+  { re: /\b2730\b[^\n]{0,24}agnes/i, id: "2706973" },
+  { re: /361[\s\-]?888[\s\-]?9397/, id: "2706973" },
   // Circle K 2741849 — 2202 Holly Rd, Corpus Christi
   { re: /\bholly\s*r/i, id: "2741849" },
   { re: /\b2202\b[^\n]{0,24}holly/i, id: "2741849" },
@@ -1044,9 +1065,9 @@ function parseStore(text: string, lines: string[]): { store_number: string | nul
       }
     }
     // Bare 7-digit site in header when Gallons @ layout present
-    // Prefer fleet Circle K range 274xxxx; never take Order Number lines
+    // Prefer fleet Circle K range 270xxxx / 274xxxx; never take Order Number lines
     if (!id && /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(text)) {
-      const fleet = text.match(/\b(274\d{4})\b/);
+      const fleet = text.match(/\b(27[04]\d{4})\b/);
       id = cleanStoreDigits(fleet?.[1]);
       if (!id) {
         for (let li = 0; li < Math.min(12, lines.length); li++) {
@@ -1640,6 +1661,52 @@ function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
   };
 }
 
+/**
+ * Crop to the bright receipt paper on dark tables/jeans so Tesseract
+ * does not waste attention on wood grain / fabric (big win on phone photos).
+ */
+function cropToReceiptPaper(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number
+): { sx: number; sy: number; sw: number; sh: number } | null {
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  // Coarse grid sample for bright pixels (paper)
+  const stepX = Math.max(2, Math.floor(w / 120));
+  const stepY = Math.max(2, Math.floor(h / 160));
+  let minX = w;
+  let minY = h;
+  let maxX = 0;
+  let maxY = 0;
+  let bright = 0;
+  for (let y = 0; y < h; y += stepY) {
+    for (let x = 0; x < w; x += stepX) {
+      const i = (y * w + x) * 4;
+      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      if (g < 145) continue; // dark wood / denim
+      bright++;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (bright < 40) return null;
+  // Pad a bit; require crop to actually shrink the frame
+  const padX = Math.round(w * 0.02);
+  const padY = Math.round(h * 0.02);
+  minX = Math.max(0, minX - padX);
+  minY = Math.max(0, minY - padY);
+  maxX = Math.min(w - 1, maxX + padX);
+  maxY = Math.min(h - 1, maxY + padY);
+  const sw = maxX - minX + 1;
+  const sh = maxY - minY + 1;
+  if (sw < w * 0.25 || sh < h * 0.3) return null;
+  if (sw * sh > w * h * 0.92) return null; // almost full frame already
+  return { sx: minX, sy: minY, sw, sh };
+}
+
 async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
   try {
     const bmp = await createImageBitmap(file);
@@ -1648,19 +1715,52 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
     const minW = 1400;
     let scale = bmp.width > maxW ? maxW / bmp.width : 1;
     if (bmp.width * scale < minW) scale = minW / bmp.width;
-    const w = Math.round(bmp.width * scale);
-    const h = Math.round(bmp.height * scale);
+    let w = Math.round(bmp.width * scale);
+    let h = Math.round(bmp.height * scale);
+    const full = document.createElement("canvas");
+    full.width = w;
+    full.height = h;
+    const fctx = full.getContext("2d");
+    if (!fctx) return file;
+    fctx.imageSmoothingEnabled = true;
+    fctx.imageSmoothingQuality = "high";
+    fctx.drawImage(bmp, 0, 0, w, h);
+    bmp.close?.();
+
+    // Crop dark table/wood away when receipt paper is clearly brighter
+    const crop = cropToReceiptPaper(fctx, w, h);
+    let srcCanvas = full;
+    if (crop) {
+      const cropped = document.createElement("canvas");
+      cropped.width = crop.sw;
+      cropped.height = crop.sh;
+      const cctx = cropped.getContext("2d");
+      if (cctx) {
+        cctx.drawImage(full, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
+        srcCanvas = cropped;
+        w = crop.sw;
+        h = crop.sh;
+      }
+    }
+
+    // Re-upscale if crop made it small
+    let outW = w;
+    let outH = h;
+    if (outW < minW) {
+      const s2 = minW / outW;
+      outW = Math.round(outW * s2);
+      outH = Math.round(outH * s2);
+    }
     const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = outW;
+    canvas.height = outH;
     const ctx = canvas.getContext("2d");
     if (!ctx) return file;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(bmp, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
+    ctx.drawImage(srcCanvas, 0, 0, outW, outH);
+    const img = ctx.getImageData(0, 0, outW, outH);
     const d = img.data;
-    // Sample luminance to detect dark-background photos (receipt on jeans/seat)
     let sum = 0;
     const step = Math.max(4, Math.floor(d.length / 4 / 8000)) * 4;
     let samples = 0;
@@ -1669,22 +1769,17 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
       samples++;
     }
     const mean = samples ? sum / samples : 128;
-    // Dark backdrop (receipt on jeans/seat): mild contrast only.
-    // Aggressive binarize was wiping Circle K gallons/total text on phones.
-    const darkBg = mean < 105;
-    const contrast = darkBg ? 1.85 : 1.65;
-    const midPull = darkBg ? 0.88 : 0.85;
+    // Mild contrast — keep thermal ink (dark wood crop already helped)
+    const contrast = mean < 140 ? 1.7 : 1.55;
     for (let i = 0; i < d.length; i += 4) {
       const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
       let c = (g - 128) * contrast + 128;
-      // Soft pull mid-greys — keep thermal ink detail
-      if (c < 140) c = c * midPull;
-      else c = 255 - (255 - c) * 0.9;
+      if (c < 140) c = c * 0.9;
+      else c = 255 - (255 - c) * 0.92;
       const v = Math.max(0, Math.min(255, c));
       d[i] = d[i + 1] = d[i + 2] = v;
     }
     ctx.putImageData(img, 0, 0);
-    bmp.close?.();
     return canvas;
   } catch {
     return file;
@@ -2232,16 +2327,24 @@ export async function ocrReceiptImage(
   }
 
   // Always OCR both raw photo and preprocessed — phone preprocess can wipe thermal ink.
-  // Keep whichever parse is more complete (and merge gaps).
+  // PSM 6 (uniform block) reads Circle K body+card better than default on phones.
   const source = await preprocessImage(file);
-  const [preResult, rawResult] = await Promise.all([
-    Tesseract.recognize(source, "eng", { logger: () => {} }),
-    Tesseract.recognize(file, "eng", { logger: () => {} }),
+  const recognize = (img: unknown, psm?: string) =>
+    Tesseract.recognize(img, "eng", {
+      logger: () => {},
+      ...(psm ? { tessedit_pageseg_mode: psm } : {}),
+    });
+  const [preResult, rawResult, prePsm6] = await Promise.all([
+    recognize(source),
+    recognize(file),
+    recognize(source, "6"),
   ]);
   let text: string = preResult?.data?.text || "";
   const rawFull: string = rawResult?.data?.text || "";
+  const psm6Text: string = prePsm6?.data?.text || "";
   const textChunks: string[] = [text];
   if (rawFull.trim()) textChunks.push(rawFull);
+  if (psm6Text.trim()) textChunks.push(psm6Text);
 
   // Extra region passes on preprocessed image — store header + fuel body + pan
   try {
