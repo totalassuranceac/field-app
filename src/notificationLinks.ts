@@ -13,27 +13,29 @@ export function notificationLink(n: {
   const entity = String(n.entity_type || "").toLowerCase();
   const text = `${n.title || ""} ${n.body || ""}`.toLowerCase();
 
-  // Explicit kinds
-  if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
+  // Messages always open the conversation thread (never keyword-hijack to warranty/fuel/etc.)
+  // even if the message body mentions those words.
   if (
     kind === "message" ||
     kind === "message_ack" ||
     kind.startsWith("message") ||
-    entity === "conversation"
+    entity === "conversation" ||
+    entity === "message"
   ) {
-    if (entity === "conversation" && n.entity_id != null && String(n.entity_id) !== "") {
+    if (n.entity_id != null && String(n.entity_id).trim() !== "") {
+      // entity_id is conversation_id for message / message_ack / conversation
       return `/messages?c=${encodeURIComponent(String(n.entity_id))}`;
     }
     return "/messages";
   }
+
+  // Explicit kinds
+  if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
   if (kind.startsWith("handbook") || entity === "handbook" || text.includes("handbook")) {
     return "/handbook";
   }
-  if (
-    kind.startsWith("warranty") ||
-    entity === "warranty" ||
-    text.includes("warranty")
-  ) {
+  // Do not match "warranty" inside arbitrary free text — only real warranty notifications
+  if (kind.startsWith("warranty") || entity === "warranty") {
     return "/warranties";
   }
   if (
@@ -75,16 +77,10 @@ export function notificationLink(n: {
   if (kind.includes("fuel") || kind.includes("mileage") || kind.includes("alert")) {
     return "/alerts";
   }
-  if (kind.includes("asset") || text.includes("bottle") || text.includes("ladder")) {
+  if (kind.includes("asset")) {
     return "/assets";
   }
-  if (
-    kind.includes("review") ||
-    kind === "company_review" ||
-    entity === "review" ||
-    text.includes("google review") ||
-    text.includes("shout-out")
-  ) {
+  if (kind.includes("review") || kind === "company_review" || entity === "review") {
     return "/reviews";
   }
   if (entity === "vehicle" && n.entity_id) {
@@ -96,7 +92,6 @@ export function notificationLink(n: {
   if (entity === "warranty") return "/warranties";
   if (entity === "parts_purchase") return "/parts-receipts";
   if (entity === "issue") return "/issues";
-  if (entity === "message") return "/messages";
   if (entity === "inspection") return "/inspections";
   if (entity === "review") return "/reviews";
 

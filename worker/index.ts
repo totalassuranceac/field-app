@@ -3984,6 +3984,49 @@ api.post("/messages/read", async (c) => {
   }
 });
 
+/** Delete a conversation (and its messages) — any participant can remove the thread. */
+api.delete("/messages/conversations/:id", async (c) => {
+  const user = c.get("user");
+  const convId = Number(c.req.param("id"));
+  if (!convId) return c.json({ error: "Invalid conversation" }, 400);
+  try {
+    const conv = await userCanAccessConversation(c.env.DB, user.id, convId);
+    if (!conv) return c.json({ error: "Conversation not found" }, 404);
+
+    const msgs = await c.env.DB.prepare(
+      `SELECT id FROM app_messages WHERE conversation_id = ?`
+    )
+      .bind(convId)
+      .all<{ id: number }>();
+    for (const m of msgs.results || []) {
+      await c.env.DB.prepare(`DELETE FROM app_message_reads WHERE message_id = ?`).bind(m.id).run();
+      try {
+        await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ?`).bind(m.id).run();
+      } catch {
+        /* acks table optional */
+      }
+    }
+    await c.env.DB.prepare(`DELETE FROM app_messages WHERE conversation_id = ?`).bind(convId).run();
+    await c.env.DB.prepare(`DELETE FROM app_conversation_members WHERE conversation_id = ?`)
+      .bind(convId)
+      .run();
+    await c.env.DB.prepare(`DELETE FROM app_conversations WHERE id = ?`).bind(convId).run();
+    // Clear related inbox alerts for this conversation
+    try {
+      await c.env.DB.prepare(
+        `DELETE FROM notifications WHERE entity_type = 'conversation' AND entity_id = ?`
+      )
+        .bind(String(convId))
+        .run();
+    } catch {
+      /* ignore */
+    }
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Delete failed" }, 500);
+  }
+});
+
 // ——— Warranty claims ———
 /**
  * Warranty log #: W + MM + YY + "-" + monthly sequence

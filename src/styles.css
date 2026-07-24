@@ -5858,6 +5858,12 @@ tr.row-low td {
   display: flex;
   align-items: flex-start;
   gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.msg-thread-title {
+  flex: 1;
+  min-width: 0;
 }
 
 .msg-thread-title h1 {
@@ -5870,6 +5876,12 @@ tr.row-low td {
   margin: 0.15rem 0 0;
   font-size: 0.85rem;
   color: var(--muted, #64748b);
+}
+
+.msg-delete-btn {
+  color: #f87171 !important;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .msg-thread {

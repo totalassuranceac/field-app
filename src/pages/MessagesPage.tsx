@@ -240,6 +240,34 @@ export function MessagesPage() {
     }
   }
 
+  async function deleteConversation() {
+    if (!openId) return;
+    const okDel = window.confirm(
+      "Delete this conversation for everyone? Messages cannot be recovered."
+    );
+    if (!okDel) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/messages/conversations/${openId}`, { method: "DELETE" });
+      setOk("Conversation deleted.");
+      setActive(null);
+      setThread([]);
+      setReply("");
+      if (returnTo) {
+        clearNavReturn();
+        navigate(returnTo);
+      } else {
+        setParams({});
+        await loadList();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ——— Thread view (including brief load while opening) ———
   if (openId) {
     const who = active
@@ -260,6 +288,15 @@ export function MessagesPage() {
               {active?.is_team ? " · team thread" : active ? " · direct" : ""}
             </p>
           </div>
+          <button
+            type="button"
+            className="btn ghost btn-sm msg-delete-btn"
+            disabled={busy}
+            onClick={() => void deleteConversation()}
+            title="Delete conversation"
+          >
+            Delete
+          </button>
         </div>
 
         {error && <div className="error inv-flash">{error}</div>}
