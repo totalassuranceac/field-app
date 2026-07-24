@@ -197,8 +197,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Enter part name / code, model, serial if you have them.",
       "Note job site or reason if useful.",
       "Tap Take photo of the shelf or bin where you leave the part.",
-      "Submit — the app shows a big warranty log number (e.g. W0726-001 for July 2026).",
-      "Write that log number on the box with a marker before you leave. Sequence restarts each month (August → W0826-001).",
+      "Submit — a popup shows the big warranty log number (e.g. W0726-001 for July 2026).",
+      "Write that number on the box with a marker, then tap Got it — take me home.",
       "Warehouse matches the number + photo to process the claim.",
     ],
     tips: [

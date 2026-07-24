@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, OfflineQueuedError } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
@@ -80,6 +81,7 @@ async function compressPhoto(file: File, maxBytes = 850_000): Promise<File> {
 
 export function WarrantiesPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const canProcess =
     user?.role === "admin" ||
     user?.role === "warehouse" ||
@@ -231,41 +233,38 @@ export function WarrantiesPage() {
         </div>
       </div>
       {error && <div className="error inv-flash">{error}</div>}
-      {ok && <div className="success inv-flash">{ok}</div>}
+      {ok && !writeOnBox && <div className="success inv-flash">{ok}</div>}
 
+      {/* Full-screen popup: write log # on the box → Got it returns home */}
       {writeOnBox && (
         <div
-          className="card"
-          role="status"
-          style={{
-            marginBottom: "1rem",
-            border: "2px solid var(--accent, #c9a227)",
-            background: "var(--surface-2, #1a1f2e)",
-            textAlign: "center",
-            padding: "1.25rem 1rem",
-          }}
+          className="modal-backdrop warranty-log-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="warranty-log-title"
         >
-          <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.35rem" }}>
-            Write this warranty log number on the box
+          <div className="card warranty-log-modal-inner">
+            <div className="muted" id="warranty-log-title" style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>
+              Write this warranty log number on the box
+            </div>
+            <div className="warranty-log-modal-number">{writeOnBox}</div>
+            <p style={{ margin: "0 0 1.25rem", fontSize: "1rem", lineHeight: 1.4 }}>
+              Use a marker on the box or tag <strong>before you leave</strong>. Warehouse uses this
+              number to match the part to your drop-off photo.
+            </p>
+            <button
+              type="button"
+              className="btn"
+              style={{ width: "100%", fontSize: "1.05rem", padding: "0.85rem 1rem" }}
+              onClick={() => {
+                setWriteOnBox(null);
+                setOk("");
+                navigate("/");
+              }}
+            >
+              Got it — take me home
+            </button>
           </div>
-          <div
-            style={{
-              fontSize: "clamp(1.75rem, 6vw, 2.5rem)",
-              fontWeight: 800,
-              letterSpacing: "0.04em",
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-              margin: "0.25rem 0 0.75rem",
-            }}
-          >
-            {writeOnBox}
-          </div>
-          <p style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>
-            Use a marker on the box or tag before you leave the shelf. Warehouse uses this number to
-            match the part to your drop-off photo.
-          </p>
-          <button type="button" className="btn secondary" onClick={() => setWriteOnBox(null)}>
-            Got it — number is on the box
-          </button>
         </div>
       )}
 

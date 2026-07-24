@@ -4336,6 +4336,32 @@ tr.row-low td {
   z-index: 50;
 }
 
+/* Warranty drop-off: full-screen log # to write on the box */
+.warranty-log-modal {
+  z-index: 80;
+  background: rgba(8, 12, 20, 0.78);
+  padding: 1.25rem;
+  align-items: center;
+}
+
+.warranty-log-modal-inner {
+  width: min(420px, 100%);
+  text-align: center;
+  padding: 1.75rem 1.35rem 1.5rem;
+  border: 2px solid var(--accent, #c9a227);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.warranty-log-modal-number {
+  font-size: clamp(2rem, 9vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0.5rem 0 1rem;
+  line-height: 1.15;
+  color: var(--ink, #f3f4f6);
+}
+
 .modal {
   width: min(540px, 100%);
   max-height: 90vh;
