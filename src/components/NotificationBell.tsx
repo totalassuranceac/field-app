@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { notificationLink } from "../notificationLinks";
+import { notificationsReturnState, setNavReturn } from "../navReturn";
 
 type Panel = "closed" | "open";
 
@@ -105,7 +106,9 @@ export function NotificationBell() {
     } catch {
       /* still navigate */
     }
-    navigate(to, { state: { returnTo: "/notifications" } });
+    const ret = notificationsReturnState();
+    setNavReturn(ret.returnTo, ret.returnLabel);
+    navigate(to, { state: ret });
     void load();
   }
 

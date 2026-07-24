@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
 import { useAuth } from "../auth";
+import {
+  clearNavReturn,
+  readNavReturn,
+  returnBarLabel,
+} from "../navReturn";
 import { NotificationBell } from "./NotificationBell";
 import { OfflineBanner } from "./OfflineBanner";
 import { MessageBubble } from "./MessageBubble";
@@ -164,7 +169,20 @@ function pathCategory(pathname: string): string {
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, realUser, viewAsRole, setViewAsRole } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+
+  const navReturn = readNavReturn(location.state);
+  const returnPath = navReturn?.returnTo?.split("?")[0] || "";
+  // Hide bar when already on the return destination (e.g. back on Notifications)
+  const showReturnBar = Boolean(navReturn?.returnTo) && returnPath !== location.pathname;
+
+  // Clear return marker once user is back on that page
+  useEffect(() => {
+    if (returnPath && returnPath === location.pathname) {
+      clearNavReturn();
+    }
+  }, [location.pathname, returnPath]);
   const [unread, setUnread] = useState(0);
   /** Parts waiting at vendors — warehouse glance counter (shows 0 when clear) */
   const [vendorWaiting, setVendorWaiting] = useState(0);
@@ -601,6 +619,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <NotificationBell />
             </div>
           </div>
+          {/* Always-visible when you opened a page from Notifications (or similar) */}
+          {showReturnBar && navReturn ? (
+            <div className="return-bar no-print" role="navigation" aria-label="Go back">
+              <button
+                type="button"
+                className="return-bar-btn"
+                onClick={() => {
+                  const dest = navReturn.returnTo;
+                  clearNavReturn();
+                  navigate(dest);
+                }}
+              >
+                ← {returnBarLabel(navReturn)}
+              </button>
+            </div>
+          ) : null}
           <main className="main">{children}</main>
         </div>
       </div>

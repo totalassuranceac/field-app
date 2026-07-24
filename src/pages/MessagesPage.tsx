@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { unlockMessageSound } from "../messageSound";
+import { clearNavReturn, readNavReturn } from "../navReturn";
 
 interface Peer {
   id: number;
@@ -62,13 +63,7 @@ export function MessagesPage() {
   const [params, setParams] = useSearchParams();
   const openId = Number(params.get("c") || "0") || null;
   /** When opened from Notifications, Back returns there instead of chat list only. */
-  const returnTo =
-    location.state &&
-    typeof location.state === "object" &&
-    "returnTo" in location.state &&
-    typeof (location.state as { returnTo?: unknown }).returnTo === "string"
-      ? (location.state as { returnTo: string }).returnTo
-      : null;
+  const returnTo = readNavReturn(location.state)?.returnTo || null;
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -164,18 +159,9 @@ export function MessagesPage() {
     setThread([]);
     setReply("");
     if (returnTo) {
+      clearNavReturn();
       navigate(returnTo);
       return;
-    }
-    // Prefer history back when we pushed /messages?c=… from elsewhere
-    if (window.history.length > 1 && openId) {
-      // Stay in messages app if user opened chat from chat list
-      const cameFromChatList = !returnTo;
-      if (cameFromChatList) {
-        setParams({});
-        void loadList().catch(() => null);
-        return;
-      }
     }
     setParams({});
     void loadList().catch(() => null);

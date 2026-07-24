@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { notificationLink } from "../notificationLinks";
+import { notificationsReturnState, setNavReturn } from "../navReturn";
 
 interface Note {
   id: number;
@@ -19,7 +20,7 @@ const SWIPE_THRESHOLD = 64;
 const SWIPE_MAX = 120;
 
 /** Navigate targets opened from inbox so Back can return here. */
-const NOTIF_NAV_STATE = { returnTo: "/notifications" as const };
+const NOTIF_NAV_STATE = notificationsReturnState();
 
 function NotifyRow({
   n,
@@ -261,7 +262,10 @@ function NotifyRow({
               className="btn secondary btn-sm"
               to={to}
               state={NOTIF_NAV_STATE}
-              onClick={() => void onMarkRead(n.id)}
+              onClick={() => {
+                setNavReturn(NOTIF_NAV_STATE.returnTo, NOTIF_NAV_STATE.returnLabel);
+                void onMarkRead(n.id);
+              }}
             >
               Open
             </Link>
@@ -332,7 +336,10 @@ export function NotificationsPage() {
   async function openNote(n: Note) {
     const to = notificationLink(n);
     if (!n.read_at) await markOne(n.id);
-    if (to) navigate(to, { state: NOTIF_NAV_STATE });
+    if (to) {
+      setNavReturn(NOTIF_NAV_STATE.returnTo, NOTIF_NAV_STATE.returnLabel);
+      navigate(to, { state: NOTIF_NAV_STATE });
+    }
   }
 
   async function sendWeekly() {
