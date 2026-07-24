@@ -748,17 +748,58 @@ function parseTotalCost(
 }
 
 /**
- * Prefer the printed gallons token over reverse math.
- * total÷price invents off-by-0.001 errors: 20.137G @ $2.459 = $49.52, but
- * $49.52÷$2.459 ≈ 20.138 — never “correct” a clear pump qty that way.
- * (Missing gallons are still derived earlier in parseGallons when no qty token exists.)
+ * Prefer the printed gallons token over reverse math when product already matches.
+ * When OCR flipped one digit in qty (25.079 vs 25.029), try single-digit repairs
+ * that make gallons × price ≈ total — prefer that over raw total÷price (25.028…).
  */
 function refineGallonsToTotal(
   gallons: number | null,
-  _total: number | null,
-  _ppg: number | null
+  total: number | null,
+  ppg: number | null
 ): number | null {
   if (gallons == null) return null;
+  if (total == null || ppg == null || ppg < 1.2 || total < 5) return roundGallons(gallons);
+  const err0 = Math.abs(gallons * ppg - total);
+  if (err0 <= 0.08) return roundGallons(gallons);
+
+  // Single-digit flips in the 3-decimal pump qty (thermal OCR)
+  const base = roundGallons(gallons).toFixed(3);
+  const [whole, frac = "000"] = base.split(".");
+  let best = gallons;
+  let bestErr = err0;
+  const tryCand = (n: number) => {
+    if (!(n > 0.5 && n < 120)) return;
+    const e = Math.abs(n * ppg - total);
+    if (e < bestErr - 1e-9) {
+      bestErr = e;
+      best = n;
+    }
+  };
+  for (let i = 0; i < Math.min(3, frac.length); i++) {
+    for (let d = 0; d <= 9; d++) {
+      if (String(d) === frac[i]) continue;
+      const nf = frac.slice(0, i) + String(d) + frac.slice(i + 1);
+      tryCand(parseFloat(`${whole}.${nf}`));
+    }
+  }
+  // Also allow one-digit flip in the whole part (less common)
+  for (let i = 0; i < whole.length; i++) {
+    for (let d = 0; d <= 9; d++) {
+      if (String(d) === whole[i]) continue;
+      if (i === 0 && d === 0) continue;
+      const nw = whole.slice(0, i) + String(d) + whole.slice(i + 1);
+      tryCand(parseFloat(`${nw}.${frac}`));
+    }
+  }
+
+  if (bestErr <= 0.08) return roundGallons(best);
+  // Last resort: derived total÷price only when OCR is badly off
+  if (err0 > 0.4) {
+    const derived = total / ppg;
+    if (derived > 1 && derived < 120 && Math.abs(derived - gallons) <= 0.25) {
+      return roundGallons(derived);
+    }
+  }
   return roundGallons(gallons);
 }
 
@@ -1389,7 +1430,76 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
 
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.score - a.score);
-  return candidates[0].n;
+
+  // All long pan-mask last4s. When both 1716 and 7716 appear (1↔7 OCR noise),
+  // prefer the last pan-mask in the slip (card section is below totals) and any
+  // form that sits on a Card Num line.
+  const maskMatches = [...text.matchAll(/[X*x#]{8,}(\d{4})\b/g)].filter(
+    (m) => /^\d{4}$/.test(m[1]) && m[1] !== "0000"
+  );
+  if (maskMatches.length) {
+    const uniq = [...new Set(maskMatches.map((m) => m[1]))];
+    const lastIdx = new Map<string, number>();
+    for (const m of maskMatches) lastIdx.set(m[1], m.index ?? 0);
+    const ranked = uniq.map((dig) => {
+      const cand = candidates.find((c) => c.n === dig);
+      let s = cand?.score ?? 18;
+      // Later on the receipt (card block under SALE/Visa) beats early misreads
+      s += Math.min(15, Math.floor((lastIdx.get(dig) || 0) / 40));
+      if (new RegExp(`Card\\s*Num[^\\n]{0,80}[X*x#]{6,}${dig}`, "i").test(text)) s += 25;
+      if (new RegExp(`[X*x#]{6,}${dig}[^\\n]{0,20}\\n[^\\n]{0,20}Contactless`, "i").test(text)) {
+        s += 12;
+      }
+      return { dig, s };
+    });
+    ranked.sort((a, b) => b.s - a.s || (lastIdx.get(b.dig) || 0) - (lastIdx.get(a.dig) || 0));
+    // Confusable 1↔7 pair: force last-on-receipt when scores are close
+    if (ranked.length >= 2) {
+      const a = ranked[0].dig;
+      const b = ranked[1].dig;
+      if (a.replace(/7/g, "1") === b.replace(/7/g, "1") && a !== b) {
+        const later = (lastIdx.get(a) || 0) >= (lastIdx.get(b) || 0) ? a : b;
+        if (Math.abs(ranked[0].s - ranked[1].s) <= 20) return later;
+      }
+    }
+    return ranked[0].dig;
+  }
+
+  let best = candidates[0].n;
+
+  // 1↔7 OCR flips when only one form was captured as a candidate
+  const confusable = (n: string): string[] => {
+    const out = new Set<string>([n]);
+    const chars = n.split("");
+    for (let i = 0; i < chars.length; i++) {
+      if (chars[i] === "1") {
+        const c = [...chars];
+        c[i] = "7";
+        out.add(c.join(""));
+      } else if (chars[i] === "7") {
+        const c = [...chars];
+        c[i] = "1";
+        out.add(c.join(""));
+      }
+    }
+    return [...out];
+  };
+  for (const alt of confusable(best)) {
+    if (alt === best) continue;
+    if (new RegExp(`[X*x#]{6,}${alt}\\b`, "i").test(text)) {
+      best = alt;
+      break;
+    }
+    const altCand = candidates.find((c) => c.n === alt);
+    if (altCand && altCand.score >= candidates[0].score - 4) {
+      if (/7/.test(alt) && /1/.test(best) && !/7/.test(best)) {
+        best = alt;
+        break;
+      }
+    }
+  }
+
+  return best;
 }
 
 /** Prepay / pre-auth slips (drivers should pump first — we flag these). */
@@ -1454,9 +1564,16 @@ function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
     const total2 = parseTotalCost(joined, lines, gallons);
     if (total2 != null) total_cost = total2;
   }
-  // Nudge gallons to match total ÷ price (21.700 → 21.701 when slip is $50.32 @ $2.319)
+  // Nudge gallons when OCR flipped a digit (Circle K 25.079 → 25.029 @ price×total).
+  // Do NOT rewrite labeled Stripes GALLONS: when only PRICE/G OCR is wrong.
   const ppgFinal = parsePricePerGal(joined, lines);
-  gallons = refineGallonsToTotal(gallons, total_cost, ppgFinal);
+  const hasLabeledGallonsLine = /\bGALLONS?\s*[:#]\s*\d/i.test(joined);
+  const hasGallonsAtStyle = /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(joined);
+  if (!hasLabeledGallonsLine || hasGallonsAtStyle) {
+    gallons = refineGallonsToTotal(gallons, total_cost, ppgFinal);
+  } else {
+    gallons = gallons != null ? roundGallons(gallons) : null;
+  }
 
   const { store_number, store_name } = parseStore(normalized, lines);
   let card_last4 = parseCardLast4(normalized, lines);
@@ -1552,21 +1669,17 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
       samples++;
     }
     const mean = samples ? sum / samples : 128;
-    // Dark backdrop: push paper whites up harder so thermal ink stays black
-    const darkBg = mean < 110;
-    const contrast = darkBg ? 2.15 : 1.75;
-    const midPull = darkBg ? 0.72 : 0.82;
+    // Dark backdrop (receipt on jeans/seat): mild contrast only.
+    // Aggressive binarize was wiping Circle K gallons/total text on phones.
+    const darkBg = mean < 105;
+    const contrast = darkBg ? 1.85 : 1.65;
+    const midPull = darkBg ? 0.88 : 0.85;
     for (let i = 0; i < d.length; i += 4) {
       const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
       let c = (g - 128) * contrast + 128;
-      // Pull mid-greys toward black/white for faded thermal ink
+      // Soft pull mid-greys — keep thermal ink detail
       if (c < 140) c = c * midPull;
-      else c = 255 - (255 - c) * (darkBg ? 0.7 : 0.85);
-      // Soft binarize on dark-bg shots (receipt paper vs denim)
-      if (darkBg) {
-        if (c < 100) c = Math.max(0, c * 0.55);
-        else if (c > 175) c = Math.min(255, 255 - (255 - c) * 0.4);
-      }
+      else c = 255 - (255 - c) * 0.9;
       const v = Math.max(0, Math.min(255, c));
       d[i] = d[i + 1] = d[i + 2] = v;
     }
@@ -1578,25 +1691,76 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
   }
 }
 
-/** Prefer non-null fields; when both set, keep a's unless b fills a gap. */
+/** How complete a parse is (higher = better). Used to merge multi-pass OCR. */
+function parseCompleteness(p: Omit<ReceiptParseResult, "raw_text">): number {
+  let s = 0;
+  if (p.fuel_date) s += 2;
+  if (p.fuel_time) s += 1;
+  if (p.gallons != null) s += 3;
+  if (p.total_cost != null) s += 3;
+  if (p.store_number || p.store_name) s += 2;
+  if (p.card_last4) s += 2;
+  if (p.confidence === "high") s += 2;
+  else if (p.confidence === "medium") s += 1;
+  // Bonus when gallons × price ≈ total (consistent slip)
+  if (p.gallons != null && p.total_cost != null && p.gallons > 3 && p.total_cost > 5) {
+    // rough: ppg between 1.5–8
+    const implied = p.total_cost / p.gallons;
+    if (implied >= 1.5 && implied <= 8) s += 2;
+  }
+  return s;
+}
+
+/**
+ * Merge multi-pass OCR. Prefer the more complete parse overall, then fill gaps
+ * from the other — never let a weak first pass (date-only) block store/gal/total.
+ */
 function mergeParseFields(
   a: Omit<ReceiptParseResult, "raw_text">,
   b: Omit<ReceiptParseResult, "raw_text">
 ): Omit<ReceiptParseResult, "raw_text"> {
+  const aScore = parseCompleteness(a);
+  const bScore = parseCompleteness(b);
+  const primary = aScore >= bScore ? a : b;
+  const secondary = aScore >= bScore ? b : a;
+
   const pick = <T>(x: T | null | undefined, y: T | null | undefined): T | null => {
     if (x != null && x !== "") return x as T;
     if (y != null && y !== "") return y as T;
     return (x ?? y ?? null) as T | null;
   };
-  const gallons = pick(a.gallons, b.gallons);
-  const total_cost = pick(a.total_cost, b.total_cost);
-  const fuel_date = pick(a.fuel_date, b.fuel_date);
-  const fuel_time = pick(a.fuel_time, b.fuel_time);
-  const store_number = pick(a.store_number, b.store_number);
-  const store_name = pick(a.store_name, b.store_name);
-  const card_last4 = pick(a.card_last4, b.card_last4);
-  const is_prepay = a.is_prepay || b.is_prepay;
 
+  // Primary wins when set; secondary fills holes only
+  let gallons = pick(primary.gallons, secondary.gallons);
+  let total_cost = pick(primary.total_cost, secondary.total_cost);
+  const fuel_date = pick(primary.fuel_date, secondary.fuel_date);
+  const fuel_time = pick(primary.fuel_time, secondary.fuel_time);
+  const store_number = pick(primary.store_number, secondary.store_number);
+  const store_name = pick(primary.store_name, secondary.store_name);
+  // Card: prefer longer-mask style from secondary if primary is weak confusable 1/7 pair
+  let card_last4 = pick(primary.card_last4, secondary.card_last4);
+  if (
+    primary.card_last4 &&
+    secondary.card_last4 &&
+    primary.card_last4 !== secondary.card_last4
+  ) {
+    // Prefer secondary if it's the only difference is 1↔7 and primary is low-completeness for card alone
+    const conf =
+      primary.card_last4.replace(/7/g, "1") === secondary.card_last4.replace(/7/g, "1");
+    if (conf && /7/.test(secondary.card_last4) && /1/.test(primary.card_last4) && !/7/.test(primary.card_last4)) {
+      card_last4 = secondary.card_last4;
+    }
+  }
+
+  // Re-apply pump-math refine on merged gallons/total
+  if (gallons != null && total_cost != null) {
+    const impliedPpg = total_cost / gallons;
+    if (impliedPpg >= 1.5 && impliedPpg <= 8) {
+      gallons = refineGallonsToTotal(gallons, total_cost, impliedPpg);
+    }
+  }
+
+  const is_prepay = primary.is_prepay || secondary.is_prepay;
   const missing_core: string[] = [];
   if (!fuel_date) missing_core.push("date");
   if (gallons == null && !is_prepay) missing_core.push("gallons");
@@ -2067,22 +2231,23 @@ export async function ocrReceiptImage(
     Tesseract = (window as any).Tesseract;
   }
 
+  // Always OCR both raw photo and preprocessed — phone preprocess can wipe thermal ink.
+  // Keep whichever parse is more complete (and merge gaps).
   const source = await preprocessImage(file);
-  const result = await Tesseract.recognize(source, "eng", {
-    logger: () => {},
-  });
-  let text: string = result?.data?.text || "";
+  const [preResult, rawResult] = await Promise.all([
+    Tesseract.recognize(source, "eng", { logger: () => {} }),
+    Tesseract.recognize(file, "eng", { logger: () => {} }),
+  ]);
+  let text: string = preResult?.data?.text || "";
+  const rawFull: string = rawResult?.data?.text || "";
   const textChunks: string[] = [text];
+  if (rawFull.trim()) textChunks.push(rawFull);
 
-  // Extra region passes — store header, fuel line, card pan are where phone OCR fails most
+  // Extra region passes on preprocessed image — store header + fuel body + pan
   try {
     if (source && typeof (source as HTMLCanvasElement).getContext === "function") {
       const full = source as HTMLCanvasElement;
-      const runStrip = async (
-        y0: number,
-        y1: number,
-        opts?: { whitelist?: string }
-      ): Promise<string> => {
+      const runStrip = async (y0: number, y1: number): Promise<string> => {
         const h = Math.max(8, y1 - y0);
         const strip = document.createElement("canvas");
         strip.width = full.width;
@@ -2090,78 +2255,43 @@ export async function ocrReceiptImage(
         const sctx = strip.getContext("2d");
         if (!sctx) return "";
         sctx.drawImage(full, 0, y0, full.width, h, 0, 0, full.width, h);
-        const params: Record<string, string> = {};
-        if (opts?.whitelist) {
-          params.tessedit_char_whitelist = opts.whitelist;
-        }
-        const r = await Tesseract.recognize(strip, "eng", {
-          logger: () => {},
-          ...params,
-        });
+        // No digit whitelist — whitelist passes invented bad card last-4s (1716 vs 7716)
+        const r = await Tesseract.recognize(strip, "eng", { logger: () => {} });
         return (r?.data?.text || "").trim();
       };
 
-      // Top ~28%: Circle K / Stripes brand + store # + date
-      const topText = await runStrip(0, Math.round(full.height * 0.28));
-      // Upper-mid: Gallons @ price + Total lines (Circle K body)
-      const fuel0 = Math.round(full.height * 0.22);
-      const fuel1 = Math.round(full.height * 0.55);
+      const topText = await runStrip(0, Math.round(full.height * 0.3));
+      const fuel0 = Math.round(full.height * 0.2);
+      const fuel1 = Math.round(full.height * 0.58);
       const fuelText = await runStrip(fuel0, fuel1);
-      // Digit-heavy pass for gallons/total (helps 25.029 / $92.58)
-      const fuelDigits = await runStrip(fuel0, fuel1, {
-        whitelist: "0123456789.$GALLONS@/Total:VisaUSD ",
-      });
-      // Mid-lower: card pan + USD$ + Contactless
       const mid0 = Math.round(full.height * 0.45);
-      const mid1 = Math.round(full.height * 0.82);
+      const mid1 = Math.round(full.height * 0.85);
       const midText = await runStrip(mid0, mid1);
-      const panText = await runStrip(mid0, mid1, {
-        whitelist: "0123456789*$X.USD CardNumContactlessVISA ",
-      });
-      // Bottom: date/time footer on some Stripes formats
-      const footText = await runStrip(
-        Math.round(full.height * 0.72),
-        full.height
-      );
+      const footText = await runStrip(Math.round(full.height * 0.72), full.height);
 
-      for (const chunk of [topText, fuelText, fuelDigits, midText, panText, footText]) {
+      for (const chunk of [topText, fuelText, midText, footText]) {
         if (chunk) textChunks.push(chunk);
       }
-      const extra = textChunks.slice(1).join("\n");
-      if (extra) text = `${text}\n${extra}`;
     }
   } catch {
     /* region passes optional */
   }
 
   // Normalize OCR spaces inside money before parse (USD$55. 78)
-  text = text.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
+  const normMoney = (t: string) =>
+    t.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
+  text = normMoney(textChunks.filter(Boolean).join("\n"));
 
+  // Parse each chunk and keep the best merge (raw full image often beats preprocess on phones)
   let parsed = parseReceiptText(text);
-  // Merge best fields from each region chunk (full text miss can still hit on a strip)
   for (const chunk of textChunks) {
-    if (!chunk || chunk === text) continue;
-    const partial = parseReceiptText(chunk);
+    if (!chunk?.trim()) continue;
+    const partial = parseReceiptText(normMoney(chunk));
     parsed = mergeParseFields(parsed, partial);
   }
-  // If still missing core fields, try a second full pass on the raw file (no preprocess)
-  // — sometimes contrast enhance hurts light thermal ink.
-  if (parsed.missing_core.length >= 1 || !parsed.card_last4 || !parsed.store_number) {
-    try {
-      const rawResult = await Tesseract.recognize(file, "eng", { logger: () => {} });
-      const rawText = (rawResult?.data?.text || "").replace(/(\d)\s+\.\s*(\d)/g, "$1.$2");
-      if (rawText.trim()) {
-        text = `${text}\n${rawText}`;
-        const rawParsed = parseReceiptText(rawText);
-        parsed = mergeParseFields(parsed, rawParsed);
-        // Re-parse combined for cross-field consensus (gallons×price)
-        const combined = parseReceiptText(text);
-        parsed = mergeParseFields(combined, parsed);
-      }
-    } catch {
-      /* optional fallback */
-    }
-  }
+  // Final re-parse of concatenated text for cross-field consensus
+  const combined = parseReceiptText(text);
+  parsed = mergeParseFields(combined, parsed);
 
   if (hints) {
     parsed = applyOcrLearning(parsed, text, hints);
