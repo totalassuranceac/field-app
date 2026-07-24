@@ -105,7 +105,7 @@ export function NotificationBell() {
     } catch {
       /* still navigate */
     }
-    navigate(to);
+    navigate(to, { state: { returnTo: "/notifications" } });
     void load();
   }
 

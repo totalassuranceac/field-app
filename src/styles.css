@@ -7483,11 +7483,18 @@ tr.row-low td {
 }
 
 /* Swipe row: green “Mark read” under the card; swipe left to reveal */
+.notify-card {
+  overflow: hidden;
+  padding: 0.65rem;
+}
+
 .notify-swipe-row {
   position: relative;
   border-radius: 14px;
   overflow: hidden;
+  /* Allow both scroll and custom horizontal swipe (JS decides) */
   touch-action: pan-y;
+  margin-bottom: 0.15rem;
 }
 
 .notify-swipe-actions {
@@ -7496,16 +7503,19 @@ tr.row-low td {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding-right: 1.1rem;
-  background: color-mix(in srgb, #22c55e 75%, #14532d);
+  padding-right: 1.15rem;
+  background: linear-gradient(90deg, #15803d, #22c55e);
   color: #fff;
-  font-weight: 600;
-  font-size: 0.9rem;
+  font-weight: 700;
+  font-size: 0.95rem;
   z-index: 0;
+  pointer-events: none;
 }
 
 .notify-swipe-label {
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
 }
 
 .notify-item {
@@ -7520,14 +7530,17 @@ tr.row-low td {
   border-radius: 14px;
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--brand-2) 6%, var(--surface));
-  transition: transform 0.12s ease-out, background 0.15s ease, opacity 0.15s ease;
+  transition: transform 0.15s ease-out, background 0.15s ease, opacity 0.15s ease;
   will-change: transform;
+  /* pan-y for list scroll; horizontal swipe uses non-passive preventDefault */
   touch-action: pan-y;
   user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
 }
 
 .notify-item.is-swiping {
-  transition: none;
+  transition: none !important;
   cursor: grabbing;
 }
 

@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { unlockMessageSound } from "../messageSound";
@@ -57,8 +57,18 @@ function fmtWhen(iso: string | null | undefined): string {
 
 export function MessagesPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [params, setParams] = useSearchParams();
   const openId = Number(params.get("c") || "0") || null;
+  /** When opened from Notifications, Back returns there instead of chat list only. */
+  const returnTo =
+    location.state &&
+    typeof location.state === "object" &&
+    "returnTo" in location.state &&
+    typeof (location.state as { returnTo?: unknown }).returnTo === "string"
+      ? (location.state as { returnTo: string }).returnTo
+      : null;
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -142,14 +152,32 @@ export function MessagesPage() {
     unlockMessageSound();
     setError("");
     setOk("");
-    setParams({ c: String(id) });
+    // Keep returnTo from notifications when drilling into a chat from that entry
+    setParams(
+      { c: String(id) },
+      { state: returnTo ? { returnTo } : location.state, replace: false }
+    );
   }
 
   function backToList() {
-    setParams({});
     setActive(null);
     setThread([]);
     setReply("");
+    if (returnTo) {
+      navigate(returnTo);
+      return;
+    }
+    // Prefer history back when we pushed /messages?c=… from elsewhere
+    if (window.history.length > 1 && openId) {
+      // Stay in messages app if user opened chat from chat list
+      const cameFromChatList = !returnTo;
+      if (cameFromChatList) {
+        setParams({});
+        void loadList().catch(() => null);
+        return;
+      }
+    }
+    setParams({});
     void loadList().catch(() => null);
   }
 
@@ -237,7 +265,7 @@ export function MessagesPage() {
       <div className="msg-page msg-thread-page">
         <div className="msg-thread-head">
           <button type="button" className="btn ghost btn-sm" onClick={backToList}>
-            ← All chats
+            {returnTo === "/notifications" ? "← Notifications" : "← All chats"}
           </button>
           <div className="msg-thread-title">
             <h1>{active?.subject || (loadingThread ? "Opening…" : "Conversation")}</h1>

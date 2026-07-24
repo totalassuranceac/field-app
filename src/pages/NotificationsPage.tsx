@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
@@ -15,8 +15,11 @@ interface Note {
   created_at: string;
 }
 
-const SWIPE_THRESHOLD = 72;
-const SWIPE_MAX = 110;
+const SWIPE_THRESHOLD = 64;
+const SWIPE_MAX = 120;
+
+/** Navigate targets opened from inbox so Back can return here. */
+const NOTIF_NAV_STATE = { returnTo: "/notifications" as const };
 
 function NotifyRow({
   n,
@@ -30,62 +33,186 @@ function NotifyRow({
   const unread = !n.read_at;
   const to = notificationLink(n);
   const clickable = Boolean(to);
+
+  const rowRef = useRef<HTMLDivElement>(null);
   const startX = useRef(0);
   const startY = useRef(0);
-  const dragging = useRef(false);
-  const [offset, setOffset] = useState(0);
-  const [swiping, setSwiping] = useState(false);
+  const dxRef = useRef(0);
+  const axis = useRef<"none" | "h" | "v">("none");
+  const tracking = useRef(false);
+  const didSwipe = useRef(false);
+  const [dx, setDx] = useState(0);
 
-  const reset = useCallback(() => {
-    setOffset(0);
-    setSwiping(false);
-    dragging.current = false;
+  const setOffset = useCallback((v: number) => {
+    dxRef.current = v;
+    setDx(v);
+    if (rowRef.current) {
+      rowRef.current.style.transform = `translateX(${v}px)`;
+    }
   }, []);
 
-  function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!unread) return;
-    // Only primary touch/mouse
-    if (e.button !== 0 && e.pointerType === "mouse") return;
-    startX.current = e.clientX;
-    startY.current = e.clientY;
-    dragging.current = true;
-    setSwiping(true);
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-  }
-
-  function onPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!dragging.current || !unread) return;
-    const dx = e.clientX - startX.current;
-    const dy = e.clientY - startY.current;
-    // Vertical scroll wins — cancel horizontal swipe
-    if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
-      reset();
-      return;
+  const reset = useCallback(() => {
+    tracking.current = false;
+    axis.current = "none";
+    setOffset(0);
+    if (rowRef.current) {
+      rowRef.current.classList.remove("is-swiping");
     }
-    // Swipe left only (negative dx)
-    if (dx < 0) {
-      setOffset(Math.max(-SWIPE_MAX, dx));
-    } else {
-      setOffset(0);
-    }
-  }
+  }, [setOffset]);
 
-  function onPointerUp() {
-    if (!dragging.current) return;
-    dragging.current = false;
-    if (offset <= -SWIPE_THRESHOLD && unread) {
-      // Snap open then mark read
-      setOffset(-SWIPE_MAX);
-      setTimeout(() => {
-        onMarkRead(n.id);
+  // Touch handlers on the sliding card (works on iOS/Android; pointer alone is flaky with nested buttons)
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el || !unread) return;
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      startX.current = t.clientX;
+      startY.current = t.clientY;
+      dxRef.current = 0;
+      axis.current = "none";
+      tracking.current = true;
+      didSwipe.current = false;
+      el.classList.add("is-swiping");
+    };
+
+    const onMove = (e: TouchEvent) => {
+      if (!tracking.current || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const rawX = t.clientX - startX.current;
+      const rawY = t.clientY - startY.current;
+
+      if (axis.current === "none") {
+        if (Math.abs(rawX) < 8 && Math.abs(rawY) < 8) return;
+        axis.current = Math.abs(rawX) >= Math.abs(rawY) ? "h" : "v";
+        if (axis.current === "v") {
+          tracking.current = false;
+          el.classList.remove("is-swiping");
+          return;
+        }
+      }
+      if (axis.current !== "h") return;
+
+      // Horizontal swipe — block page scroll
+      e.preventDefault();
+      const next = Math.max(-SWIPE_MAX, Math.min(0, rawX));
+      if (Math.abs(next) > 10) didSwipe.current = true;
+      setOffset(next);
+    };
+
+    const onEnd = () => {
+      if (!tracking.current && axis.current !== "h") {
         reset();
-      }, 120);
-    } else {
-      reset();
-    }
-  }
+        return;
+      }
+      const final = dxRef.current;
+      tracking.current = false;
+      el.classList.remove("is-swiping");
+      if (axis.current === "h" && final <= -SWIPE_THRESHOLD) {
+        setOffset(-SWIPE_MAX);
+        window.setTimeout(() => {
+          onMarkRead(n.id);
+          setOffset(0);
+          axis.current = "none";
+          didSwipe.current = false;
+        }, 140);
+      } else {
+        setOffset(0);
+        axis.current = "none";
+        // Keep didSwipe true briefly so click doesn't fire open
+        window.setTimeout(() => {
+          didSwipe.current = false;
+        }, 50);
+      }
+    };
 
-  const reveal = Math.min(1, Math.abs(offset) / SWIPE_THRESHOLD);
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, [unread, n.id, onMarkRead, reset, setOffset]);
+
+  // Mouse drag (desktop testing)
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el || !unread) return;
+
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      startX.current = e.clientX;
+      startY.current = e.clientY;
+      dxRef.current = 0;
+      axis.current = "none";
+      tracking.current = true;
+      didSwipe.current = false;
+      el.classList.add("is-swiping");
+    };
+
+    const onMove = (e: MouseEvent) => {
+      if (!tracking.current) return;
+      const rawX = e.clientX - startX.current;
+      const rawY = e.clientY - startY.current;
+      if (axis.current === "none") {
+        if (Math.abs(rawX) < 6 && Math.abs(rawY) < 6) return;
+        axis.current = Math.abs(rawX) >= Math.abs(rawY) ? "h" : "v";
+        if (axis.current === "v") {
+          tracking.current = false;
+          el.classList.remove("is-swiping");
+          return;
+        }
+      }
+      if (axis.current !== "h") return;
+      e.preventDefault();
+      const next = Math.max(-SWIPE_MAX, Math.min(0, rawX));
+      if (Math.abs(next) > 10) didSwipe.current = true;
+      setOffset(next);
+    };
+
+    const onUp = () => {
+      if (!tracking.current && axis.current !== "h") return;
+      const final = dxRef.current;
+      tracking.current = false;
+      el.classList.remove("is-swiping");
+      if (axis.current === "h" && final <= -SWIPE_THRESHOLD) {
+        setOffset(-SWIPE_MAX);
+        window.setTimeout(() => {
+          onMarkRead(n.id);
+          setOffset(0);
+          axis.current = "none";
+          didSwipe.current = false;
+        }, 140);
+      } else {
+        setOffset(0);
+        axis.current = "none";
+        window.setTimeout(() => {
+          didSwipe.current = false;
+        }, 50);
+      }
+    };
+
+    el.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      el.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [unread, n.id, onMarkRead, setOffset]);
+
+  const reveal = Math.min(1, Math.abs(dx) / SWIPE_THRESHOLD);
+
+  function handleOpen() {
+    if (didSwipe.current || Math.abs(dxRef.current) > 12) return;
+    void onOpen(n);
+  }
 
   return (
     <li
@@ -93,60 +220,47 @@ function NotifyRow({
         clickable ? " is-clickable" : ""
       }`}
     >
-      <div className="notify-swipe-actions" aria-hidden={offset >= 0}>
-        <span className="notify-swipe-label" style={{ opacity: 0.4 + reveal * 0.6 }}>
+      <div className="notify-swipe-actions" aria-hidden>
+        <span className="notify-swipe-label" style={{ opacity: 0.35 + reveal * 0.65 }}>
           Mark read
         </span>
       </div>
       <div
-        className={`notify-item${unread ? "" : " read"}${swiping ? " is-swiping" : ""}`}
-        style={{ transform: `translateX(${offset}px)` }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={reset}
-        onPointerLeave={() => {
-          if (dragging.current && offset > -SWIPE_THRESHOLD) reset();
-        }}
+        ref={rowRef}
+        className={`notify-item${unread ? "" : " read"}`}
+        style={{ transform: `translateX(${dx}px)` }}
       >
         {unread && <span className="notify-unread-dot" aria-hidden title="Unread" />}
-        {clickable ? (
-          <button
-            type="button"
-            className="notify-main notify-main-btn"
-            onClick={() => {
-              // Don't open if this was a swipe
-              if (Math.abs(offset) > 8) return;
-              void onOpen(n);
-            }}
-          >
-            <span className="notify-title">{n.title}</span>
-            {n.body && <p className="notify-body muted">{n.body}</p>}
-            <span className="muted notify-meta">
-              {n.created_at?.replace("T", " ").slice(0, 16)}
-              <span className="notify-open-hint"> · Tap to open</span>
-              {unread ? (
-                <span className="notify-swipe-hint"> · Swipe left to mark read</span>
-              ) : null}
-            </span>
-          </button>
-        ) : (
-          <div className="notify-main">
-            <span className="notify-title">{n.title}</span>
-            {n.body && <p className="notify-body muted">{n.body}</p>}
-            <span className="muted notify-meta">
-              {n.created_at?.replace("T", " ").slice(0, 16)} · {n.kind}
-              {unread ? (
-                <span className="notify-swipe-hint"> · Swipe left to mark read</span>
-              ) : null}
-            </span>
-          </div>
-        )}
+        <div
+          className="notify-main"
+          role={clickable ? "button" : undefined}
+          tabIndex={clickable ? 0 : undefined}
+          onClick={clickable ? handleOpen : undefined}
+          onKeyDown={
+            clickable
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    handleOpen();
+                  }
+                }
+              : undefined
+          }
+        >
+          <span className="notify-title">{n.title}</span>
+          {n.body && <p className="notify-body muted">{n.body}</p>}
+          <span className="muted notify-meta">
+            {n.created_at?.replace("T", " ").slice(0, 16)}
+            {clickable ? <span className="notify-open-hint"> · Tap to open</span> : ` · ${n.kind}`}
+            {unread ? <span className="notify-swipe-hint"> · Swipe left = read</span> : null}
+          </span>
+        </div>
         <div className="toolbar notify-item-actions">
           {to && (
             <Link
               className="btn secondary btn-sm"
               to={to}
+              state={NOTIF_NAV_STATE}
               onClick={() => void onMarkRead(n.id)}
             >
               Open
@@ -156,7 +270,10 @@ function NotifyRow({
             <button
               className="btn ghost btn-sm"
               type="button"
-              onClick={() => void onMarkRead(n.id)}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onMarkRead(n.id);
+              }}
             >
               Mark read
             </button>
@@ -186,7 +303,6 @@ export function NotificationsPage() {
   }, []);
 
   async function markAll() {
-    // Optimistic
     setList((prev) =>
       prev.map((n) => (n.read_at ? n : { ...n, read_at: new Date().toISOString() }))
     );
@@ -199,8 +315,7 @@ export function NotificationsPage() {
     }
   }
 
-  async function markOne(id: number) {
-    // Optimistic Gmail-style: title un-bolds immediately
+  const markOne = useCallback(async (id: number) => {
     setList((prev) =>
       prev.map((n) =>
         n.id === id && !n.read_at ? { ...n, read_at: new Date().toISOString() } : n
@@ -212,12 +327,12 @@ export function NotificationsPage() {
     } catch {
       await load();
     }
-  }
+  }, []);
 
   async function openNote(n: Note) {
     const to = notificationLink(n);
     if (!n.read_at) await markOne(n.id);
-    if (to) navigate(to);
+    if (to) navigate(to, { state: NOTIF_NAV_STATE });
   }
 
   async function sendWeekly() {
@@ -266,7 +381,7 @@ export function NotificationsPage() {
         </div>
       )}
 
-      <div className="card">
+      <div className="card notify-card">
         {!list.length ? (
           <div className="empty">No notifications yet.</div>
         ) : (
@@ -276,7 +391,7 @@ export function NotificationsPage() {
                 key={n.id}
                 n={n}
                 onOpen={(note) => void openNote(note)}
-                onMarkRead={(id) => void markOne(id)}
+                onMarkRead={markOne}
               />
             ))}
           </ul>
