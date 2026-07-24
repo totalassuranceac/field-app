@@ -688,7 +688,8 @@ export function DashboardPage() {
       return [
         { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Photo receipt · odometer", primary: true },
         { to: "/inspections", icon: "✓", title: "Weekly check", hint: "OK or report issue" },
-        { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo the shelf" },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Invoice / packing slip photo" },
+        { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo shelf · write log # on box" },
         { to: "/issues", icon: "🔧", title: "Request repair", hint: "Something’s wrong" },
         { to: "/assets", icon: "🧰", title: "My truck gear", hint: "Bottles & tools" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations" },
@@ -704,6 +705,7 @@ export function DashboardPage() {
           primary: true,
         },
         { to: "/assets", icon: "🧪", title: "Bottles & gear", hint: "Swap gas · ladders" },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card photos" },
         { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
         { to: "/inventory", icon: "📊", title: "Stock levels", hint: "Stage · order" },
         { to: "/messages", icon: "💬", title: "Messages", hint: "Team" },
@@ -712,6 +714,7 @@ export function DashboardPage() {
     if (isMechanic) {
       return [
         { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs & schedule", primary: true },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card purchases" },
         { to: "/yard", icon: "📋", title: "Yard walk", hint: "Stickers · cams · GPS" },
         { to: "/vehicles", icon: "🚐", title: "Vehicles", hint: "Fleet registry" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Where units are" },

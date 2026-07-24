@@ -103,6 +103,8 @@ export function WarrantiesPage() {
   const [needsReturn, setNeedsReturn] = useState(false);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  /** After drop-off: show log # to write on the box */
+  const [writeOnBox, setWriteOnBox] = useState<string | null>(null);
 
   async function load() {
     const status =
@@ -155,12 +157,18 @@ export function WarrantiesPage() {
       if (needsReturn) fd.append("needs_vendor_return", "1");
       fd.append("photo", compressed, compressed.name || "dropoff.jpg");
 
-      const r = await api<{ warranty: { log_number: string } }>("/warranties", {
+      const r = await api<{
+        warranty: { log_number: string };
+        write_on_box?: string;
+        instruction?: string;
+      }>("/warranties", {
         method: "POST",
         body: fd,
       });
+      const logNo = r.write_on_box || r.warranty.log_number;
+      setWriteOnBox(logNo);
       setOk(
-        `Logged ${r.warranty.log_number} with drop-off photo. Warehouse & admin notified.`
+        `Logged ${logNo}. Write this number on the box now, then leave the part where you photographed.`
       );
       setPartName("");
       setPartCode("");
@@ -221,20 +229,57 @@ export function WarrantiesPage() {
         <div>
           <h1>Warranties</h1>
           <p>
-            Drop off warranty parts with a photo of where you left them · track claims · return to
-            vendor when needed.
+            Drop off warranty parts with a photo of where you left them · you get a log number to{" "}
+            <strong>write on the box</strong> · track claims · return to vendor when needed.
           </p>
         </div>
       </div>
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
+      {writeOnBox && (
+        <div
+          className="card"
+          role="status"
+          style={{
+            marginBottom: "1rem",
+            border: "2px solid var(--accent, #c9a227)",
+            background: "var(--surface-2, #1a1f2e)",
+            textAlign: "center",
+            padding: "1.25rem 1rem",
+          }}
+        >
+          <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.35rem" }}>
+            Write this warranty log number on the box
+          </div>
+          <div
+            style={{
+              fontSize: "clamp(1.75rem, 6vw, 2.5rem)",
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              margin: "0.25rem 0 0.75rem",
+            }}
+          >
+            {writeOnBox}
+          </div>
+          <p style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>
+            Use a marker on the box or tag before you leave the shelf. Warehouse uses this number to
+            match the part to your drop-off photo.
+          </p>
+          <button type="button" className="btn secondary" onClick={() => setWriteOnBox(null)}>
+            Got it — number is on the box
+          </button>
+        </div>
+      )}
+
       <form className="card warranty-form" onSubmit={submitDropoff}>
         <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Log warranty part drop-off</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
           Field techs: enter unit model/serial + service address, then{" "}
-          <strong>photo the shelf/bin/counter</strong> where you leave the part. Creates a log # and
-          notifies warehouse + admin. Works offline — sends when you have signal.
+          <strong>photo the shelf/bin/counter</strong> where you leave the part. You&apos;ll get a{" "}
+          <strong>warranty log number to write on the box</strong>. Notifies warehouse + admin. Works
+          offline — sends when you have signal.
         </p>
         <div className="warranty-form-grid">
           <label>

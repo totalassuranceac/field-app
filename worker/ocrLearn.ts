@@ -7,6 +7,10 @@ export type OcrFieldSnapshot = {
   total_cost?: number | null;
   store_number?: string | null;
   card_last4?: string | null;
+  /** Parts / invoice receipts (also mapped via store_number for vendor name) */
+  vendor_name?: string | null;
+  invoice_number?: string | null;
+  purchase_date?: string | null;
 };
 
 export type OcrHints = {
@@ -25,6 +29,8 @@ export type OcrHints = {
 
 export function storeKeyFrom(store: string | null | undefined, rawText?: string | null): string {
   const s = (store || "").toLowerCase();
+  // Explicit parts-purchase vendor keys (parts_johnstone, etc.)
+  if (s.startsWith("parts_")) return s.slice(0, 48);
   if (/stripe/.test(s) || /\b2221\b/.test(s) || /\b2213\b/.test(s) || /\b2215\b/.test(s)) {
     const m = s.match(/(\d{3,5})/);
     return m ? `stripes_${m[1]}` : "stripes";
@@ -42,6 +48,31 @@ export function storeKeyFrom(store: string | null | undefined, rawText?: string 
     return m ? `murphy_${m[1]}` : "murphy";
   }
   const raw = (rawText || "").toLowerCase();
+  // Parts invoice layout signatures (invoice # / packing slip — not fuel)
+  if (
+    /invoice\s*(no|#|number)|packing\s*slip|pack\s*slip/i.test(raw) &&
+    !/gallons?\s*@|price\s*\/\s*g|fuel\s*sale|self\s*@/i.test(raw)
+  ) {
+    const slug = (store || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 40);
+    if (slug) return `parts_${slug}`;
+    for (const name of [
+      "johnstone",
+      "ferguson",
+      "carrier",
+      "home_depot",
+      "lowes",
+      "united_refrigeration",
+      "winsupply",
+      "grainger",
+    ]) {
+      if (raw.includes(name.replace(/_/g, " ")) || raw.includes(name)) return `parts_${name}`;
+    }
+    return "parts_global";
+  }
   if (/stripes?/.test(raw) || /\bst\s*#\s*\d{3,5}\b/.test(raw)) {
     const m =
       raw.match(/stripes?\s*#?\s*(\d{3,5})/) ||
@@ -65,6 +96,11 @@ export function storeKeyFrom(store: string | null | undefined, rawText?: string 
       raw.match(/murphy\s*(?:usa|express)\s*(\d{3,5})/) ||
       raw.match(/\bsite\s*[:#]?\s*(\d{3,5})/);
     return m ? `murphy_${m[1]}` : "murphy";
+  }
+  // Vendor name alone (parts purchase feedback without invoice keywords in raw)
+  if (s && !/^\d+$/.test(s) && s.length >= 3 && !/stripe|circle|murphy|eleven|fuel/.test(s)) {
+    const slug = s.replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
+    if (slug && /[a-z]/.test(slug)) return `parts_${slug}`;
   }
   return "global";
 }
@@ -228,6 +264,9 @@ const LEARN_FIELDS = [
   "total_cost",
   "store_number",
   "card_last4",
+  "vendor_name",
+  "invoice_number",
+  "purchase_date",
 ] as const;
 
 function looksLikePpg(n: number): boolean {
@@ -296,6 +335,20 @@ export async function recordOcrFeedback(
           await bumpMemory(db, storeKey, field, "line_label", "MURPHY USA", "1");
           await bumpMemory(db, storeKey, field, "line_label", "SITE", "1");
         }
+      }
+      // Parts invoice / packing slip — learn labels near invoice numbers
+      if (field === "invoice_number") {
+        await bumpMemory(db, storeKey, field, "line_label", "INVOICE", "1");
+        await bumpMemory(db, storeKey, field, "line_label", "PACKING SLIP", "1");
+        await bumpMemory(db, "parts_global", field, "line_label", "INVOICE", "1");
+        await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
+        await bumpMemory(db, storeKey, field, "pattern", "after:INVOICE", "1");
+      }
+      if (field === "vendor_name") {
+        await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
+        await bumpMemory(db, "parts_global", field, "sub", ocrS, correct);
+        // Mirror to store_number so fuel-style applyOcrLearning can help
+        await bumpMemory(db, storeKey, "store_number", "sub", ocrS, correct);
       }
       if (field === "fuel_time" && (storeKey.startsWith("murphy") || /murphy/i.test(rawText || ""))) {
         await bumpMemory(db, storeKey, field, "pattern", "date_time_same_line", "1");

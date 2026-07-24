@@ -140,6 +140,9 @@ export const ROLE_PERMS = {
   logFuel: ["admin", "office", "driver"] as Role[],
   editAnyFuel: ["admin", "office"] as Role[],
   viewFuel: ["admin", "office", "driver", "mechanic", "viewer"] as Role[],
+  /** Company-card parts receipts (invoice / packing slip photos) */
+  logPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
+  viewPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"] as Role[],
   /** Read mileage flags + tracking health (viewers browse-only) */
   viewAlerts: ["admin", "office", "mechanic", "viewer"] as Role[],
   /** Ack / dismiss flags — admin, office, mechanic (shop eyes) */

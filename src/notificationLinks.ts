@@ -37,6 +37,13 @@ export function notificationLink(n: {
     return "/warranties";
   }
   if (
+    kind === "parts_purchase" ||
+    entity === "parts_purchase" ||
+    text.includes("parts receipt")
+  ) {
+    return "/parts-receipts";
+  }
+  if (
     kind === "flat_emergency" ||
     kind === "repair_request" ||
     kind === "oil_change_due" ||
@@ -87,6 +94,7 @@ export function notificationLink(n: {
   // Fallback from entity_type alone
   if (entity === "handbook") return "/handbook";
   if (entity === "warranty") return "/warranties";
+  if (entity === "parts_purchase") return "/parts-receipts";
   if (entity === "issue") return "/issues";
   if (entity === "message") return "/messages";
   if (entity === "inspection") return "/inspections";

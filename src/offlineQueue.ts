@@ -120,6 +120,7 @@ export async function pendingCount(): Promise<number> {
 function labelFor(path: string, method: string): string {
   if (path.startsWith("/warranties") && method === "POST") return "Warranty drop-off";
   if (path.startsWith("/warranties")) return "Warranty update";
+  if (path.startsWith("/parts-purchases")) return "Parts receipt";
   if (path.startsWith("/fuel")) return "Fuel log";
   if (path.startsWith("/issues")) return "Repair request";
   if (path.startsWith("/inspections")) return "Weekly check";

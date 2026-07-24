@@ -245,6 +245,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/assets", label: "Assets", show: can(user, "viewCompanyAssets") },
     { to: "/warranties", label: "Warranties", show: true },
+    {
+      to: "/parts-receipts",
+      label: "Parts receipts",
+      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+    },
     { to: "/howto", label: "How-to", show: true },
     { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
@@ -262,6 +267,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/assets", label: "Bottles & gear", show: true },
     { to: "/warranties", label: "Warranties", show: true },
+    {
+      to: "/parts-receipts",
+      label: "Parts receipts",
+      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+    },
     { to: "/vehicles", label: "Trucks", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
@@ -277,6 +287,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/", label: "Home", show: true },
     { to: "/warranties", label: "Warranties", show: true },
     { to: "/part-pickup", label: "Part pickup", show: true },
+    {
+      to: "/parts-receipts",
+      label: "Parts receipts",
+      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+    },
     { to: "/truck-stock", label: "Truck stock count", show: true },
     { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
@@ -371,6 +386,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/inventory", label: "Inventory & pickup", show: true },
     { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
     { to: "/truck-stock", label: "Truck stock count", show: true },
+    { to: "/parts-receipts", label: "Parts receipts", show: true },
     { to: "/assets", label: "Bottles & equipment", show: true },
     { to: "/warranties", label: "Warranties", show: true },
   ];

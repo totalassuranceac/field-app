@@ -1825,7 +1825,10 @@ api.get("/ocr/hints", async (c) => {
   return c.json(hints);
 });
 
-api.post("/ocr/feedback", requireRoles(ROLE_PERMS.logFuel), async (c) => {
+api.post(
+  "/ocr/feedback",
+  requireRoles([...ROLE_PERMS.logFuel, ...ROLE_PERMS.logPartsPurchase] as Role[]),
+  async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
     raw_text?: string;
@@ -2051,6 +2054,212 @@ api.patch("/fuel/:id", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
   return c.json({ entry: after });
 });
 
+// ——— Parts purchase receipts (company card / vendor invoice photos) ———
+
+api.get("/parts-purchases", requireRoles(ROLE_PERMS.viewPartsPurchase), async (c) => {
+  const user = c.get("user");
+  const mine = c.req.query("mine") === "1";
+  try {
+    let sql = `SELECT p.*, u.display_name as purchased_by_name
+       FROM parts_purchase_receipts p
+       LEFT JOIN users u ON u.id = p.purchased_by_user_id`;
+    const binds: unknown[] = [];
+    if (mine || user.role === "driver") {
+      sql += ` WHERE p.purchased_by_user_id = ?`;
+      binds.push(user.id);
+    }
+    sql += ` ORDER BY p.created_at DESC LIMIT 100`;
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+    return c.json({ receipts: rows.results || [] });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        receipts: [],
+        error: "Run migration 037_parts_purchase_receipts.sql on the database.",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/** Vendor name suggestions for datalist (part_vendors + recent tickets + prior receipts). */
+api.get("/parts-purchases/vendors", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
+  const names = new Set<string>();
+  try {
+    const a = await c.env.DB.prepare(
+      `SELECT DISTINCT vendor_name as n FROM part_vendors WHERE vendor_name IS NOT NULL AND trim(vendor_name) != '' LIMIT 80`
+    ).all<{ n: string }>();
+    for (const r of a.results || []) if (r.n) names.add(r.n.trim());
+  } catch {
+    /* table may not exist */
+  }
+  try {
+    const b = await c.env.DB.prepare(
+      `SELECT DISTINCT vendor_name as n FROM part_pickup_tickets WHERE vendor_name IS NOT NULL AND trim(vendor_name) != '' ORDER BY id DESC LIMIT 40`
+    ).all<{ n: string }>();
+    for (const r of b.results || []) if (r.n) names.add(r.n.trim());
+  } catch {
+    /* optional */
+  }
+  try {
+    const c2 = await c.env.DB.prepare(
+      `SELECT DISTINCT vendor_name as n FROM parts_purchase_receipts WHERE vendor_name IS NOT NULL ORDER BY id DESC LIMIT 40`
+    ).all<{ n: string }>();
+    for (const r of c2.results || []) if (r.n) names.add(r.n.trim());
+  } catch {
+    /* optional */
+  }
+  return c.json({ vendors: [...names].sort((x, y) => x.localeCompare(y)).slice(0, 120) });
+});
+
+api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{
+    purchase_kind?: "vendor" | "other";
+    vendor_name?: string;
+    invoice_number?: string;
+    purchase_date?: string;
+    total_cost?: number | null;
+    card_last4?: string;
+    notes?: string;
+    receipt_key?: string;
+    ocr_feedback?: {
+      raw_text?: string;
+      ocr?: OcrFieldSnapshot;
+      final?: OcrFieldSnapshot;
+    };
+  }>();
+
+  const vendorName = (body.vendor_name || "").trim();
+  const receiptKey = (body.receipt_key || "").trim();
+  if (!vendorName) return c.json({ error: "Vendor / store name is required" }, 400);
+  if (!receiptKey) {
+    return c.json({ error: "Receipt photo is required. Take a picture of the invoice or packing slip." }, 400);
+  }
+
+  const kind = body.purchase_kind === "other" ? "other" : "vendor";
+  const invoice = (body.invoice_number || "").trim() || null;
+  if (kind === "vendor" && !invoice) {
+    return c.json(
+      { error: "Invoice or packing slip number is required for vendor pickups." },
+      400
+    );
+  }
+
+  let cardLast4: string | null = null;
+  if (body.card_last4 != null && String(body.card_last4).trim()) {
+    const digits = String(body.card_last4).replace(/\D/g, "");
+    cardLast4 = digits.length >= 4 ? digits.slice(-4) : null;
+  }
+
+  let total: number | null = null;
+  if (body.total_cost != null && body.total_cost !== ("" as unknown)) {
+    const n = Number(body.total_cost);
+    if (Number.isFinite(n) && n >= 0) total = Math.round(n * 100) / 100;
+  }
+
+  const purchaseDate =
+    (body.purchase_date || "").trim() || new Date().toISOString().slice(0, 10);
+  const notes = (body.notes || "").trim() || null;
+
+  try {
+    const r = await c.env.DB.prepare(
+      `INSERT INTO parts_purchase_receipts (
+         purchased_by_user_id, purchase_kind, vendor_name, invoice_number,
+         purchase_date, total_cost, card_last4, notes, receipt_key, ocr_raw
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        user.id,
+        kind,
+        vendorName,
+        invoice,
+        purchaseDate,
+        total,
+        cardLast4,
+        notes,
+        receiptKey,
+        body.ocr_feedback?.raw_text ? body.ocr_feedback.raw_text.slice(0, 8000) : null
+      )
+      .run();
+
+    const id = Number(r.meta.last_row_id);
+    const row = await c.env.DB.prepare(
+      `SELECT p.*, u.display_name as purchased_by_name
+       FROM parts_purchase_receipts p
+       LEFT JOIN users u ON u.id = p.purchased_by_user_id
+       WHERE p.id = ?`
+    )
+      .bind(id)
+      .first();
+
+    // Learn from corrections (vendor, invoice, total, card)
+    if (body.ocr_feedback?.ocr && body.ocr_feedback?.final) {
+      try {
+        const ocrSnap = { ...body.ocr_feedback.ocr };
+        const finSnap = { ...body.ocr_feedback.final };
+        // Map vendor into store_number for storeKey + dual field learning
+        if (finSnap.vendor_name && !finSnap.store_number) {
+          finSnap.store_number = finSnap.vendor_name;
+        }
+        if (ocrSnap.vendor_name && !ocrSnap.store_number) {
+          ocrSnap.store_number = ocrSnap.vendor_name;
+        }
+        if (finSnap.purchase_date && !finSnap.fuel_date) {
+          finSnap.fuel_date = finSnap.purchase_date;
+        }
+        await recordOcrFeedback(
+          c.env.DB,
+          user.id,
+          body.ocr_feedback.raw_text || null,
+          ocrSnap,
+          finSnap
+        );
+      } catch {
+        /* learning is best-effort */
+      }
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "parts_purchase",
+      id,
+      `${kind}: ${vendorName}${invoice ? ` inv ${invoice}` : ""}`,
+      null,
+      row
+    );
+
+    // Notify office/warehouse for visibility
+    try {
+      const targets = await usersByRoles(c.env.DB, ["admin", "office", "warehouse"]);
+      await notifyUsers(
+        c.env.DB,
+        targets.filter((tid) => tid !== user.id),
+        "parts_purchase",
+        "Parts receipt submitted",
+        `${user.display_name || "Tech"}: ${vendorName}${invoice ? ` · inv ${invoice}` : ""}${total != null ? ` · $${total.toFixed(2)}` : ""}`,
+        { type: "parts_purchase", id }
+      );
+    } catch {
+      /* optional */
+    }
+
+    return c.json({ receipt: row }, 201);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json(
+        { error: "Run migration 037_parts_purchase_receipts.sql on the database." },
+        500
+      );
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
 /** Normalize photo extension (handles .jpg.jpeg, HEIC→jpg label, empty names). */
 function receiptExt(file: File): string {
   const name = (file.name || "").toLowerCase();
@@ -2102,6 +2311,7 @@ api.post("/uploads/receipt", async (c) => {
     typeof formFolder === "string" ? formFolder.replace(/[^a-z0-9/_-]/gi, "") : "";
   const allowedFolders = [
     "fuel-receipts",
+    "parts-receipts",
     "warranty-dropoffs",
     "asset-photos",
     "issue-photos",
@@ -4009,7 +4219,7 @@ api.post("/warranties", async (c) => {
       targets,
       "warranty_dropoff",
       `Warranty drop-off ${logNumber}`,
-      `${partName}${serialNumber ? ` · S/N ${serialNumber}` : ""} · by ${user.display_name}` +
+      `WRITE ON BOX: ${logNumber} · ${partName}${serialNumber ? ` · S/N ${serialNumber}` : ""} · by ${user.display_name}` +
         (needsVendorReturn ? " · NEEDS VENDOR RETURN" : "") +
         " · photo attached",
       { type: "warranty", id }
@@ -4023,7 +4233,12 @@ api.post("/warranties", async (c) => {
       `Warranty ${logNumber} dropped off (photo ${photoKey})`
     );
     const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first();
-    return c.json({ ok: true, warranty: row }, 201);
+    return c.json({
+      ok: true,
+      warranty: row,
+      write_on_box: logNumber,
+      instruction: `Write this warranty log number on the box: ${logNumber}`,
+    }, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Create failed" }, 500);
   }

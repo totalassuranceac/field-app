@@ -25,6 +25,7 @@ import { MessagesPage } from "./pages/MessagesPage";
 import { VendorRunsPage } from "./pages/VendorRunsPage";
 import { TruckStockCountPage } from "./pages/TruckStockCountPage";
 import { WarrantiesPage } from "./pages/WarrantiesPage";
+import { PartsPurchasesPage } from "./pages/PartsPurchasesPage";
 import { HandbookPage } from "./pages/HandbookPage";
 import { HowToPage } from "./pages/HowToPage";
 import { ReviewsPage } from "./pages/ReviewsPage";
@@ -191,6 +192,14 @@ export default function App() {
                     element={
                       <Page title="Warranties">
                         <WarrantiesPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/parts-receipts"
+                    element={
+                      <Page title="Parts receipts">
+                        <PartsPurchasesPage />
                       </Page>
                     }
                   />

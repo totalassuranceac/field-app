@@ -188,16 +188,39 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "field-warranty",
     title: "Drop off a warranty part",
-    summary: "Tell warehouse what you left and where so they can find it.",
+    summary: "Photo where you left it — you get a log number to write on the box.",
     roles: ["driver", "warehouse", "office", "admin"],
     path: "/warranties",
     steps: [
       "Open Warranties.",
       "Enter part name / code, model, serial if you have them.",
       "Note job site or reason if useful.",
-      "Say where you left the part (shelf, bin, counter).",
-      "Tap Take photo of the shelf or bin — this is how warehouse finds your drop-off.",
-      "Submit. Warehouse will pick it up from the open list.",
+      "Tap Take photo of the shelf or bin where you leave the part.",
+      "Submit — the app shows a big warranty log number (e.g. W-20260724-001).",
+      "Write that log number on the box with a marker before you leave.",
+      "Warehouse matches the number + photo to process the claim.",
+    ],
+    tips: [
+      "Do not skip the number on the box — that is how warehouse finds your part among others.",
+    ],
+  },
+  {
+    id: "field-parts-receipt",
+    title: "Submit a parts purchase receipt",
+    summary: "Photo company-card invoices and packing slips instead of turning paper in.",
+    roles: ["driver", "mechanic", "warehouse", "office", "admin"],
+    path: "/parts-receipts",
+    steps: [
+      "Open Parts receipts.",
+      "Choose Vendor pickup (invoice / packing slip #) or Other store (Home Depot, etc.).",
+      "For vendor pickups: enter vendor name + invoice or packing slip number.",
+      "For other stores: enter the store name; add total/card last 4 if helpful.",
+      "Take a clear photo of the full receipt or packing slip.",
+      "Check what the scan filled in — fix anything wrong so the app learns.",
+      "Save. Office/warehouse can see the submission; no paper turn-in needed.",
+    ],
+    tips: [
+      "Each correction you make teaches the scanner where invoice # and vendor sit on that vendor’s slip.",
     ],
   },
   {
