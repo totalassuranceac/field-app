@@ -164,9 +164,11 @@ export function parseReceiptDate(text: string): string | null {
 
 function parsePricePerGal(joined: string, lines: string[]): number | null {
   // Normalize common OCR junk around SELF @ price (2.759/ G → 2.7597 6, etc.)
+  // Circle K: $3.699/Gal  /  $3.699/Ga1  /  $3.699 / Gal
   const soft = joined
     .replace(/(\d)\s+\.\s+(\d)/g, "$1.$2")
-    .replace(/SELF\s*@\s*\$?\s*(\d+\.\d{2,4})\d?\s*[\/\s]*[G6]/gi, "SELF @ $1 / G");
+    .replace(/SELF\s*@\s*\$?\s*(\d+\.\d{2,4})\d?\s*[\/\s]*[G6]/gi, "SELF @ $1 / G")
+    .replace(/\/\s*Ga[l1I|]\b/gi, "/Gal");
 
   // Prefer explicit PRICE/G line (Stripes Weber layout) — keep full thousandths ($2.319 not $2.31)
   for (const line of lines) {
@@ -179,7 +181,9 @@ function parsePricePerGal(joined: string, lines: string[]): number | null {
 
   const patterns = [
     /PRICE\s*\/\s*G(?:AL)?\s*[:#]?\s*\$?\s*(\d+\.\d{2,4})/i,
+    // Circle K: 25.029 Gallons @ $3.699/Gal
     /@\s*\$?\s*(\d+\.\d{2,4})\s*\/\s*GAL/i,
+    /@\s*\$?\s*(\d+\.\d{2,4})\s*\/\s*Ga[l1I|]/i,
     /GAL\s*@\s*\$?\s*(\d+\.\d{2,4})\s*\/?\s*GAL/i,
     // Stripes: SELF @ 2.759 / G  (OCR often loses slash or turns G into 6)
     /SELF\s*@\s*\$?\s*(\d+\.\d{2,4})\s*[\/\s]*G/i,
@@ -206,6 +210,7 @@ function parsePricePerGal(joined: string, lines: string[]): number | null {
     }
     const m =
       line.match(/(\d+\.\d{2,4})\s*\/\s*GAL/i) ||
+      line.match(/(\d+\.\d{2,4})\s*\/\s*Ga[l1I|]/i) ||
       line.match(/SELF\s*@\s*\$?\s*(\d+\.\d{2,4})/i) ||
       line.match(/@\s*\$?\s*(\d+\.\d{3})\d?\s*[\/\s6]*G?/i);
     if (m) {
@@ -282,8 +287,19 @@ function parseGallons(joined: string, lines: string[], totalCost: number | null)
   for (const m of joined.matchAll(/GALLONS?\s*[:#]?\s*(\d+\.\d{1,4})/gi)) tryAdd(m[1], 20);
   for (const m of joined.matchAll(/GALLONS?\s+(\d+\.\d{1,4})\b/gi)) tryAdd(m[1], 28);
 
-  // Circle K: 16.238 Gallons @ $2.799
+  // Circle K: 16.238 Gallons @ $2.799 / 25.029 Gallons @ $3.699/Gal
   for (const m of joined.matchAll(/(\d+\.\d{1,4})\s*GALLONS?\b/gi)) tryAdd(m[1], 20);
+  // OCR: 25.O29 Gallons / 25,029 Gallons @
+  for (const m of joined.matchAll(/([0-9O]{1,2}\.[0-9O]{2,4})\s*GALLONS?\s*@/gi)) {
+    tryAdd(m[1].replace(/O/gi, "0"), 34);
+  }
+  // Line form: "25.029 Gallons @ $3.699/Gal     $92.58"
+  for (const line of lines) {
+    const ck =
+      line.match(/\b(\d{1,2}\.\d{2,4})\s*GALLONS?\s*@/i) ||
+      line.match(/\b([0-9O]{1,2}\.[0-9O]{2,4})\s*GALLONS?\s*@/i);
+    if (ck) tryAdd(ck[1].replace(/O/gi, "0"), 36);
+  }
 
   // Stripes qty: 15.408G / 29.531G / 20.220G (must have G — never bare 2.659 price)
   for (const m of joined.matchAll(/\b(\d{1,2}\.\d{2,4})\s*G\b/gi)) tryAdd(m[1], 24);
@@ -587,7 +603,11 @@ function consensusLabeledTotal(lines: string[], joined: string): number | null {
     if (/CARD\s*AMT/i.test(line)) bump(n, 4); // Murphy card charge
     if (/CREDIT\s*DE/i.test(line)) bump(n, 4);
     if (/USD\s*\$/i.test(line)) bump(n, 5);
-    if (/\bTOTAL\b/i.test(line) && !/SUB/i.test(line) && !/PRICE/i.test(line)) bump(n, 2);
+    // Circle K: Total: $92.58 / Visa: $92.58 / Sub. Total: $92.58
+    if (/\bTOTAL\s*:/i.test(line) && !/SUB|DISCOUNT/i.test(line)) bump(n, 5);
+    if (/\bVISA\s*:/i.test(line) && n >= 8) bump(n, 4);
+    if (/SUB\.?\s*TOTAL/i.test(line) && n >= 8) bump(n, 3);
+    if (/\bTOTAL\b/i.test(line) && !/SUB/i.test(line) && !/PRICE|DISCOUNT/i.test(line)) bump(n, 2);
   }
   const joinedSoft = joined.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
   for (const m of joinedSoft.matchAll(/USD\s*\$?\s*(\d{1,4}\.\d{2})\b/gi)) {
@@ -654,10 +674,13 @@ function parseTotalCost(
     else if (/\bTOTAL\s*SALE\b/i.test(line)) score = 27;
     else if (/\bTOTAL\s*FUEL\b/i.test(line)) score = 26;
     else if (/\bFUEL\s*TO\b/i.test(line)) score = 25;
+    // Circle K labeled Total: $92.58 (not Discount Total / Sub. Total)
+    else if (/\bTOTAL\s*:/i.test(line) && !/SUB|DISCOUNT/i.test(line)) score = 30;
+    else if (/\bVISA\s*:/i.test(line) && n >= 8) score = 26;
     else if (/USD\s*\$/i.test(line)) score = 24;
-    else if (/\bTOTAL\b/i.test(line) && !/SUB\s*TOTAL|SUBTOTAL/i.test(line)) score = 22;
+    else if (/\bTOTAL\b/i.test(line) && !/SUB\s*TOTAL|SUBTOTAL|DISCOUNT/i.test(line)) score = 22;
     else if (/^CREDIT\b/i.test(line.trim()) || /\bCREDIT\b/i.test(line)) score = 20;
-    else if (/\bSUBTOTAL|SUB\s*TOTAL\b/i.test(line)) score = 12;
+    else if (/\bSUBTOTAL|SUB\.?\s*TOTAL\b/i.test(line)) score = 14;
     else if (/\bamount\b/i.test(line)) score = 14;
     else if (/\$\s*\d+\.\d{2}/.test(line) && monies.length === 1 && n >= 10) score = 8;
     else continue;
@@ -781,6 +804,56 @@ const STRIPES_LOCATION_HINTS: { re: RegExp; id: string }[] = [
   { re: /361[\s\-]?985[\s\-]?0998/, id: "40823" },
 ];
 
+/**
+ * Fleet Circle K locations — brand line often OCRs as Cirele/Circte; street+phone still read.
+ * 2741849 (Holly Rd) is a frequent stop for this fleet.
+ */
+const CIRCLEK_LOCATION_HINTS: { re: RegExp; id: string }[] = [
+  // Circle K 2741849 — 2202 Holly Rd, Corpus Christi
+  { re: /\bholly\s*r/i, id: "2741849" },
+  { re: /\b2202\b[^\n]{0,24}holly/i, id: "2741849" },
+  { re: /361[\s\-]?854[\s\-]?7769/, id: "2741849" },
+  // Circle K 2741135 — E Causeway (from prior slips)
+  { re: /\bcauseway\b/i, id: "2741135" },
+  { re: /\b4502\b[^\n]{0,24}causeway/i, id: "2741135" },
+];
+
+/** Soft Circle K brand — OCR: Circte K, Cirele K, CIRCLEK, C1rcle K */
+const CIRCLE_K_BRAND_RE =
+  /\b(?:CIRCLE\s*K|CIRCLEK|C[I1L]RC[IL1]E\s*K|C[I1L]R[CE][CTL][CE]\s*K|CIRCTE\s*K|CIRELE\s*K|CIRCKE\s*K)\b/i;
+
+function isCircleK(text: string): boolean {
+  if (CIRCLE_K_BRAND_RE.test(text)) return true;
+  // Layout signature when brand fails: N.NNN Gallons @ $x.xxx/Gal + Pay at Pump / UNL-REG
+  if (
+    /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(text) &&
+    /(?:UNL-?REG|PAY\s*AT\s*PUMP|DUPLICATE\s*RECEIPT|CARD\s*NUM)/i.test(text)
+  ) {
+    return true;
+  }
+  // Fleet address alone on a fuel slip
+  for (const h of CIRCLEK_LOCATION_HINTS) {
+    if (h.re.test(text) && /\d+\.\d{2,4}\s*GALLONS?\s*@|TOTAL\s*:|USD\s*\$/i.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Fix common Circle K brand OCR before field parsers run.
+ * "Cirele K 2741849" → "Circle K 2741849"
+ */
+function normalizeCircleKText(text: string): string {
+  return text
+    .replace(/\bCIRCLEK\b/gi, "Circle K")
+    .replace(/\bC[I1L]RC[IL1]E\s*K\b/gi, "Circle K")
+    .replace(/\bC[I1L]R[CE][CTL][CE]\s*K\b/gi, "Circle K")
+    .replace(/\bCIRCTE\s*K\b/gi, "Circle K")
+    .replace(/\bCIRELE\s*K\b/gi, "Circle K")
+    .replace(/\bCIRCKE\s*K\b/gi, "Circle K");
+}
+
 function looksLikeStripesReceipt(text: string): boolean {
   // Never treat 7-Eleven as Stripes (OH THANK HEAVEN / FUEL TOTAL / PRICE/GAL)
   if (isSevenEleven(text)) return false;
@@ -898,22 +971,64 @@ function parseStore(text: string, lines: string[]): { store_number: string | nul
     return { store_number: null, store_name: "7-Eleven" };
   }
 
-  // --- Circle K + site number ---
-  if (/\bCIRCLE\s*K\b/i.test(text)) {
-    const withNum = text.match(/CIRCLE\s*K\s+(\d{4,8})\b/i);
+  // --- Circle K + site number (soft brand + address fallbacks) ---
+  if (isCircleK(text)) {
+    // Prefer address/phone when brand is weak — 2741849 is ground truth for Holly Rd
+    for (const hint of CIRCLEK_LOCATION_HINTS) {
+      if (hint.re.test(text)) {
+        return { store_number: hint.id, store_name: `Circle K ${hint.id}` };
+      }
+    }
+    const withNum =
+      text.match(/CIRCLE\s*K\s+(\d{4,8})\b/i) ||
+      text.match(/CIRCLEK\s+(\d{4,8})\b/i) ||
+      text.match(/(?:C[I1L]R[CE][CTL][CE]\s*K|CIRCTE\s*K|CIRELE\s*K)\s+(\d{4,8})\b/i);
     let id = cleanStoreDigits(withNum?.[1]);
     if (!id) {
-      const idx = lines.findIndex((l) => /CIRCLE\s*K/i.test(l));
+      const idx = lines.findIndex((l) => CIRCLE_K_BRAND_RE.test(l) || /CIRCLE/i.test(l));
       if (idx >= 0) {
-        for (let i = idx; i < Math.min(idx + 3, lines.length); i++) {
-          const nums = lines[i].match(/\b(\d{5,8})\b/);
-          id = cleanStoreDigits(nums?.[1]);
+        for (let i = idx; i < Math.min(idx + 4, lines.length); i++) {
+          // Site # is 5–8 digits; skip Order Number (often 7 digits) if labeled
+          if (/ORDER\s*NUM/i.test(lines[i])) continue;
+          const nums = lines[i].match(/\b(\d{5,8})\b/g);
+          if (!nums) continue;
+          for (const n of nums) {
+            // Skip phone fragments and zip-like
+            if (n === "78415" || n.length === 10) continue;
+            id = cleanStoreDigits(n);
+            if (id) break;
+          }
+          if (id) break;
+        }
+      }
+    }
+    // Bare 7-digit site in header when Gallons @ layout present
+    // Prefer fleet Circle K range 274xxxx; never take Order Number lines
+    if (!id && /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(text)) {
+      const fleet = text.match(/\b(274\d{4})\b/);
+      id = cleanStoreDigits(fleet?.[1]);
+      if (!id) {
+        for (let li = 0; li < Math.min(12, lines.length); li++) {
+          const line = lines[li];
+          const prevLine = li > 0 ? lines[li - 1] : "";
+          if (/ORDER\s*NUM|PHONE|REGISTER|ZIP|TX\s+\d{5}/i.test(line + " " + prevLine)) {
+            continue;
+          }
+          const m = line.match(/^\s*(\d{6,8})\s*$/);
+          id = cleanStoreDigits(m?.[1]);
           if (id) break;
         }
       }
     }
     if (id) return { store_number: id, store_name: `Circle K ${id}` };
     return { store_number: null, store_name: "Circle K" };
+  }
+
+  // Circle K address when brand OCR totally failed (before Stripes street hijack)
+  for (const hint of CIRCLEK_LOCATION_HINTS) {
+    if (hint.re.test(text)) {
+      return { store_number: hint.id, store_name: `Circle K ${hint.id}` };
+    }
   }
 
   // Address / phone when brand OCR fails ("VSirine" + "6418 Weber" → 2221)
@@ -1084,6 +1199,13 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
     push(m[1], 24);
   }
   for (const m of text.matchAll(/X{4,}(\d{4})\b/gi)) push(m[1], 20);
+  // Circle K: XXXX XXXX XXXX 7716 (spaces between mask groups)
+  for (const m of text.matchAll(/(?:X{4}\s+){2,3}(\d{4})\b/gi)) push(m[1], 32);
+  for (const m of maskNorm.matchAll(/(?:\*{4}\s+){2,3}(\d{4})\b/g)) push(m[1], 32);
+  // Circle K: Card Num : (R) then next line XXXXXXXX7716
+  for (const m of text.matchAll(/Card\s*Num[^\n]{0,60}?(?:\n[^\n]{0,40})?[X*#x]{6,}(\d{4})\b/gi)) {
+    push(m[1], 38);
+  }
   // OCR turns stars into letter soup: "Kdxionkkk 1845" / "xxxxxxxxxxxx1845"
   for (const m of text.matchAll(/(?:USD|TOTAL|CREDIT)[^\n]{0,80}?\b[A-Za-z*#xX]{6,}\s*(\d{4})\b/gi)) {
     push(m[1], 28);
@@ -1091,7 +1213,7 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
   for (const m of text.matchAll(/\b[A-Za-z*#xXkK]{8,}(\d{4})\b/g)) {
     const idx = m.index ?? 0;
     const ctx = text.slice(Math.max(0, idx - 40), idx + m[0].length + 20);
-    if (/USD|TOTAL|CREDIT|ENTRY|CONTACT|VISA|ICC|CAPITAL/i.test(ctx)) push(m[1], 30);
+    if (/USD|TOTAL|CREDIT|ENTRY|CONTACT|VISA|ICC|CAPITAL|CARD\s*NUM/i.test(ctx)) push(m[1], 30);
   }
 
   // Any non-digit run of length 6+ ending in 4 digits (OCR-tolerant) — not store names
@@ -1247,6 +1369,22 @@ function parseCardLast4(text: string, lines?: string[]): string | null {
         if (t && !siteIds.has(t)) push(t, 33);
       }
     }
+
+    // Circle K: "Card Num : (R)" then mask line with last4
+    if (/Card\s*Num/i.test(raw)) {
+      for (let j = i; j < Math.min(i + 3, lineList.length); j++) {
+        const lj = lineList[j];
+        const L2 = toMask(lj);
+        const pan =
+          L2.match(/\*{2,}\s*(\d{4})\b/) ||
+          lj.match(/[Xx*#]{6,}(\d{4})\b/) ||
+          lj.match(/(?:X{4}\s+){2,3}(\d{4})\b/i);
+        if (pan) {
+          push(pan[1], 42);
+          break;
+        }
+      }
+    }
   }
 
   if (!candidates.length) return null;
@@ -1267,11 +1405,15 @@ export function detectPrepay(text: string): boolean {
 
 function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
   const cleaned = text.replace(/\r/g, "\n");
-  // Normalize common OCR confusions for digits in receipt body
-  const normalized = cleaned
-    .replace(/[|]/g, "I")
-    .replace(/\bO(?=\d)/g, "0")
-    .replace(/(?<=\d)O\b/g, "0");
+  // Normalize common OCR confusions for digits + Circle K brand junk
+  const normalized = normalizeCircleKText(
+    cleaned
+      .replace(/[|]/g, "I")
+      .replace(/\bO(?=\d)/g, "0")
+      .replace(/(?<=\d)O\b/g, "0")
+      // 25.O29 → 25.029 (O misread inside gallon decimals)
+      .replace(/(\d)\.O(\d)/gi, "$1.0$2")
+  );
 
   const lines = normalized
     .split("\n")
@@ -1290,9 +1432,24 @@ function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
     gallons = parseGallons(joined, lines, total_cost);
   }
   // Lock labeled total if FUEL SALE + CREDIT DE + USD$ agree (never invent $50.57)
+  // But repair truncated OCR ($5.76 vs $55.76) when gal × price clearly says so
   const labeledTotal = consensusLabeledTotal(lines, joined);
   if (labeledTotal != null) {
     total_cost = labeledTotal;
+    const ppgFix = parsePricePerGal(joined, lines);
+    if (gallons != null && ppgFix != null && labeledTotal < 12) {
+      const expected = gallons * ppgFix;
+      if (expected >= 15) {
+        const s = labeledTotal.toFixed(2);
+        for (let d = 1; d <= 9; d++) {
+          const cand = parseFloat(String(d) + s);
+          if (Math.abs(cand - expected) <= 0.15 || Math.abs(cand - expected) / expected <= 0.025) {
+            total_cost = Math.round(cand * 100) / 100;
+            break;
+          }
+        }
+      }
+    }
   } else if (gallons != null) {
     const total2 = parseTotalCost(joined, lines, gallons);
     if (total2 != null) total_cost = total2;
@@ -1370,8 +1527,8 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
   try {
     const bmp = await createImageBitmap(file);
     // Upscale small phone photos so 20.220G / footer date stay readable
-    const maxW = 2000;
-    const minW = 1200;
+    const maxW = 2200;
+    const minW = 1400;
     let scale = bmp.width > maxW ? maxW / bmp.width : 1;
     if (bmp.width * scale < minW) scale = minW / bmp.width;
     const w = Math.round(bmp.width * scale);
@@ -1386,13 +1543,30 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
     ctx.drawImage(bmp, 0, 0, w, h);
     const img = ctx.getImageData(0, 0, w, h);
     const d = img.data;
-    // Adaptive-ish thermal enhance: boost contrast then soft threshold
+    // Sample luminance to detect dark-background photos (receipt on jeans/seat)
+    let sum = 0;
+    const step = Math.max(4, Math.floor(d.length / 4 / 8000)) * 4;
+    let samples = 0;
+    for (let i = 0; i < d.length; i += step) {
+      sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      samples++;
+    }
+    const mean = samples ? sum / samples : 128;
+    // Dark backdrop: push paper whites up harder so thermal ink stays black
+    const darkBg = mean < 110;
+    const contrast = darkBg ? 2.15 : 1.75;
+    const midPull = darkBg ? 0.72 : 0.82;
     for (let i = 0; i < d.length; i += 4) {
       const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      let c = (g - 128) * 1.75 + 128;
+      let c = (g - 128) * contrast + 128;
       // Pull mid-greys toward black/white for faded thermal ink
-      if (c < 140) c = c * 0.82;
-      else c = 255 - (255 - c) * 0.85;
+      if (c < 140) c = c * midPull;
+      else c = 255 - (255 - c) * (darkBg ? 0.7 : 0.85);
+      // Soft binarize on dark-bg shots (receipt paper vs denim)
+      if (darkBg) {
+        if (c < 100) c = Math.max(0, c * 0.55);
+        else if (c > 175) c = Math.min(255, 255 - (255 - c) * 0.4);
+      }
       const v = Math.max(0, Math.min(255, c));
       d[i] = d[i + 1] = d[i + 2] = v;
     }
@@ -1402,6 +1576,58 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
   } catch {
     return file;
   }
+}
+
+/** Prefer non-null fields; when both set, keep a's unless b fills a gap. */
+function mergeParseFields(
+  a: Omit<ReceiptParseResult, "raw_text">,
+  b: Omit<ReceiptParseResult, "raw_text">
+): Omit<ReceiptParseResult, "raw_text"> {
+  const pick = <T>(x: T | null | undefined, y: T | null | undefined): T | null => {
+    if (x != null && x !== "") return x as T;
+    if (y != null && y !== "") return y as T;
+    return (x ?? y ?? null) as T | null;
+  };
+  const gallons = pick(a.gallons, b.gallons);
+  const total_cost = pick(a.total_cost, b.total_cost);
+  const fuel_date = pick(a.fuel_date, b.fuel_date);
+  const fuel_time = pick(a.fuel_time, b.fuel_time);
+  const store_number = pick(a.store_number, b.store_number);
+  const store_name = pick(a.store_name, b.store_name);
+  const card_last4 = pick(a.card_last4, b.card_last4);
+  const is_prepay = a.is_prepay || b.is_prepay;
+
+  const missing_core: string[] = [];
+  if (!fuel_date) missing_core.push("date");
+  if (gallons == null && !is_prepay) missing_core.push("gallons");
+  if (total_cost == null) missing_core.push("total");
+  const missing_extra: string[] = [];
+  if (!fuel_time) missing_extra.push("time");
+  if (!store_number && !store_name) missing_extra.push("store");
+  if (!card_last4) missing_extra.push("card last 4");
+  const needs_retake = missing_core.length >= 2;
+  const coreHits = (is_prepay ? 2 : 3) - missing_core.length;
+  const confidence: "high" | "medium" | "low" =
+    coreHits >= 3 || (is_prepay && coreHits >= 2 && !!card_last4)
+      ? "high"
+      : coreHits >= 2
+        ? "medium"
+        : "low";
+
+  return {
+    gallons,
+    total_cost,
+    fuel_date,
+    fuel_time,
+    store_number,
+    store_name,
+    card_last4,
+    confidence,
+    needs_retake,
+    missing_core,
+    missing_extra,
+    is_prepay,
+  };
 }
 
 /** Hints learned from past manual corrections (loaded from API). */
@@ -1577,7 +1803,7 @@ export function applyOcrLearning(
       if (out.gallons == null || galLooksPpg || rejectPpg) {
         out.gallons = Math.round(gCandidates[0] * 1000) / 1000;
       }
-    } else if (galLooksPpg && out.total_cost != null && out.total_cost > 5) {
+    } else if (galLooksPpg && out.gallons != null && out.total_cost != null && out.total_cost > 5) {
       // Derive gallons from total ÷ misread ppg
       const derived = out.total_cost / out.gallons;
       if (derived > 5 && derived < 100) {
@@ -1846,8 +2072,9 @@ export async function ocrReceiptImage(
     logger: () => {},
   });
   let text: string = result?.data?.text || "";
+  const textChunks: string[] = [text];
 
-  // Extra region passes — store header + card pan are where phone OCR fails most
+  // Extra region passes — store header, fuel line, card pan are where phone OCR fails most
   try {
     if (source && typeof (source as HTMLCanvasElement).getContext === "function") {
       const full = source as HTMLCanvasElement;
@@ -1874,14 +2101,22 @@ export async function ocrReceiptImage(
         return (r?.data?.text || "").trim();
       };
 
-      // Top ~32%: "Welcome to Stripes 2221" / street address
-      const topText = await runStrip(0, Math.round(full.height * 0.32));
-      // Middle band: USD$ + ************0879 (digit/* whitelist helps pan)
-      const mid0 = Math.round(full.height * 0.28);
-      const mid1 = Math.round(full.height * 0.72);
+      // Top ~28%: Circle K / Stripes brand + store # + date
+      const topText = await runStrip(0, Math.round(full.height * 0.28));
+      // Upper-mid: Gallons @ price + Total lines (Circle K body)
+      const fuel0 = Math.round(full.height * 0.22);
+      const fuel1 = Math.round(full.height * 0.55);
+      const fuelText = await runStrip(fuel0, fuel1);
+      // Digit-heavy pass for gallons/total (helps 25.029 / $92.58)
+      const fuelDigits = await runStrip(fuel0, fuel1, {
+        whitelist: "0123456789.$GALLONS@/Total:VisaUSD ",
+      });
+      // Mid-lower: card pan + USD$ + Contactless
+      const mid0 = Math.round(full.height * 0.45);
+      const mid1 = Math.round(full.height * 0.82);
       const midText = await runStrip(mid0, mid1);
       const panText = await runStrip(mid0, mid1, {
-        whitelist: "0123456789*$X.USD ",
+        whitelist: "0123456789*$X.USD CardNumContactlessVISA ",
       });
       // Bottom: date/time footer on some Stripes formats
       const footText = await runStrip(
@@ -1889,7 +2124,10 @@ export async function ocrReceiptImage(
         full.height
       );
 
-      const extra = [topText, midText, panText, footText].filter(Boolean).join("\n");
+      for (const chunk of [topText, fuelText, fuelDigits, midText, panText, footText]) {
+        if (chunk) textChunks.push(chunk);
+      }
+      const extra = textChunks.slice(1).join("\n");
       if (extra) text = `${text}\n${extra}`;
     }
   } catch {
@@ -1900,6 +2138,31 @@ export async function ocrReceiptImage(
   text = text.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
 
   let parsed = parseReceiptText(text);
+  // Merge best fields from each region chunk (full text miss can still hit on a strip)
+  for (const chunk of textChunks) {
+    if (!chunk || chunk === text) continue;
+    const partial = parseReceiptText(chunk);
+    parsed = mergeParseFields(parsed, partial);
+  }
+  // If still missing core fields, try a second full pass on the raw file (no preprocess)
+  // — sometimes contrast enhance hurts light thermal ink.
+  if (parsed.missing_core.length >= 1 || !parsed.card_last4 || !parsed.store_number) {
+    try {
+      const rawResult = await Tesseract.recognize(file, "eng", { logger: () => {} });
+      const rawText = (rawResult?.data?.text || "").replace(/(\d)\s+\.\s*(\d)/g, "$1.$2");
+      if (rawText.trim()) {
+        text = `${text}\n${rawText}`;
+        const rawParsed = parseReceiptText(rawText);
+        parsed = mergeParseFields(parsed, rawParsed);
+        // Re-parse combined for cross-field consensus (gallons×price)
+        const combined = parseReceiptText(text);
+        parsed = mergeParseFields(combined, parsed);
+      }
+    } catch {
+      /* optional fallback */
+    }
+  }
+
   if (hints) {
     parsed = applyOcrLearning(parsed, text, hints);
   }
