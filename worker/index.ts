@@ -3985,9 +3985,16 @@ api.post("/messages/read", async (c) => {
 });
 
 // ——— Warranty claims ———
+/**
+ * Warranty log #: W + MM + YY + "-" + monthly sequence
+ * e.g. W0726-001 (July 2026, 1st that month) → W0726-002 …
+ * August resets: W0826-001
+ */
 async function nextWarrantyLogNumber(db: D1Database): Promise<string> {
-  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const prefix = `W-${day}-`;
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yy = String(now.getFullYear() % 100).padStart(2, "0");
+  const prefix = `W${mm}${yy}-`;
   const last = await db
     .prepare(
       `SELECT log_number FROM warranty_claims WHERE log_number LIKE ? ORDER BY log_number DESC LIMIT 1`
@@ -3997,7 +4004,7 @@ async function nextWarrantyLogNumber(db: D1Database): Promise<string> {
   let seq = 1;
   if (last?.log_number) {
     const n = Number(last.log_number.slice(prefix.length));
-    if (Number.isFinite(n)) seq = n + 1;
+    if (Number.isFinite(n) && n >= 0) seq = n + 1;
   }
   return `${prefix}${String(seq).padStart(3, "0")}`;
 }
@@ -4238,6 +4245,7 @@ api.post("/warranties", async (c) => {
       warranty: row,
       write_on_box: logNumber,
       instruction: `Write this warranty log number on the box: ${logNumber}`,
+      log_format: "WMMYY-###",
     }, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Create failed" }, 500);
