@@ -100,7 +100,6 @@ export function WarrantiesPage() {
   const [customer, setCustomer] = useState("");
   const [vendor, setVendor] = useState("");
   const [notes, setNotes] = useState("");
-  const [needsReturn, setNeedsReturn] = useState(false);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   /** After drop-off: show log # to write on the box */
@@ -154,7 +153,6 @@ export function WarrantiesPage() {
       if (customer) fd.append("customer_name", customer);
       if (vendor) fd.append("vendor_name", vendor);
       if (notes) fd.append("notes", notes);
-      if (needsReturn) fd.append("needs_vendor_return", "1");
       fd.append("photo", compressed, compressed.name || "dropoff.jpg");
 
       const r = await api<{
@@ -178,7 +176,6 @@ export function WarrantiesPage() {
       setCustomer("");
       setVendor("");
       setNotes("");
-      setNeedsReturn(false);
       onPhotoPick(null);
       await load();
     } catch (err) {
@@ -192,7 +189,6 @@ export function WarrantiesPage() {
         setCustomer("");
         setVendor("");
         setNotes("");
-        setNeedsReturn(false);
         onPhotoPick(null);
       } else {
         setError(err instanceof Error ? err.message : "Could not log drop-off");
@@ -345,14 +341,6 @@ export function WarrantiesPage() {
           />
         </div>
 
-        <label className="warranty-check">
-          <input
-            type="checkbox"
-            checked={needsReturn}
-            onChange={(e) => setNeedsReturn(e.target.checked)}
-          />
-          Needs to go back to vendor
-        </label>
         <button className="btn" type="submit" disabled={busy}>
           {busy ? "Saving…" : "Drop off & notify warehouse"}
         </button>
