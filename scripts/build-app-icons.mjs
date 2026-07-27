@@ -1,6 +1,6 @@
 /**
  * Build polished Total Assurance Fleet app icons.
- * Light blue A + brand red swoosh on dark navy tile, centered, peer-app scale.
+ * Light blue A + brand red swoosh on pure black tile, centered, peer-app scale.
  */
 import sharp from "sharp";
 import { writeFileSync } from "fs";
@@ -147,8 +147,8 @@ const mh2 = markMeta.height;
 await sharp(mark).toFile("public/logo-mark-raw.png");
 console.log("mark", mw2, "x", mh2);
 
-// App chrome navy
-const BG = { r: 12, g: 18, b: 32, alpha: 1 };
+// Pure black home-screen / splash tile
+const BG = { r: 0, g: 0, b: 0, alpha: 1 };
 
 async function makeIcon(size, marginFrac, outPath) {
   const maxInner = Math.floor(size * (1 - 2 * marginFrac));
