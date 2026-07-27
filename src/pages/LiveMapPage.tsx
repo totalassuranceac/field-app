@@ -431,8 +431,8 @@ export function LiveMapPage() {
         </div>
       </div>
 
-      {/* Default = all units. Tap OneStep or Verizon to filter; tap again to show all. */}
-      <div className="live-status-bar card no-print" style={{ marginBottom: "0.75rem" }}>
+      {/* Provider toggles only — no “All GPS / Updated …” line */}
+      <div className="live-status-bar card no-print" style={{ marginBottom: "0.55rem" }}>
         <button
           type="button"
           className={`live-status-item live-provider-toggle${
@@ -485,11 +485,79 @@ export function LiveMapPage() {
             <span className="badge danger">error</span>
           )}
         </button>
-        {data?.fetched_at && (
-          <div className="muted live-status-updated">
-            {filter === "all" ? "All GPS" : filter === "onestep" ? "OneStep only" : "Verizon only"}
-            {" · "}
-            Updated {formatTime(data.fetched_at)}
+      </div>
+
+      {/* Search + Map/Call sit ABOVE the map so no scroll is needed */}
+      <div className="live-tech-search-bar live-tech-search-top card no-print">
+        <label className="live-tech-search">
+          <span className="sr-only">Find tech by name</span>
+          <input
+            type="search"
+            value={techSearch}
+            onChange={(e) => setTechSearch(e.target.value)}
+            placeholder="Find tech by name…"
+            autoComplete="off"
+            enterKeyHint="search"
+          />
+          {techSearch.trim() && (
+            <button
+              type="button"
+              className="btn secondary btn-sm"
+              onClick={() => {
+                setTechSearch("");
+                setSelectedId(null);
+              }}
+              aria-label="Clear search"
+            >
+              ✕
+            </button>
+          )}
+        </label>
+        {techSearch.trim() && sorted.length === 0 && (
+          <p className="muted live-search-hint">No unit matching “{techSearch.trim()}”</p>
+        )}
+        {selected && isValidCoord(selected.lat, selected.lng) && (
+          <div className="live-tech-actions live-tech-actions-compact">
+            <div className="live-tech-actions-who">
+              <strong>
+                {selected.driver_name ||
+                  (selected.unit_number ? `Unit ${selected.unit_number}` : selected.name)}
+              </strong>
+              {selected.unit_number && selected.driver_name ? (
+                <span className="muted"> · Unit {selected.unit_number}</span>
+              ) : null}
+            </div>
+            <div className="live-tech-action-btns">
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  openMapsToCoords(selected.lat, selected.lng, positionTitle(selected))
+                }
+              >
+                Map
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={!selected.phone?.trim()}
+                title={
+                  selected.phone?.trim()
+                    ? `Call ${selected.phone}`
+                    : "No phone on file for this tech"
+                }
+                onClick={() => {
+                  if (selected.phone?.trim()) callPhone(selected.phone);
+                }}
+              >
+                Call
+              </button>
+            </div>
+            {!selected.phone?.trim() && (
+              <p className="muted live-tech-phone-hint">
+                No phone on file — add it under People.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -513,12 +581,11 @@ export function LiveMapPage() {
 
       <div className="live-layout">
         <div className="live-map-column">
-          {/* Map + search in one card so the bar sits flush under the map */}
           <div className="live-map-block card">
             <div className="live-map-wrap">
               {(loading || !mapReady) && !mapError && (
                 <div className="live-map-overlay">
-                  {loading ? "Loading GPS positions (first load can take ~15s)…" : "Starting map…"}
+                  {loading ? "Loading GPS positions…" : "Starting map…"}
                 </div>
               )}
               {mapError && (
@@ -532,82 +599,6 @@ export function LiveMapPage() {
                 role="application"
                 aria-label="Fleet live map"
               />
-            </div>
-            <div className="live-tech-search-bar no-print">
-              <label className="live-tech-search">
-                <span className="sr-only">Find tech by name</span>
-                <input
-                  type="search"
-                  value={techSearch}
-                  onChange={(e) => setTechSearch(e.target.value)}
-                  placeholder="Find tech by name…"
-                  autoComplete="off"
-                  enterKeyHint="search"
-                />
-                {techSearch.trim() && (
-                  <button
-                    type="button"
-                    className="btn secondary btn-sm"
-                    onClick={() => setTechSearch("")}
-                    aria-label="Clear search"
-                  >
-                    ✕
-                  </button>
-                )}
-              </label>
-              {techSearch.trim() && (
-                <p className="muted live-search-hint">
-                  {sorted.length === 0
-                    ? `No unit matching “${techSearch.trim()}”`
-                    : sorted.length === 1
-                      ? `Found “${techSearch.trim()}” — Map or Call below`
-                      : `Showing ${sorted.length} matches · tap a tech, then Map or Call`}
-                </p>
-              )}
-              {selected && isValidCoord(selected.lat, selected.lng) && (
-                <div className="live-tech-actions no-print">
-                  <div className="live-tech-actions-who">
-                    <strong>
-                      {selected.driver_name ||
-                        (selected.unit_number ? `Unit ${selected.unit_number}` : selected.name)}
-                    </strong>
-                    {selected.unit_number && selected.driver_name ? (
-                      <span className="muted"> · Unit {selected.unit_number}</span>
-                    ) : null}
-                  </div>
-                  <div className="live-tech-action-btns">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() =>
-                        openMapsToCoords(selected.lat, selected.lng, positionTitle(selected))
-                      }
-                    >
-                      Map
-                    </button>
-                    {selected.phone?.trim() ? (
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        onClick={() => callPhone(selected.phone!)}
-                      >
-                        Call
-                      </button>
-                    ) : (
-                      <button type="button" className="btn secondary" disabled title="No phone on file for this tech">
-                        Call
-                      </button>
-                    )}
-                  </div>
-                  {!selected.phone?.trim() ? (
-                    <p className="muted live-tech-phone-hint">
-                      No phone on file — add it under People / their user profile.
-                    </p>
-                  ) : (
-                    <p className="muted live-tech-phone-hint">{selected.phone}</p>
-                  )}
-                </div>
-              )}
             </div>
           </div>
         </div>

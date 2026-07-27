@@ -8972,6 +8972,30 @@ button.live-provider-toggle.is-active {
 }
 
 /* Flush under the map tile — keyboard sits below the map, not over it */
+.live-tech-search-top {
+  margin-bottom: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.live-tech-actions-compact {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+}
+
+.live-tech-actions-compact .live-tech-actions-who {
+  margin-bottom: 0.15rem;
+  font-size: 0.88rem;
+}
+
+.live-tech-actions-compact .live-tech-action-btns .btn {
+  padding: 0.55rem 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 750;
+}
+
 .live-tech-search-bar {
   padding: 0.5rem 0.65rem 0.55rem;
   display: grid;
