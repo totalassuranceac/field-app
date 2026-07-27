@@ -9463,7 +9463,7 @@ svg {
   position: fixed;
   inset: 0;
   z-index: 80;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -9479,18 +9479,20 @@ svg {
 }
 
 .vendor-run-sheet {
-  width: min(100%, 32rem);
-  max-height: min(92dvh, 40rem);
+  width: min(100%, 36rem);
+  max-height: min(94dvh, 44rem);
   display: flex;
   flex-direction: column;
   margin: 0;
   border-radius: 16px 16px 0 0;
   overflow: hidden;
+  box-shadow: 0 -8px 40px rgb(0 0 0 / 0.35);
 }
 
 @media (min-width: 640px) {
   .vendor-run-sheet {
     border-radius: 16px;
+    box-shadow: 0 12px 48px rgb(0 0 0 / 0.4);
   }
 }
 
@@ -9499,14 +9501,16 @@ svg {
   justify-content: space-between;
   align-items: flex-start;
   gap: 0.75rem;
-  padding: 0.85rem 1rem 0.5rem;
+  padding: 0.9rem 1rem 0.55rem;
   border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
   flex-shrink: 0;
+  background: color-mix(in srgb, var(--bg-elevated, #1e293b) 92%, #0f172a);
 }
 
 .vendor-run-sheet-title {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.2rem;
+  font-weight: 800;
 }
 
 .vendor-run-sheet-sub {
@@ -9514,15 +9518,88 @@ svg {
   font-size: 0.8rem;
 }
 
+.vendor-run-sheet-hero {
+  margin-top: 0.35rem !important;
+  font-size: 1.05rem !important;
+  line-height: 1.3;
+  color: inherit;
+}
+
+.vendor-run-sheet-hero strong {
+  font-weight: 850;
+  color: #fbbf24;
+}
+
+.vendor-run-sheet-empty {
+  padding: 1.25rem 1rem;
+}
+
 .vendor-run-sheet-body {
   overflow: auto;
-  padding: 0.65rem 1rem 1rem;
+  padding: 0.55rem 0.85rem 1rem;
   flex: 1 1 auto;
   -webkit-overflow-scrolling: touch;
 }
 
+/* Jump strip — company names at a glance */
+.vendor-run-sheet-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.85rem;
+  padding: 0.15rem 0 0.55rem;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: color-mix(in srgb, var(--surface, #1a2538) 96%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.vendor-run-sheet-toc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #f59e0b 40%, var(--border));
+  background: color-mix(in srgb, #f59e0b 12%, var(--surface, #1a2538));
+  color: inherit;
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 700;
+  max-width: 100%;
+}
+
+.vendor-run-sheet-toc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 10rem;
+}
+
+.vendor-run-sheet-toc-n {
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 850;
+  background: #ea580c;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
 .vendor-run-sheet-vendor {
-  margin-bottom: 1rem;
+  margin-bottom: 1.15rem;
+  scroll-margin-top: 0.5rem;
+}
+
+.vendor-run-sheet-body:has(.vendor-run-sheet-toc) .vendor-run-sheet-vendor {
+  scroll-margin-top: 3.25rem;
 }
 
 .vendor-run-sheet-vendor:last-child {
@@ -9534,23 +9611,33 @@ svg {
   justify-content: space-between;
   align-items: baseline;
   gap: 0.5rem;
-  margin-bottom: 0.4rem;
-  padding-bottom: 0.3rem;
-  border-bottom: 2px solid color-mix(in srgb, var(--brand-2, #3b82f6) 45%, var(--border));
+  margin-bottom: 0.45rem;
+  padding: 0.35rem 0.15rem 0.35rem;
+  border-bottom: 2px solid color-mix(in srgb, #f59e0b 55%, var(--border));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--surface, #1a2538) 94%, transparent);
+}
+
+.vendor-run-sheet-body:has(.vendor-run-sheet-toc) .vendor-run-sheet-vendor-head {
+  top: 2.75rem;
 }
 
 .vendor-run-sheet-vendor-head h3 {
   margin: 0;
-  font-size: 1.05rem;
-  font-weight: 800;
-  letter-spacing: 0.02em;
+  font-size: 1.15rem;
+  font-weight: 850;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
 }
 
 .vendor-run-sheet-tally {
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--muted, #94a3b8);
+  font-size: 0.88rem;
+  font-weight: 800;
+  color: #fbbf24;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .vendor-run-sheet-parts {
@@ -9559,64 +9646,87 @@ svg {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.4rem;
 }
 
 .vendor-run-sheet-part {
   display: flex;
-  gap: 0.55rem;
+  gap: 0.65rem;
   align-items: flex-start;
-  padding: 0.5rem 0.55rem;
-  border-radius: 10px;
+  padding: 0.65rem 0.65rem;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--surface, #1a2538) 88%, transparent);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
 }
 
+.vendor-run-sheet-part.is-bulk {
+  border-color: color-mix(in srgb, #f59e0b 45%, var(--border));
+  background: color-mix(in srgb, #f59e0b 10%, var(--surface, #1a2538));
+}
+
 .vendor-run-sheet-qty {
   flex-shrink: 0;
-  min-width: 2.25rem;
-  font-size: 1.1rem;
-  font-weight: 850;
+  min-width: 2.75rem;
+  font-size: 1.35rem;
+  font-weight: 900;
   font-variant-numeric: tabular-nums;
   color: #86efac;
-  line-height: 1.2;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.vendor-run-sheet-part.is-bulk .vendor-run-sheet-qty {
+  color: #fbbf24;
 }
 
 .vendor-run-sheet-detail {
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
+  gap: 0.12rem;
   min-width: 0;
+  padding-top: 0.1rem;
 }
 
 .vendor-run-sheet-name {
-  font-size: 0.95rem;
+  font-size: 1.05rem;
   line-height: 1.25;
-  font-weight: 750;
+  font-weight: 800;
+  word-break: break-word;
 }
 
 .vendor-run-sheet-code {
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.82rem;
-  font-weight: 650;
-  opacity: 0.9;
+  font-size: 0.88rem;
+  font-weight: 700;
+  opacity: 0.92;
+  letter-spacing: 0.02em;
 }
 
 .vendor-run-sheet-meta {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  margin-top: 0.1rem;
+}
+
+.vendor-run-sheet-show-all {
+  margin-top: 0.65rem;
+  width: 100%;
 }
 
 .vendor-run-sheet-foot {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
-  padding: 0.65rem 1rem calc(0.75rem + env(safe-area-inset-bottom));
+  padding: 0.7rem 1rem calc(0.8rem + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));
   flex-shrink: 0;
+  background: color-mix(in srgb, var(--bg-elevated, #1e293b) 92%, #0f172a);
 }
 
 .vendor-run-sheet-foot .btn {
   flex: 1 1 7rem;
+  min-height: 2.75rem;
+  font-weight: 750;
 }
 
 .vendor-run-summary {  position: sticky;
