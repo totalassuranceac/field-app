@@ -9008,6 +9008,92 @@ button.live-provider-toggle.is-active {
   font-size: 0.82rem;
 }
 
+.live-tech-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+}
+
+.live-tech-actions-who {
+  font-size: 0.92rem;
+}
+
+.live-tech-action-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.live-tech-action-btns .btn {
+  flex: 1 1 6rem;
+  min-width: 5.5rem;
+}
+
+.live-tech-phone-hint {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.live-vehicle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--surface, #1a2538) 90%, transparent);
+}
+
+.live-vehicle-select {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.live-vehicle-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.live-vehicle-row-actions .btn {
+  flex: 1 1 4.5rem;
+}
+
+.fleet-popup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+  align-items: center;
+}
+
+.fleet-popup-btn {
+  display: inline-block;
+  padding: 0.3rem 0.65rem;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff !important;
+  font-weight: 700;
+  font-size: 0.82rem;
+  text-decoration: none !important;
+}
+
+.fleet-popup-call {
+  background: #16a34a;
+}
+
 .live-vehicle-driver {
   font-size: 0.88rem;
   font-weight: 650;
@@ -9020,18 +9106,9 @@ button.live-provider-toggle.is-active {
   list-style: none;
   margin: 0;
   padding: 0;
-}
-
-.live-vehicle-row {
-  width: 100%;
-  text-align: left;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  border-radius: 12px;
-  padding: 0.65rem 0.75rem;
-  margin-bottom: 0.5rem;
-  cursor: pointer;
-  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .live-vehicle-row:hover,
@@ -9042,13 +9119,6 @@ button.live-provider-toggle.is-active {
 .live-list-nav-hint {
   margin: 0 0 0.55rem;
   font-size: 0.82rem;
-}
-
-.live-vehicle-nav-cue {
-  margin-top: 0.3rem;
-  font-size: 0.78rem;
-  font-weight: 700;
-  color: #2563eb;
 }
 
 .live-vehicle-top {

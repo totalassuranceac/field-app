@@ -6,6 +6,8 @@ export interface LivePosition {
   provider: "onestep" | "verizon";
   name: string;
   driver_name: string | null;
+  /** Field App user/employee phone when matched */
+  phone?: string | null;
   lat: number;
   lng: number;
   speed_mph: number | null;
@@ -109,6 +111,19 @@ function openMapsToCoords(lat: number, lng: number, label?: string | null) {
       }`
     : gmaps;
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/** Dial tech from Field App phone record. */
+function callPhone(phone: string) {
+  const digits = phone.replace(/[^\d+]/g, "");
+  if (!digits) return;
+  window.location.href = `tel:${digits}`;
+}
+
+function positionTitle(p: LivePosition) {
+  return p.unit_number
+    ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
+    : p.driver_name || p.name || "Vehicle";
 }
 
 function ensureLeaflet(): Promise<LType> {
@@ -219,22 +234,30 @@ export function LiveMapPage() {
         const title = p.unit_number
           ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
           : p.driver_name || p.name || "Vehicle";
+        const phone = (p.phone || "").trim();
+        const phoneDigits = phone.replace(/[^\d+]/g, "");
         marker.bindPopup(
           `<div class="fleet-popup">
             <strong>${escapeHtml(p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle")}</strong><br/>
             <span>${providerLabel(p.provider)}</span><br/>
-            ${p.driver_name ? `Driver: ${escapeHtml(p.driver_name)}<br/>` : ""}
+            ${p.driver_name ? `Tech: ${escapeHtml(p.driver_name)}<br/>` : ""}
             ${p.address ? `${escapeHtml(p.address)}<br/>` : ""}
             Speed: ${p.speed_mph != null ? `${Math.round(Number(p.speed_mph))} mph` : "—"} ·
             ${escapeHtml(p.status || "—")}<br/>
             Updated: ${escapeHtml(formatTime(p.last_update))}<br/>
-            <span class="muted" style="font-size:0.8rem">Tap Navigate to open Maps</span>
+            <div class="fleet-popup-actions">
+              <a class="fleet-popup-btn" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}&travelmode=driving" target="_blank" rel="noopener">Map</a>
+              ${
+                phoneDigits
+                  ? `<a class="fleet-popup-btn fleet-popup-call" href="tel:${escapeHtml(phoneDigits)}">Call</a>`
+                  : `<span class="muted" style="font-size:0.78rem">No phone on file</span>`
+              }
+            </div>
           </div>`
         );
         marker.on("click", () => {
           setSelectedId(p.id);
-          // Click pin → open phone Maps to drive to this tech
-          openMapsToCoords(p.lat, p.lng, title);
+          // Select only — Map / Call are explicit actions (popup + list)
         });
         marker.addTo(layer);
         bounds.push([p.lat, p.lng]);
@@ -367,19 +390,13 @@ export function LiveMapPage() {
     return () => window.clearInterval(id);
   }, [mapReady, loadPositions]);
 
-  function focusPosition(p: LivePosition, openMaps = false) {
+  function focusPosition(p: LivePosition) {
     if (!isValidCoord(p.lat, p.lng)) return;
     setSelectedId(p.id);
     try {
       mapRef.current?.setView([p.lat, p.lng], 15);
     } catch {
       /* ignore */
-    }
-    if (openMaps) {
-      const title = p.unit_number
-        ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
-        : p.driver_name || p.name || "Vehicle";
-      openMapsToCoords(p.lat, p.lng, title);
     }
   }
 
@@ -394,6 +411,16 @@ export function LiveMapPage() {
       ),
     [filtered]
   );
+
+  // When search narrows to one tech, auto-select for Map / Call actions
+  const selected = useMemo(() => {
+    if (selectedId) {
+      const hit = sorted.find((p) => p.id === selectedId);
+      if (hit) return hit;
+    }
+    if (techSearch.trim() && sorted.length === 1) return sorted[0];
+    return null;
+  }, [selectedId, sorted, techSearch]);
 
   return (
     <div className="live-page">
@@ -533,9 +560,53 @@ export function LiveMapPage() {
                   {sorted.length === 0
                     ? `No unit matching “${techSearch.trim()}”`
                     : sorted.length === 1
-                      ? `Showing 1 unit for “${techSearch.trim()}” · tap pin or row to open Maps`
-                      : `Showing ${sorted.length} units matching “${techSearch.trim()}” · tap one to open Maps`}
+                      ? `Found “${techSearch.trim()}” — Map or Call below`
+                      : `Showing ${sorted.length} matches · tap a tech, then Map or Call`}
                 </p>
+              )}
+              {selected && isValidCoord(selected.lat, selected.lng) && (
+                <div className="live-tech-actions no-print">
+                  <div className="live-tech-actions-who">
+                    <strong>
+                      {selected.driver_name ||
+                        (selected.unit_number ? `Unit ${selected.unit_number}` : selected.name)}
+                    </strong>
+                    {selected.unit_number && selected.driver_name ? (
+                      <span className="muted"> · Unit {selected.unit_number}</span>
+                    ) : null}
+                  </div>
+                  <div className="live-tech-action-btns">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() =>
+                        openMapsToCoords(selected.lat, selected.lng, positionTitle(selected))
+                      }
+                    >
+                      Map
+                    </button>
+                    {selected.phone?.trim() ? (
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => callPhone(selected.phone!)}
+                      >
+                        Call
+                      </button>
+                    ) : (
+                      <button type="button" className="btn secondary" disabled title="No phone on file for this tech">
+                        Call
+                      </button>
+                    )}
+                  </div>
+                  {!selected.phone?.trim() ? (
+                    <p className="muted live-tech-phone-hint">
+                      No phone on file — add it under People / their user profile.
+                    </p>
+                  ) : (
+                    <p className="muted live-tech-phone-hint">{selected.phone}</p>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -552,7 +623,8 @@ export function LiveMapPage() {
             ) : null}
           </h2>
           <p className="muted live-list-nav-hint no-print">
-            Tap a tech or pin to zoom and open Maps with directions to their GPS.
+            Search or tap a tech, then choose <strong>Map</strong> or <strong>Call</strong> — no need
+            to know their number.
           </p>
           {!sorted.length && !loading && (
             <div className="empty">
@@ -566,32 +638,60 @@ export function LiveMapPage() {
           <ul className="live-vehicle-list">
             {sorted.map((p) => (
               <li key={p.id}>
-                <button
-                  type="button"
-                  className={`live-vehicle-row ${selectedId === p.id ? "selected" : ""}`}
-                  onClick={() => focusPosition(p, true)}
+                <div
+                  className={`live-vehicle-row ${selected?.id === p.id ? "selected" : ""}`}
                 >
-                  <div className="live-vehicle-top">
-                    <strong>
-                      {p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle"}
-                    </strong>
-                    <span className={`badge ${p.provider === "onestep" ? "ok" : "info"}`}>
-                      {providerLabel(p.provider)}
-                    </span>
-                  </div>
-                  <div className="live-vehicle-driver">
-                    {p.driver_name || "Unassigned"}
-                    {typeof p.speed_mph === "number" && p.speed_mph > 0
-                      ? ` · ${Math.round(p.speed_mph)} mph`
-                      : " · stopped"}
-                  </div>
-                  {p.address && (
-                    <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      {p.address}
+                  <button
+                    type="button"
+                    className="live-vehicle-select"
+                    onClick={() => focusPosition(p)}
+                  >
+                    <div className="live-vehicle-top">
+                      <strong>
+                        {p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle"}
+                      </strong>
+                      <span className={`badge ${p.provider === "onestep" ? "ok" : "info"}`}>
+                        {providerLabel(p.provider)}
+                      </span>
                     </div>
-                  )}
-                  <div className="live-vehicle-nav-cue">Open in Maps →</div>
-                </button>
+                    <div className="live-vehicle-driver">
+                      {p.driver_name || "Unassigned"}
+                      {typeof p.speed_mph === "number" && p.speed_mph > 0
+                        ? ` · ${Math.round(p.speed_mph)} mph`
+                        : " · stopped"}
+                    </div>
+                    {p.address && (
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {p.address}
+                      </div>
+                    )}
+                  </button>
+                  <div className="live-vehicle-row-actions">
+                    <button
+                      type="button"
+                      className="btn secondary btn-sm"
+                      disabled={!isValidCoord(p.lat, p.lng)}
+                      onClick={() => {
+                        focusPosition(p);
+                        openMapsToCoords(p.lat, p.lng, positionTitle(p));
+                      }}
+                    >
+                      Map
+                    </button>
+                    <button
+                      type="button"
+                      className="btn secondary btn-sm"
+                      disabled={!p.phone?.trim()}
+                      title={p.phone?.trim() ? `Call ${p.phone}` : "No phone on file"}
+                      onClick={() => {
+                        focusPosition(p);
+                        if (p.phone?.trim()) callPhone(p.phone);
+                      }}
+                    >
+                      Call
+                    </button>
+                  </div>
+                </div>
               </li>
             ))}
           </ul>

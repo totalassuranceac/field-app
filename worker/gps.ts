@@ -7,6 +7,8 @@ export interface LivePosition {
   provider: GpsProvider;
   name: string;
   driver_name: string | null;
+  /** User phone from Field App (for Call on live map) */
+  phone: string | null;
   lat: number;
   lng: number;
   speed_mph: number | null;
@@ -258,6 +260,7 @@ async function fetchOneStepPositions(
         name: d.display_name,
         // Prefer assigned tech name so map search finds the person on this unit
         driver_name: matched?.assigned_driver || d.display_name,
+        phone: null,
         lat: pt.lat,
         lng: pt.lng,
         speed_mph: pt.speed != null ? Number(pt.speed) : null,
@@ -452,6 +455,7 @@ async function fetchVerizonPositions(
         provider: "verizon",
         name: label,
         driver_name: matched?.assigned_driver || p.dnme || null,
+        phone: null,
         lat,
         lng,
         speed_mph: p.spd != null ? Number(p.spd) : null,
@@ -468,6 +472,83 @@ async function fetchVerizonPositions(
     return { positions };
   } catch (e) {
     return { positions: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Attach Field App user/employee phones so Live map can offer Call. */
+async function attachDriverPhones(db: D1Database, positions: LivePosition[]): Promise<void> {
+  if (!positions.length) return;
+  try {
+    type PhoneRow = {
+      display_name: string;
+      phone: string | null;
+      employee_name: string | null;
+      employee_phone: string | null;
+    };
+    let rows: PhoneRow[] = [];
+    try {
+      const r = await db
+        .prepare(
+          `SELECT u.display_name, u.phone, e.name as employee_name, e.phone as employee_phone
+           FROM users u
+           LEFT JOIN employees e ON e.id = u.employee_id
+           WHERE u.active = 1`
+        )
+        .all<PhoneRow>();
+      rows = r.results || [];
+    } catch {
+      const r = await db
+        .prepare(`SELECT display_name, phone, NULL as employee_name, NULL as employee_phone
+                  FROM users WHERE active = 1`)
+        .all<PhoneRow>();
+      rows = r.results || [];
+    }
+
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/\(.*?\)/g, "")
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const byKey = new Map<string, string>();
+    for (const u of rows) {
+      const phone = (u.phone || u.employee_phone || "").trim();
+      if (!phone) continue;
+      for (const name of [u.display_name, u.employee_name].filter(Boolean) as string[]) {
+        const key = norm(name);
+        if (key) byKey.set(key, phone);
+        // last name only
+        const parts = key.split(" ").filter(Boolean);
+        if (parts.length >= 2) {
+          const last = parts[parts.length - 1];
+          if (last.length >= 3 && !byKey.has(last)) byKey.set(last, phone);
+        }
+      }
+    }
+
+    for (const p of positions) {
+      if (p.phone) continue;
+      const candidates = [p.driver_name, p.name].filter(Boolean) as string[];
+      for (const c of candidates) {
+        const key = norm(c);
+        if (byKey.has(key)) {
+          p.phone = byKey.get(key) || null;
+          break;
+        }
+        // partial: driver "Juan Perez" vs user "Juan"
+        for (const [k, phone] of byKey) {
+          if (key.includes(k) || k.includes(key)) {
+            p.phone = phone;
+            break;
+          }
+        }
+        if (p.phone) break;
+      }
+    }
+  } catch {
+    /* phones optional */
   }
 }
 
@@ -489,9 +570,12 @@ export async function getLivePositions(env: Env, force = false): Promise<LivePos
     fetchVerizonPositions(env, vehicles),
   ]);
 
+  const positions = [...os.positions, ...vz.positions];
+  await attachDriverPhones(env.DB, positions);
+
   const data: LivePositionsResult = {
     fetched_at: new Date().toISOString(),
-    positions: [...os.positions, ...vz.positions],
+    positions,
     providers: {
       onestep: {
         ok: !os.error,
