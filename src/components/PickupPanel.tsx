@@ -77,10 +77,14 @@ export function PickupPanel({
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"open" | "all">("open");
+  /** Tech these parts are for (warehouse issue) */
+  const [forTech, setForTech] = useState("");
   /** Per pickup: warehouse “handed to” choice */
   const [handTo, setHandTo] = useState<Record<number, string>>({});
   /** Per pickup: truck the receiver is putting stock on */
   const [handTruck, setHandTruck] = useState<Record<number, string>>({});
+  /** Truck barcode scan field per pickup (or global when one selected) */
+  const [truckScan, setTruckScan] = useState<Record<number, string>>({});
 
   const load = useCallback(async () => {
     const [p, u] = await Promise.all([
@@ -152,26 +156,115 @@ export function PickupPanel({
       setError("Scan or add at least one part.");
       return;
     }
+    // Warehouse default: issue for a tech, then scan truck to transfer
+    if (canManage && !forTech) {
+      setError("Select the tech these parts are for, then save the issue.");
+      return;
+    }
     setBusy(true);
     setError("");
     setOk("");
     try {
-      const r = await api<{ request_number: string }>("/inventory/pickups", {
+      const techId = forTech ? Number(forTech) : undefined;
+      const r = await api<{
+        request_number: string;
+        staged?: boolean;
+        status?: string;
+      }>("/inventory/pickups", {
         method: "POST",
         body: JSON.stringify({
           notes: notes || undefined,
+          for_user_id: techId || undefined,
+          stage_for_tech: canManage && !!techId,
           lines: lines.map((l) => ({ part_id: l.part_id, qty: l.qty })),
         }),
       });
+      const techName = peers.find((p) => String(p.id) === forTech)?.display_name;
       setOk(
-        `List ${r.request_number} saved. At the counter: warehouse records who received them, then that person chooses the truck.`
+        r.staged
+          ? `Issue ${r.request_number} staged for ${techName || "tech"}. Scan their truck barcode (or unit #) below to move stock.`
+          : `List ${r.request_number} saved. Warehouse records who received them, then truck is chosen.`
       );
       setLines([]);
       setScan("");
       setNotes("");
+      if (canManage) setForTech("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create pickup");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Scan unit # / truck barcode → move all lines for this issue onto that vehicle. */
+  async function completeByTruckScan(pickupId: number, code: string) {
+    const raw = code.trim();
+    if (!raw) {
+      setError("Scan or type the truck unit number.");
+      return;
+    }
+    const p = pickups.find((x) => x.id === pickupId);
+    if (!p) return;
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      // Resolve label for confirm (optional)
+      let label = raw;
+      try {
+        const loc = await api<{
+          locations: Array<{ id: number; label?: string; unit_number?: string | null }>;
+        }>(`/inventory/locations/lookup?code=${encodeURIComponent(raw)}`);
+        if (loc.locations?.[0]) {
+          label =
+            loc.locations[0].label ||
+            (loc.locations[0].unit_number
+              ? `Unit ${loc.locations[0].unit_number}`
+              : raw);
+        }
+      } catch {
+        /* complete endpoint will validate */
+      }
+      const person =
+        p.handed_to_name ||
+        p.for_user_name ||
+        peers.find((x) => x.id === p.for_user_id)?.display_name ||
+        "tech";
+      if (
+        !confirm(
+          `Transfer ${p.request_number} to ${label}?\n\nTech: ${person}\n${(p.lines || []).length} part line(s) move from warehouse to that truck.`
+        )
+      ) {
+        setBusy(false);
+        return;
+      }
+      const body: Record<string, unknown> = { truck_code: raw };
+      // Open lists need receiver; staged ready already has handed_to
+      if (p.status === "open") {
+        const toUser = Number(handTo[p.id] || p.for_user_id || 0);
+        if (!toUser) {
+          setError("Select who receives these parts (or stage the issue for a tech first).");
+          setBusy(false);
+          return;
+        }
+        body.handed_to_user_id = toUser;
+      }
+      const r = await api<{
+        custody?: { handed_over_by: string; handed_to: string; truck: string };
+      }>(`/inventory/pickups/${pickupId}/complete`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setOk(
+        r.custody
+          ? `Transferred to ${r.custody.truck}: ${r.custody.handed_to} · ${p.request_number}`
+          : `Stock moved · ${p.request_number}`
+      );
+      setTruckScan((prev) => ({ ...prev, [pickupId]: "" }));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Truck transfer failed");
     } finally {
       setBusy(false);
     }
@@ -281,7 +374,7 @@ export function PickupPanel({
   }
 
   function statusLabel(status: string): string {
-    if (status === "ready") return "with receiver";
+    if (status === "ready") return "ready for truck";
     return status.replace("_", " ");
   }
 
@@ -289,10 +382,20 @@ export function PickupPanel({
     <div className="pickup-panel">
       <div className="page-header no-print" style={{ marginBottom: "0.75rem" }}>
         <div>
-          <h2 style={{ marginTop: 0 }}>Pickup / transfer of custody</h2>
+          <h2 style={{ marginTop: 0 }}>
+            {canManage ? "Issue to tech / truck" : "Pickup / transfer of custody"}
+          </h2>
           <p style={{ margin: 0 }}>
-            Scan parts → warehouse records <strong>who received them</strong> → that person records{" "}
-            <strong>which truck stock</strong> they go on. Full chain is saved for accountability.
+            {canManage ? (
+              <>
+                Scan all parts for a tech → <strong>Stage issue</strong> → scan their{" "}
+                <strong>truck unit barcode</strong> to move stock onto that vehicle.
+              </>
+            ) : (
+              <>
+                Scan parts → warehouse records who received them → choose truck stock.
+              </>
+            )}
           </p>
         </div>
       </div>
@@ -301,16 +404,43 @@ export function PickupPanel({
 
       <form className="card pickup-build" onSubmit={createPickup}>
         <h3 className="inv-section-title" style={{ marginTop: 0 }}>
-          1 · Build list (scan parts)
+          {canManage ? "1 · Issue parts for a tech" : "1 · Build list (scan parts)"}
         </h3>
+        {canManage && (
+          <label>
+            Tech (parts go with them) *
+            <select
+              value={forTech}
+              onChange={(e) => setForTech(e.target.value)}
+              required
+            >
+              <option value="">Select tech…</option>
+              {peers
+                .filter((p) => p.role === "driver" || p.role === "mechanic" || p.role === "admin")
+                .map((peer) => (
+                  <option key={peer.id} value={peer.id}>
+                    {peer.display_name}
+                    {peer.role === "driver" ? " (field)" : ` (${peer.role})`}
+                  </option>
+                ))}
+              {/* Fallback: all peers if filter empty */}
+              {!peers.some((p) => p.role === "driver") &&
+                peers.map((peer) => (
+                  <option key={`all-${peer.id}`} value={peer.id}>
+                    {peer.display_name} ({peer.role})
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
         <label>
-          Scan barcode / QR / type part #
+          Scan part barcode / type part #
           <input
             ref={scanRef}
             value={scan}
             onChange={(e) => setScan(e.target.value)}
             onKeyDown={onScanKey}
-            placeholder="Scan here — Enter adds to list"
+            placeholder="Scan parts into this issue — Enter adds"
             autoComplete="off"
             enterKeyHint="search"
           />
@@ -318,7 +448,7 @@ export function PickupPanel({
         <div className="pickup-scan-actions">
           <BarcodeScanButton
             disabled={busy}
-            label="Scan with camera"
+            label="Scan part"
             onCode={(code) => {
               setScan(code);
               void lookupAndAdd(code);
@@ -334,8 +464,9 @@ export function PickupPanel({
           </button>
         </div>
         <p className="muted" style={{ fontSize: "0.78rem", margin: "0.25rem 0 0.5rem" }}>
-          Use camera scan, a USB/Bluetooth scanner + Enter, or type the part #. Custody is recorded
-          at handoff.
+          {canManage
+            ? "Add every part for this tech’s job. When the pile is ready, stage the issue — then scan the truck to transfer stock."
+            : "Use camera scan, a USB scanner + Enter, or type the part #."}
         </p>
         {hits.length > 1 && (
           <ul className="pickup-hits">
@@ -396,15 +527,31 @@ export function PickupPanel({
           <input
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="e.g. for job on Main St"
+            placeholder="e.g. job on Main St · ticket #"
           />
         </label>
         <p className="muted" style={{ fontSize: "0.8rem" }}>
-          List started by <strong>{user?.display_name}</strong>. Next: warehouse names the receiver,
-          then receiver names the truck.
+          {canManage ? (
+            <>
+              Issued by <strong>{user?.display_name}</strong>. After staging, open the issue below
+              and <strong>scan the truck unit #</strong> to move warehouse stock onto that vehicle.
+            </>
+          ) : (
+            <>
+              List by <strong>{user?.display_name}</strong>. Warehouse records handoff, then truck.
+            </>
+          )}
         </p>
-        <button className="btn" type="submit" disabled={busy || !lines.length}>
-          {busy ? "Saving…" : "Save list — ready for handoff"}
+        <button
+          className="btn"
+          type="submit"
+          disabled={busy || !lines.length || (canManage && !forTech)}
+        >
+          {busy
+            ? "Saving…"
+            : canManage
+              ? "Stage issue for tech"
+              : "Save list — ready for handoff"}
         </button>
       </form>
 
@@ -429,10 +576,11 @@ export function PickupPanel({
         {pickups.map((p) => {
           const receiverMode = p.status === "ready";
           const done = p.status === "picked_up";
-          const showReceiverTruck = receiverMode && canPutOnTruck(p);
+          const showReceiverTruck = receiverMode && canPutOnTruck(p) && !canManage;
           const lineCount = (p.lines || []).length;
           const needsAction =
-            (p.status === "open" && canManage) || showReceiverTruck;
+            ((p.status === "open" || p.status === "ready") && canManage) ||
+            showReceiverTruck;
 
           return (
             <LogItem
@@ -445,7 +593,13 @@ export function PickupPanel({
                   <span className="log-item-badge">{statusLabel(p.status)}</span>
                   <span className="log-item-meta">
                     {lineCount} part{lineCount === 1 ? "" : "s"}
-                    {p.requested_by_name ? ` · ${p.requested_by_name}` : ""}
+                    {p.for_user_name
+                      ? ` · for ${p.for_user_name}`
+                      : p.handed_to_name
+                        ? ` · ${p.handed_to_name}`
+                        : p.requested_by_name
+                          ? ` · ${p.requested_by_name}`
+                          : ""}
                     {done && p.dest_unit
                       ? ` · Unit ${p.dest_unit}`
                       : done && p.dest_name
@@ -495,46 +649,76 @@ export function PickupPanel({
                   <strong>{p.handed_to_name || p.picked_up_by_name || "receiver"}</strong> / truck{" "}
                   <strong>{p.dest_unit ? `Unit ${p.dest_unit}` : p.dest_name}</strong>
                 </div>
-              ) : p.status === "open" && canManage ? (
-                <div className="pickup-handoff-form">
-                  <h4 className="inv-section-title" style={{ margin: "0.5rem 0 0.35rem" }}>
-                    2 · Warehouse: who did you hand these to?
+              ) : (p.status === "ready" || p.status === "open") &&
+                (canManage || canPutOnTruck(p)) ? (
+                <div className="pickup-truck-scan card" style={{ marginTop: "0.5rem" }}>
+                  <h4 className="inv-section-title" style={{ margin: "0 0 0.35rem" }}>
+                    {canManage ? "2 · Scan truck to transfer stock" : "Put on truck"}
                   </h4>
-                  <label style={{ display: "block", marginBottom: "0.45rem" }}>
-                    Handed to (person receiving) *
-                    <select
-                      value={handTo[p.id] || ""}
-                      onChange={(e) =>
-                        setHandTo((prev) => ({ ...prev, [p.id]: e.target.value }))
-                      }
-                      required
-                    >
-                      <option value="">Select person…</option>
-                      {peers.map((peer) => (
-                        <option key={peer.id} value={peer.id}>
-                          {peer.display_name} ({peer.role})
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="muted" style={{ fontSize: "0.78rem", margin: "0 0 0.45rem" }}>
-                    This transfers custody. That person is accountable until they put parts on a
-                    truck.
+                  <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.45rem" }}>
+                    Scan unit number barcode (e.g. <strong>001</strong>) or type it — all parts on
+                    this issue move from warehouse to that truck.
+                    {p.for_user_name || p.handed_to_name
+                      ? ` Tech: ${p.handed_to_name || p.for_user_name}.`
+                      : ""}
                   </p>
-                  <div className="inv-adjust-row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+                  {p.status === "open" && canManage && (
+                    <label style={{ display: "block", marginBottom: "0.45rem" }}>
+                      Handed to *
+                      <select
+                        value={handTo[p.id] || (p.for_user_id ? String(p.for_user_id) : "")}
+                        onChange={(e) =>
+                          setHandTo((prev) => ({ ...prev, [p.id]: e.target.value }))
+                        }
+                      >
+                        <option value="">Select person…</option>
+                        {peers.map((peer) => (
+                          <option key={peer.id} value={peer.id}>
+                            {peer.display_name} ({peer.role})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <label>
+                    Truck unit # / barcode
+                    <input
+                      value={truckScan[p.id] || ""}
+                      onChange={(e) =>
+                        setTruckScan((prev) => ({ ...prev, [p.id]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void completeByTruckScan(p.id, truckScan[p.id] || "");
+                        }
+                      }}
+                      placeholder="Scan truck barcode or type 001"
+                      autoComplete="off"
+                      disabled={busy}
+                    />
+                  </label>
+                  <div className="pickup-scan-actions" style={{ marginTop: "0.4rem" }}>
+                    <BarcodeScanButton
+                      disabled={busy}
+                      label="Scan truck"
+                      onCode={(code) => {
+                        setTruckScan((prev) => ({ ...prev, [p.id]: code }));
+                        void completeByTruckScan(p.id, code);
+                      }}
+                    />
                     <button
                       type="button"
                       className="btn"
-                      disabled={busy}
-                      onClick={() => void handOver(p.id)}
+                      disabled={busy || !(truckScan[p.id] || "").trim()}
+                      onClick={() => void completeByTruckScan(p.id, truckScan[p.id] || "")}
                     >
-                      Record handoff (custody)
+                      Transfer to truck
                     </button>
                   </div>
-
                   <details className="pickup-oneshot" style={{ marginTop: "0.65rem" }}>
                     <summary className="muted" style={{ cursor: "pointer", fontSize: "0.82rem" }}>
-                      At the counter together? Record person + truck in one step
+                      Or pick truck from list
                     </summary>
                     <div className="inv-adjust-row" style={{ marginTop: "0.4rem" }}>
                       <label style={{ flex: "1 1 10rem" }}>
@@ -561,9 +745,13 @@ export function PickupPanel({
                       type="button"
                       className="btn secondary"
                       disabled={busy}
-                      onClick={() => void putOnTruck(p.id, { oneShot: true })}
+                      onClick={() =>
+                        void putOnTruck(p.id, {
+                          oneShot: p.status === "open",
+                        })
+                      }
                     >
-                      Complete full custody &amp; move stock
+                      Move stock to selected truck
                     </button>
                   </details>
                 </div>

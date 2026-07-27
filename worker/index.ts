@@ -7260,33 +7260,127 @@ api.get("/inventory/pickups", async (c) => {
   }
 });
 
+/** Resolve vehicle stock location from unit # / name / truck:id scan. */
+async function resolveTruckLocation(
+  db: D1Database,
+  code: string
+): Promise<{ id: number; name: string; unit_number: string | null } | null> {
+  let raw = (code || "").trim();
+  if (!raw) return null;
+  if (/^truck:/i.test(raw)) {
+    const id = Number(raw.split(":")[1]);
+    if (id > 0) {
+      const row = await db
+        .prepare(
+          `SELECT l.id, l.name, v.unit_number
+           FROM stock_locations l
+           LEFT JOIN vehicles v ON v.id = l.vehicle_id
+           WHERE l.id = ? AND l.type = 'vehicle' AND l.active = 1`
+        )
+        .bind(id)
+        .first<{ id: number; name: string; unit_number: string | null }>();
+      return row || null;
+    }
+  }
+  // Normalize "Unit 001" / "unit-1" / "001"
+  const compact = raw
+    .toLowerCase()
+    .replace(/^unit[\s\-#]*/i, "")
+    .replace(/[^a-z0-9]/g, "");
+  const rows = await db
+    .prepare(
+      `SELECT l.id, l.name, v.unit_number
+       FROM stock_locations l
+       LEFT JOIN vehicles v ON v.id = l.vehicle_id
+       WHERE l.type = 'vehicle' AND l.active = 1`
+    )
+    .all<{ id: number; name: string; unit_number: string | null }>();
+  for (const r of rows.results || []) {
+    const u = (r.unit_number || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const n = (r.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (
+      (u && (u === compact || raw.toLowerCase() === (r.unit_number || "").toLowerCase())) ||
+      (n && (n === compact || n.includes(compact) || compact.includes(n)))
+    ) {
+      return r;
+    }
+    // leading-zero tolerant: 1 matches 001
+    if (u && compact && Number(u) === Number(compact) && Number.isFinite(Number(compact))) {
+      return r;
+    }
+  }
+  return null;
+}
+
+api.get("/inventory/locations/lookup", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
+  const code = (c.req.query("code") || "").trim();
+  if (!code) return c.json({ error: "code required" }, 400);
+  try {
+    const truck = await resolveTruckLocation(c.env.DB, code);
+    if (!truck) return c.json({ locations: [], query: code });
+    return c.json({
+      locations: [
+        {
+          id: truck.id,
+          type: "vehicle",
+          name: truck.name,
+          unit_number: truck.unit_number,
+          label: truck.unit_number ? `Unit ${truck.unit_number}` : truck.name,
+        },
+      ],
+      query: code,
+    });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Lookup failed" }, 500);
+  }
+});
+
 api.post("/inventory/pickups", async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
     for_user_id?: number | null;
     destination_location_id?: number | null;
     notes?: string;
+    /** Warehouse: stage parts for a tech (ready for truck scan) */
+    stage_for_tech?: boolean;
     lines?: Array<{ part_id: number; qty: number; from_location_id?: number }>;
   }>();
   const lines = body.lines || [];
   if (!lines.length) return c.json({ error: "Add at least one part (scan or type code)" }, 400);
+
+  const forUserId = body.for_user_id ? Number(body.for_user_id) : null;
+  const stageForTech =
+    !!body.stage_for_tech && roleAtLeast(user.role, ROLE_PERMS.manageInventory);
+  if (stageForTech && !forUserId) {
+    return c.json({ error: "Select the tech these parts are for" }, 400);
+  }
+
   try {
     const reqNo = await nextPickupNumber(c.env.DB);
     const wh = await c.env.DB.prepare(
       `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1 LIMIT 1`
     ).first<{ id: number }>();
+
+    // Staged issues start as ready (handed to tech); normal pickups start open
+    const initialStatus = stageForTech ? "ready" : "open";
     const r = await c.env.DB.prepare(
       `INSERT INTO part_pickups (
          request_number, status, requested_by_user_id, for_user_id,
-         destination_location_id, notes, created_at
-       ) VALUES (?, 'open', ?, ?, ?, ?, datetime('now'))`
+         destination_location_id, notes, created_at,
+         handed_to_user_id, handed_over_by_user_id, handed_over_at, ready_at
+       ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`
     )
       .bind(
         reqNo,
+        initialStatus,
         user.id,
-        body.for_user_id || null,
+        forUserId,
         body.destination_location_id || null,
-        body.notes?.trim() || null
+        body.notes?.trim() || null,
+        stageForTech ? forUserId : null,
+        stageForTech ? user.id : null,
+        stageForTech ? new Date().toISOString().slice(0, 19).replace("T", " ") : null,
+        stageForTech ? new Date().toISOString().slice(0, 19).replace("T", " ") : null
       )
       .run();
     const pid = Number(r.meta.last_row_id);
@@ -7299,6 +7393,42 @@ api.post("/inventory/pickups", async (c) => {
         .bind(pid, line.part_id, line.qty, line.from_location_id || wh?.id || null)
         .run();
     }
+
+    if (stageForTech && forUserId) {
+      const tech = await c.env.DB.prepare(
+        `SELECT display_name FROM users WHERE id = ?`
+      )
+        .bind(forUserId)
+        .first<{ display_name: string }>();
+      await notifyUsers(
+        c.env.DB,
+        [forUserId],
+        "pickup_handoff",
+        `Parts staged for you · ${reqNo}`,
+        `${user.display_name} issued ${lines.length} line(s). Stock moves when warehouse scans your truck.`,
+        { type: "pickup", id: pid }
+      );
+      await writeAudit(
+        c.env.DB,
+        user,
+        "create",
+        "pickup",
+        pid,
+        `Issue staged ${reqNo} for ${tech?.display_name || forUserId}`
+      );
+      return c.json(
+        {
+          ok: true,
+          id: pid,
+          request_number: reqNo,
+          status: "ready",
+          staged: true,
+          for_user_id: forUserId,
+        },
+        201
+      );
+    }
+
     // Notify warehouse
     const targets = await usersByRoles(c.env.DB, ["admin", "warehouse"]);
     await notifyUsers(
@@ -7309,19 +7439,56 @@ api.post("/inventory/pickups", async (c) => {
       `${user.display_name} requested ${lines.length} part line(s)`,
       { type: "pickup", id: pid }
     );
-    if (body.for_user_id && body.for_user_id !== user.id) {
+    if (forUserId && forUserId !== user.id) {
       await notifyUsers(
         c.env.DB,
-        [body.for_user_id],
+        [forUserId],
         "pickup_request",
         `Parts ready for you · ${reqNo}`,
-        `${user.display_name} set up a pickup list for you to approve.`,
+        `${user.display_name} set up a pickup list for you.`,
         { type: "pickup", id: pid }
       );
     }
-    return c.json({ ok: true, id: pid, request_number: reqNo }, 201);
+    return c.json({ ok: true, id: pid, request_number: reqNo, status: "open" }, 201);
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Create failed" }, 500);
+    const msg = e instanceof Error ? e.message : "Create failed";
+    // Fallback if custody columns missing
+    if (/no such column|handed/i.test(msg)) {
+      try {
+        const reqNo = await nextPickupNumber(c.env.DB);
+        const wh = await c.env.DB.prepare(
+          `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1 LIMIT 1`
+        ).first<{ id: number }>();
+        const r = await c.env.DB.prepare(
+          `INSERT INTO part_pickups (
+             request_number, status, requested_by_user_id, for_user_id,
+             destination_location_id, notes, created_at
+           ) VALUES (?, 'open', ?, ?, ?, ?, datetime('now'))`
+        )
+          .bind(
+            reqNo,
+            user.id,
+            forUserId,
+            body.destination_location_id || null,
+            body.notes?.trim() || null
+          )
+          .run();
+        const pid = Number(r.meta.last_row_id);
+        for (const line of lines) {
+          if (!line.part_id || !(line.qty > 0)) continue;
+          await c.env.DB.prepare(
+            `INSERT INTO part_pickup_lines (pickup_id, part_id, qty, from_location_id, scanned)
+             VALUES (?, ?, ?, ?, 1)`
+          )
+            .bind(pid, line.part_id, line.qty, line.from_location_id || wh?.id || null)
+            .run();
+        }
+        return c.json({ ok: true, id: pid, request_number: reqNo, status: "open" }, 201);
+      } catch (e2) {
+        return c.json({ error: e2 instanceof Error ? e2.message : msg }, 500);
+      }
+    }
+    return c.json({ error: msg }, 500);
   }
 });
 
@@ -7423,12 +7590,29 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
   const body = await c.req.json<{
     handed_to_user_id?: number;
     destination_location_id?: number;
+    /** Scan unit # / truck barcode instead of selecting from list */
+    truck_code?: string;
   }>();
 
-  const destLocId = Number(body.destination_location_id);
+  let destLocId = Number(body.destination_location_id) || 0;
+  if ((!destLocId || destLocId <= 0) && body.truck_code?.trim()) {
+    const truck = await resolveTruckLocation(c.env.DB, body.truck_code.trim());
+    if (!truck) {
+      return c.json(
+        {
+          error: `No truck matched “${body.truck_code.trim()}”. Scan unit number (e.g. 001) or pick the truck.`,
+        },
+        400
+      );
+    }
+    destLocId = truck.id;
+  }
   if (!destLocId || destLocId <= 0) {
     return c.json(
-      { error: "Which truck stock? Select the unit these parts are going on." },
+      {
+        error:
+          "Which truck? Select the unit or scan the truck barcode / unit number.",
+      },
       400
     );
   }

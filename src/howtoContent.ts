@@ -577,6 +577,25 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "inv-issue-truck-scan",
+    title: "Issue parts to a tech, then scan truck",
+    summary: "Warehouse stages a full issue, then scans the unit barcode to move stock.",
+    roles: ["warehouse", "admin"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → Pickup.",
+      "Select the tech the parts are for.",
+      "Scan every part (or type part #) into the list; adjust qty if needed.",
+      "Tap Stage issue for tech — list shows as ready for truck.",
+      "Open that issue → Scan truck (unit # like 001) or type unit number.",
+      "Confirm — stock leaves warehouse and goes on that truck; custody is recorded.",
+    ],
+    tips: [
+      "Truck scan matches unit number (001, Unit 001). Print unit barcodes for each truck if helpful.",
+      "You can still pick a truck from the list under “Or pick truck from list”.",
+    ],
+  },
+  {
     id: "warranty-vendor-credit",
     title: "Warranty return to vendor & credit",
     summary: "Return to vendor stays open until Approved or Rejected.",
