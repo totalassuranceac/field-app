@@ -562,6 +562,21 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "inv-print-barcode-folder",
+    title: "Print barcode folder list",
+    summary: "All part numbers with scannable barcodes for a warehouse binder.",
+    roles: ["warehouse", "admin", "office"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → Stock.",
+      "Tap Print barcode folder list.",
+      "Allow the pop-up window, then print (or save as PDF).",
+      "Each row: part # and name on the left, barcode of the part # on the right.",
+      "Linked package UPCs print under the name when you’ve linked them on the part.",
+      "Keep the pages in a warehouse folder for missing boxes / damaged labels.",
+    ],
+  },
+  {
     id: "warranty-vendor-credit",
     title: "Warranty return to vendor & credit",
     summary: "Return to vendor stays open until Approved or Rejected.",

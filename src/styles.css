@@ -3445,6 +3445,13 @@ tr.row-dup td {
   max-width: 100%;
 }
 
+.inv-browse-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+
 .inv-barcode-box {
   margin: 0.75rem 0 1rem;
   padding: 0.75rem 0.85rem;

@@ -6002,6 +6002,58 @@ api.get("/inventory/parts", requireRoles(ROLE_PERMS.viewInventory), async (c) =>
   }
 });
 
+/**
+ * Printable warehouse directory: every active part # + linked package barcodes.
+ * Used for a binder/folder sheet when boxes are missing labels.
+ */
+api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
+  try {
+    let rows: {
+      results?: Array<{
+        id: number;
+        code: string;
+        name: string;
+        primary_vendor: string | null;
+        linked_barcodes: string | null;
+      }>;
+    };
+    try {
+      rows = await c.env.DB.prepare(
+        `SELECT p.id, p.code, p.name, p.primary_vendor,
+           (SELECT GROUP_CONCAT(pb.barcode, ' · ')
+            FROM part_barcodes pb WHERE pb.part_id = p.id) as linked_barcodes
+         FROM parts p
+         WHERE p.active = 1
+         ORDER BY lower(p.code), p.name`
+      ).all();
+    } catch {
+      // Migration 042 not applied — still list part numbers for printing
+      rows = await c.env.DB.prepare(
+        `SELECT p.id, p.code, p.name, p.primary_vendor, NULL as linked_barcodes
+         FROM parts p
+         WHERE p.active = 1
+         ORDER BY lower(p.code), p.name`
+      ).all();
+    }
+    const parts = (rows.results || []).map((r) => ({
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      primary_vendor: r.primary_vendor,
+      barcodes: r.linked_barcodes
+        ? String(r.linked_barcodes)
+            .split(/\s*·\s*/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : ([] as string[]),
+    }));
+    return c.json({ parts, count: parts.length });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ error: msg }, 500);
+  }
+});
+
 /** Normalize scanned payload to a bare code string. */
 function normalizeScanCode(code: string): string {
   let raw = (code || "").trim();

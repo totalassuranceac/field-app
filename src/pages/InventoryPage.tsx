@@ -525,6 +525,194 @@ export function InventoryPage() {
     w.document.close();
   }
 
+  /**
+   * Printable binder list: part number on the left, scannable barcode on the right.
+   * Includes linked package UPCs when present. Opens print dialog.
+   */
+  async function printBarcodeDirectory() {
+    setError("");
+    setOk("");
+    try {
+      const d = await api<{
+        parts: Array<{
+          id: number;
+          code: string;
+          name: string;
+          primary_vendor?: string | null;
+          barcodes: string[];
+        }>;
+        count: number;
+      }>("/inventory/parts/barcode-directory");
+      const parts = d.parts || [];
+      if (!parts.length) {
+        setError("No active parts to print.");
+        return;
+      }
+      const printedBy = user?.display_name || user?.username || "Warehouse";
+      const when = new Date().toLocaleString();
+
+      const rows = parts
+        .map((p, i) => {
+          const code = (p.code || "").trim() || `PART-${p.id}`;
+          const linked = (p.barcodes || []).filter(
+            (b) => b && b.toLowerCase() !== code.toLowerCase()
+          );
+          const linkedHtml = linked.length
+            ? `<div class="linked">Also: ${linked
+                .map((b) => escapeHtml(b))
+                .join(" · ")}</div>
+               <div class="linked-bcs">${linked
+                 .map(
+                   (b, j) =>
+                     `<svg class="bc-linked" data-code="${escapeHtml(b)}" data-i="${i}-${j}"></svg>`
+                 )
+                 .join("")}</div>`
+            : "";
+          return `
+          <tr>
+            <td class="left">
+              <div class="pn">${escapeHtml(code)}</div>
+              <div class="pname">${escapeHtml(p.name || "")}</div>
+              ${
+                p.primary_vendor
+                  ? `<div class="vendor">${escapeHtml(p.primary_vendor)}</div>`
+                  : ""
+              }
+              ${linkedHtml}
+            </td>
+            <td class="right">
+              <svg class="bc-main" data-code="${escapeHtml(code)}" data-i="${i}"></svg>
+            </td>
+          </tr>`;
+        })
+        .join("");
+
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Part barcode directory</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, "Segoe UI", sans-serif;
+      margin: 0.4in;
+      color: #111;
+      font-size: 10px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      border-bottom: 2px solid #111;
+      padding-bottom: 0.4rem;
+      margin-bottom: 0.5rem;
+    }
+    h1 { margin: 0; font-size: 1.2rem; }
+    .sub { margin: 0.15rem 0 0; color: #333; font-size: 0.85rem; max-width: 28rem; }
+    .meta { text-align: right; font-size: 0.78rem; line-height: 1.4; color: #333; }
+    table { width: 100%; border-collapse: collapse; }
+    tr { page-break-inside: avoid; }
+    td {
+      border-bottom: 1px solid #ddd;
+      padding: 0.4rem 0.35rem;
+      vertical-align: middle;
+    }
+    .left { width: 48%; min-width: 0; }
+    .right { width: 52%; text-align: right; }
+    .pn {
+      font-weight: 800;
+      font-size: 0.95rem;
+      font-family: ui-monospace, Consolas, monospace;
+      letter-spacing: 0.02em;
+    }
+    .pname { color: #333; font-size: 0.78rem; margin-top: 0.12rem; line-height: 1.25; }
+    .vendor { color: #666; font-size: 0.7rem; margin-top: 0.1rem; }
+    .linked { color: #444; font-size: 0.68rem; margin-top: 0.25rem; font-family: ui-monospace, Consolas, monospace; }
+    .linked-bcs { margin-top: 0.2rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .bc-main { max-width: 100%; height: 42px; }
+    .bc-linked { height: 28px; max-width: 8rem; }
+    footer {
+      margin-top: 0.75rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid #999;
+      font-size: 0.75rem;
+      color: #444;
+    }
+    @media print {
+      body { margin: 0.35in; }
+      .bc-main, .bc-linked { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Part barcode directory</h1>
+      <p class="sub">
+        Part number on the left · scannable barcode on the right.
+        Keep in the warehouse folder when boxes are missing labels.
+      </p>
+    </div>
+    <div class="meta">
+      <div>${escapeHtml(when)}</div>
+      <div>Prepared: ${escapeHtml(printedBy)}</div>
+      <div>${parts.length} part${parts.length === 1 ? "" : "s"}</div>
+    </div>
+  </header>
+  <table>
+    <tbody>${rows}</tbody>
+  </table>
+  <footer>
+    Scan barcodes open the part in Field App (part # or linked UPC).
+    Link package barcodes from each part’s detail page.
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
+  <script>
+    function drawAll() {
+      if (typeof JsBarcode === "undefined") return;
+      document.querySelectorAll(".bc-main, .bc-linked").forEach(function (el) {
+        var code = el.getAttribute("data-code") || "";
+        if (!code) return;
+        try {
+          var linked = el.classList.contains("bc-linked");
+          JsBarcode(el, code, {
+            format: "CODE128",
+            width: linked ? 1 : 1.15,
+            height: linked ? 26 : 40,
+            displayValue: true,
+            fontSize: linked ? 9 : 11,
+            margin: 2,
+            textMargin: 1,
+            background: "#ffffff",
+            lineColor: "#000000"
+          });
+        } catch (e) { /* skip unencodable */ }
+      });
+    }
+    window.onload = function () {
+      drawAll();
+      window.focus();
+      setTimeout(function () { window.print(); }, 500);
+    };
+  <\/script>
+</body>
+</html>`;
+
+      const w = window.open("", "_blank");
+      if (!w) {
+        setError("Allow pop-ups to print the barcode directory.");
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+      setOk(`Barcode directory ready — ${parts.length} parts. Use the print dialog (or Ctrl+P).`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not build barcode list");
+    }
+  }
+
   function escapeHtml(s: string) {
     return String(s)
       .replace(/&/g, "&amp;")
@@ -2028,6 +2216,16 @@ export function InventoryPage() {
           {/* Home Depot style: list OR detail, not both cramped */}
           {!selectedPart ? (
             <div className="card no-print inv-browse-card">
+              <div className="inv-browse-toolbar">
+                <button
+                  type="button"
+                  className="btn secondary btn-sm"
+                  onClick={() => void printBarcodeDirectory()}
+                  title="Print all part numbers with barcodes for a warehouse folder"
+                >
+                  Print barcode folder list
+                </button>
+              </div>
               <div className="inv-search-bar">
                 {canManage ? (
                   <BarcodeScanButton
