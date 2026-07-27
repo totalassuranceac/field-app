@@ -44,6 +44,8 @@ interface Asset {
   category: string;
   subcategory?: string | null;
   serial_number?: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
   status: string;
   condition: string;
   condition_date?: string | null;
@@ -158,23 +160,48 @@ export function AssetsPage() {
   );
   const allLocs = useMemo(() => matrix, [matrix]);
 
-  /** Equipment grouped by location for collapsible list */
+  /**
+   * Equipment grouped for quick glance:
+   * - Checked out to a person → "With {name}"
+   * - Else truck / warehouse location
+   */
   const equipmentByLocation = useMemo(() => {
     const map = new Map<
       string,
-      { key: string; label: string; items: Asset[]; needs: number }
+      { key: string; label: string; sort: number; items: Asset[]; needs: number }
     >();
     for (const a of assets) {
-      const key =
-        a.location_id != null
-          ? `loc-${a.location_id}`
-          : a.unit_number
-            ? `unit-${a.unit_number}`
-            : a.location_name
-              ? `name-${a.location_name}`
-              : "unassigned";
-      const label = locLabel(a.unit_number, a.location_name);
-      const g = map.get(key) || { key, label, items: [], needs: 0 };
+      let key: string;
+      let label: string;
+      let sort: number;
+      if (a.issued_to_name) {
+        key = `person-${a.issued_to_name}`;
+        label = `With ${a.issued_to_name}`;
+        sort = 0;
+      } else if (a.unit_number) {
+        key = `unit-${a.unit_number}`;
+        label = locLabel(a.unit_number, a.location_name);
+        sort = 1;
+      } else if (a.location_id != null) {
+        key = `loc-${a.location_id}`;
+        label = locLabel(a.unit_number, a.location_name);
+        sort = a.location_name?.toLowerCase().includes("warehouse") ? 2 : 1;
+      } else if (a.location_name) {
+        key = `name-${a.location_name}`;
+        label = a.location_name;
+        sort = 2;
+      } else {
+        key = "unassigned";
+        label = "Available (unassigned)";
+        sort = 3;
+      }
+      // Sheet note for person not in app users
+      if (!a.issued_to_name && a.notes?.includes("Jonathan Willie")) {
+        key = "person-external-jonathan-willie";
+        label = "With Jonathan Willie (no app login)";
+        sort = 0;
+      }
+      const g = map.get(key) || { key, label, sort, items: [], needs: 0 };
       g.items.push(a);
       if (
         a.condition === "damaged" ||
@@ -187,7 +214,9 @@ export function AssetsPage() {
       }
       map.set(key, g);
     }
-    return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+    return [...map.values()].sort(
+      (a, b) => a.sort - b.sort || a.label.localeCompare(b.label)
+    );
   }, [assets]);
 
   const loadBottles = useCallback(async () => {
@@ -798,14 +827,14 @@ export function AssetsPage() {
 
           <div className="asset-equip-layout">
             <CollapsibleSection
-              title={isField ? "Your truck gear" : "By location"}
+              title={isField ? "Your truck gear" : "By person / location"}
               count={assets.length}
               hint={
                 isField
                   ? "Equipment on your unit"
-                  : "Tap to show trucks & warehouse"
+                  : "Checked out to people first, then trucks & warehouse"
               }
-              defaultOpen={isField || Boolean(selected) || needsOnly}
+              defaultOpen={isField || Boolean(selected) || needsOnly || assets.length > 0}
               className="bottle-tools-section"
             >
               <div className="asset-loc-list">
@@ -865,8 +894,13 @@ export function AssetsPage() {
                               <div className="muted" style={{ fontSize: "0.82rem" }}>
                                 {a.category}
                                 {a.subcategory ? ` · ${a.subcategory}` : ""}
+                                {a.issued_to_name
+                                  ? ` · ${a.issued_to_name}`
+                                  : a.notes?.includes("Jonathan Willie")
+                                    ? " · Jonathan Willie"
+                                    : ""}
                                 {a.issued_at
-                                  ? ` · issued ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
+                                  ? ` · since ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
                                   : ""}
                               </div>
                             </button>
@@ -902,6 +936,14 @@ export function AssetsPage() {
                     Category: <strong>{selected.category}</strong>
                     {selected.serial_number ? ` · SN ${selected.serial_number}` : ""}
                   </div>
+                  {(selected.manufacturer || selected.model) && (
+                    <div>
+                      Make/model:{" "}
+                      <strong>
+                        {[selected.manufacturer, selected.model].filter(Boolean).join(" · ")}
+                      </strong>
+                    </div>
+                  )}
                   <div>
                     Location:{" "}
                     <strong>{locLabel(selected.unit_number, selected.location_name)}</strong>
@@ -913,10 +955,23 @@ export function AssetsPage() {
                     </strong>
                     {selected.condition_date ? ` · as of ${selected.condition_date}` : ""}
                   </div>
-                  {selected.issued_at && (
+                  {(selected.issued_at || selected.issued_to_name) && (
                     <div>
-                      Issued: {String(selected.issued_at).replace("T", " ").slice(0, 16)}
-                      {selected.issued_to_name ? ` · ${selected.issued_to_name}` : ""}
+                      Checked out to:{" "}
+                      <strong>
+                        {selected.issued_to_name ||
+                          (selected.notes?.includes("Jonathan Willie")
+                            ? "Jonathan Willie (no app login)"
+                            : "—")}
+                      </strong>
+                      {selected.issued_at
+                        ? ` · since ${String(selected.issued_at).replace("T", " ").slice(0, 10)}`
+                        : ""}
+                    </div>
+                  )}
+                  {selected.notes && (
+                    <div className="muted" style={{ fontSize: "0.85rem" }}>
+                      {selected.notes}
                     </div>
                   )}
                   {selected.condition_notes && (

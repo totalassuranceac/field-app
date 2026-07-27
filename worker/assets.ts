@@ -615,6 +615,8 @@ export async function createAsset(
     .first<{ type: string }>();
   const isTruck = loc?.type === "vehicle";
 
+  // Set issued_at when going to a truck OR assigned to a person
+  const setIssuedAt = isTruck || !!issuedTo;
   const r = await db
     .prepare(
       `INSERT INTO company_assets (
@@ -622,7 +624,7 @@ export async function createAsset(
          status, location_id, condition, condition_date, condition_notes,
          issued_at, issued_to_user_id, notes, active
        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'in_service', ?, ?, date('now'), ?,
-         ${isTruck ? "datetime('now')" : "NULL"}, ?, ?, 1)`
+         ${setIssuedAt ? "datetime('now')" : "NULL"}, ?, ?, 1)`
     )
     .bind(
       tag,
