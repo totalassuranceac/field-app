@@ -99,6 +99,22 @@ function locLabel(unit: string | null | undefined, name: string | null | undefin
   return name || "—";
 }
 
+function todayLocal(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function isCheckedOut(a: Asset): boolean {
+  return !!(
+    a.issued_to_name ||
+    a.issued_at ||
+    a.notes?.includes("Jonathan Willie")
+  );
+}
+
 export function AssetsPage() {
   const { user } = useAuth();
   const canManage = can(user, "manageCompanyAssets");
@@ -139,10 +155,15 @@ export function AssetsPage() {
   const [detailEvents, setDetailEvents] = useState<AssetEvent[]>([]);
   const [condVal, setCondVal] = useState("good");
   const [condNotes, setCondNotes] = useState("");
-  const [issueLoc, setIssueLoc] = useState("");
-  const [issueCond, setIssueCond] = useState("good");
-  const [issueNotes, setIssueNotes] = useState("");
-  const [issueUser, setIssueUser] = useState("");
+  /** Simple transfer forms */
+  const [xferCond, setXferCond] = useState("good");
+  const [xferDate, setXferDate] = useState(todayLocal);
+  const [xferNotes, setXferNotes] = useState("");
+  const [xferUser, setXferUser] = useState("");
+  const [xferLoc, setXferLoc] = useState("");
+  const [xferMode, setXferMode] = useState<"return" | "checkout" | "transfer" | "condition">(
+    "return"
+  );
 
   // Add form
   const [newName, setNewName] = useState("");
@@ -262,17 +283,27 @@ export function AssetsPage() {
     if (canView) void loadAll();
   }, [canView, loadAll]);
 
-  async function openDetail(a: Asset) {
+  async function openDetail(
+    a: Asset,
+    preferMode?: "return" | "checkout" | "transfer" | "condition"
+  ) {
     setSelected(a);
     setCondVal(a.condition || "good");
     setCondNotes("");
-    setIssueLoc(String(a.location_id || ""));
-    setIssueCond(a.condition || "good");
-    setIssueNotes("");
+    setXferCond(a.condition || "good");
+    setXferDate(todayLocal());
+    setXferNotes("");
+    setXferUser("");
+    setXferLoc("");
+    const out = isCheckedOut(a);
+    setXferMode(preferMode || (out ? "return" : "checkout"));
     try {
       const d = await api<{ asset: Asset; events: AssetEvent[] }>(`/assets/${a.id}`);
-      setSelected(d.asset as Asset);
+      const asset = d.asset as Asset;
+      setSelected(asset);
       setDetailEvents(d.events || []);
+      setXferCond(asset.condition || "good");
+      if (!preferMode) setXferMode(isCheckedOut(asset) ? "return" : "checkout");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load detail");
     }
@@ -415,7 +446,7 @@ export function AssetsPage() {
       });
       setOk("Condition recorded.");
       setCondNotes("");
-      await openDetail(selected);
+      await openDetail(selected, "condition");
       await loadAssets();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -424,56 +455,142 @@ export function AssetsPage() {
     }
   }
 
-  async function doIssue() {
+  async function doReturn() {
     if (!selected || !canManage) return;
-    if (!issueLoc) {
-      setError("Select truck / location");
+    if (!xferCond) {
+      setError("Pick condition of the unit");
+      return;
+    }
+    const who =
+      selected.issued_to_name ||
+      (selected.notes?.includes("Jonathan Willie") ? "Jonathan Willie" : "field");
+    if (
+      !confirm(
+        `Return ${selected.asset_tag ? selected.asset_tag + " · " : ""}${selected.name} from ${who} to warehouse?\n\nCondition: ${xferCond.replace("_", " ")}\nDate: ${xferDate}`
+      )
+    ) {
       return;
     }
     setBusy(true);
     setError("");
+    setOk("");
     try {
-      await api(`/assets/${selected.id}/issue`, {
+      await api(`/assets/${selected.id}/return`, {
         method: "POST",
         body: JSON.stringify({
-          location_id: Number(issueLoc),
-          condition: issueCond,
-          notes: issueNotes || undefined,
-          issued_to_user_id: issueUser ? Number(issueUser) : undefined,
+          condition: xferCond,
+          returned_at: xferDate || todayLocal(),
+          notes:
+            xferNotes.trim() ||
+            `Returned from ${who} on ${xferDate || todayLocal()} · ${xferCond.replace("_", " ")}`,
         }),
       });
-      setOk("Issued to location.");
-      await openDetail(selected);
+      setOk(
+        `${selected.asset_tag || selected.name} returned to warehouse · ${xferCond.replace("_", " ")}`
+      );
+      setXferNotes("");
+      await openDetail(selected, "checkout");
       await loadAssets();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Issue failed");
+      setError(err instanceof Error ? err.message : "Return failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function doReturn() {
+  async function doCheckout() {
     if (!selected || !canManage) return;
-    if (!issueNotes.trim() && !issueCond) {
-      setError("Set condition when returning");
+    if (!xferUser && !xferLoc) {
+      setError("Pick who is taking it (and/or a truck)");
       return;
     }
-    if (!confirm(`Return ${selected.name} to warehouse in ${issueCond} condition?`)) return;
+    if (!xferCond) {
+      setError("Pick condition at checkout");
+      return;
+    }
+    const personName = peers.find((p) => String(p.id) === xferUser)?.display_name;
+    const locName = allLocs.find((l) => String(l.location_id) === xferLoc)?.location_name;
+    if (
+      !confirm(
+        `Check out ${selected.asset_tag ? selected.asset_tag + " · " : ""}${selected.name}?\n\nTo: ${personName || "—"}${locName ? ` · ${locName}` : ""}\nCondition: ${xferCond.replace("_", " ")}\nDate: ${xferDate}`
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError("");
+    setOk("");
     try {
-      await api(`/assets/${selected.id}/return`, {
+      await api(`/assets/${selected.id}/issue`, {
         method: "POST",
         body: JSON.stringify({
-          condition: issueCond,
-          notes: issueNotes || `Returned — condition ${issueCond}`,
+          location_id: xferLoc ? Number(xferLoc) : undefined,
+          issued_to_user_id: xferUser ? Number(xferUser) : undefined,
+          condition: xferCond,
+          issued_at: xferDate || todayLocal(),
+          notes:
+            xferNotes.trim() ||
+            `Checked out to ${personName || locName || "field"} on ${xferDate || todayLocal()} · ${xferCond.replace("_", " ")}`,
         }),
       });
-      setOk("Returned to warehouse.");
-      await openDetail(selected);
+      setOk(
+        `Checked out to ${personName || locName || "location"} · ${xferCond.replace("_", " ")}`
+      );
+      setXferNotes("");
+      await openDetail(selected, "return");
       await loadAssets();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Return failed");
+      setError(err instanceof Error ? err.message : "Checkout failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doTransferPerson() {
+    if (!selected || !canManage) return;
+    if (!xferUser) {
+      setError("Pick who receives the gear");
+      return;
+    }
+    if (!xferCond) {
+      setError("Pick condition at transfer");
+      return;
+    }
+    const personName = peers.find((p) => String(p.id) === xferUser)?.display_name;
+    const from =
+      selected.issued_to_name ||
+      (selected.notes?.includes("Jonathan Willie") ? "Jonathan Willie" : "previous holder");
+    if (
+      !confirm(
+        `Transfer ${selected.asset_tag ? selected.asset_tag + " · " : ""}${selected.name}?\n\n${from} → ${personName}\nCondition: ${xferCond.replace("_", " ")}\nDate: ${xferDate}`
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      // Re-issue to new person (same or warehouse location)
+      await api(`/assets/${selected.id}/issue`, {
+        method: "POST",
+        body: JSON.stringify({
+          location_id: selected.location_id || undefined,
+          issued_to_user_id: Number(xferUser),
+          condition: xferCond,
+          issued_at: xferDate || todayLocal(),
+          notes:
+            xferNotes.trim() ||
+            `Transferred ${from} → ${personName} on ${xferDate || todayLocal()} · ${xferCond.replace("_", " ")}`,
+        }),
+      });
+      setOk(`Transferred to ${personName}`);
+      setXferNotes("");
+      setXferUser("");
+      await openDetail(selected, "return");
+      await loadAssets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Transfer failed");
     } finally {
       setBusy(false);
     }
@@ -871,41 +988,70 @@ export function AssetsPage() {
                         </span>
                       </summary>
                       <ul className="asset-list asset-list-in-loc">
-                        {group.items.map((a) => (
-                          <li key={a.id}>
-                            <button
-                              type="button"
-                              className={`card asset-card cond-${conditionClass(a.condition)}${
-                                selected?.id === a.id ? " selected" : ""
-                              }`}
-                              onClick={() => void openDetail(a)}
-                            >
-                              <div className="asset-card-top">
-                                <strong>
-                                  {a.asset_tag ? `${a.asset_tag} · ` : ""}
-                                  {a.name}
-                                </strong>
-                                <span
-                                  className={`asset-cond-badge ${conditionClass(a.condition)}`}
-                                >
-                                  {a.condition.replace("_", " ")}
-                                </span>
-                              </div>
-                              <div className="muted" style={{ fontSize: "0.82rem" }}>
-                                {a.category}
-                                {a.subcategory ? ` · ${a.subcategory}` : ""}
-                                {a.issued_to_name
-                                  ? ` · ${a.issued_to_name}`
-                                  : a.notes?.includes("Jonathan Willie")
-                                    ? " · Jonathan Willie"
+                        {group.items.map((a) => {
+                          const out = isCheckedOut(a);
+                          return (
+                            <li key={a.id} className="asset-list-row">
+                              <button
+                                type="button"
+                                className={`card asset-card cond-${conditionClass(a.condition)}${
+                                  selected?.id === a.id ? " selected" : ""
+                                }`}
+                                onClick={() => void openDetail(a, out ? "return" : "checkout")}
+                              >
+                                <div className="asset-card-top">
+                                  <strong>
+                                    {a.asset_tag ? `${a.asset_tag} · ` : ""}
+                                    {a.name}
+                                  </strong>
+                                  <span
+                                    className={`asset-cond-badge ${conditionClass(a.condition)}`}
+                                  >
+                                    {a.condition.replace("_", " ")}
+                                  </span>
+                                </div>
+                                <div className="muted" style={{ fontSize: "0.82rem" }}>
+                                  {a.category}
+                                  {a.subcategory ? ` · ${a.subcategory}` : ""}
+                                  {a.issued_to_name
+                                    ? ` · ${a.issued_to_name}`
+                                    : a.notes?.includes("Jonathan Willie")
+                                      ? " · Jonathan Willie"
+                                      : ""}
+                                  {a.issued_at
+                                    ? ` · since ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
                                     : ""}
-                                {a.issued_at
-                                  ? ` · since ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
-                                  : ""}
-                              </div>
-                            </button>
-                          </li>
-                        ))}
+                                </div>
+                              </button>
+                              {canManage && out && (
+                                <button
+                                  type="button"
+                                  className="btn btn-sm asset-quick-return"
+                                  disabled={busy}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void openDetail(a, "return");
+                                  }}
+                                >
+                                  Return
+                                </button>
+                              )}
+                              {canManage && !out && (
+                                <button
+                                  type="button"
+                                  className="btn secondary btn-sm asset-quick-return"
+                                  disabled={busy}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void openDetail(a, "checkout");
+                                  }}
+                                >
+                                  Check out
+                                </button>
+                              )}
+                            </li>
+                          );
+                        })}
                       </ul>
                     </details>
                   ))
@@ -979,65 +1125,294 @@ export function AssetsPage() {
                   )}
                 </div>
 
-                <h4 className="inv-section-title">Update condition</h4>
-                <p className="muted" style={{ fontSize: "0.78rem", marginTop: 0 }}>
-                  Log condition on issue/return or when damaged — builds the abuse trail.
-                </p>
-                <label>
-                  Condition
-                  <select value={condVal} onChange={(e) => setCondVal(e.target.value)}>
-                    {CONDITIONS.map((c) => (
-                      <option key={c} value={c}>
-                        {c.replace("_", " ")}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Notes *
-                  <textarea
-                    value={condNotes}
-                    onChange={(e) => setCondNotes(e.target.value)}
-                    rows={2}
-                    placeholder="e.g. bent foot, missing pad, cracked rung…"
-                  />
-                </label>
-                <div className="inv-adjust-row" style={{ gap: "0.5rem" }}>
-                  <button
-                    type="button"
-                    className="btn secondary"
-                    disabled={busy}
-                    onClick={() => void doCondition(false)}
-                  >
-                    Save condition
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={busy}
-                    onClick={() => void doCondition(true)}
-                  >
-                    Report damage
-                  </button>
-                </div>
-
                 {canManage && (
+                  <div className="asset-xfer card-inset">
+                    <div className="asset-xfer-tabs" role="tablist">
+                      {isCheckedOut(selected) && (
+                        <button
+                          type="button"
+                          role="tab"
+                          className={`asset-xfer-tab${xferMode === "return" ? " active" : ""}`}
+                          onClick={() => setXferMode("return")}
+                        >
+                          Return
+                        </button>
+                      )}
+                      {isCheckedOut(selected) && (
+                        <button
+                          type="button"
+                          role="tab"
+                          className={`asset-xfer-tab${xferMode === "transfer" ? " active" : ""}`}
+                          onClick={() => setXferMode("transfer")}
+                        >
+                          Transfer
+                        </button>
+                      )}
+                      {!isCheckedOut(selected) && (
+                        <button
+                          type="button"
+                          role="tab"
+                          className={`asset-xfer-tab${xferMode === "checkout" ? " active" : ""}`}
+                          onClick={() => setXferMode("checkout")}
+                        >
+                          Check out
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        role="tab"
+                        className={`asset-xfer-tab${xferMode === "condition" ? " active" : ""}`}
+                        onClick={() => setXferMode("condition")}
+                      >
+                        Condition
+                      </button>
+                    </div>
+
+                    {xferMode === "return" && isCheckedOut(selected) && (
+                      <div className="asset-xfer-panel">
+                        <h4 className="asset-xfer-title">Return to warehouse</h4>
+                        <p className="muted asset-xfer-hint">
+                          From{" "}
+                          <strong>
+                            {selected.issued_to_name ||
+                              (selected.notes?.includes("Jonathan Willie")
+                                ? "Jonathan Willie"
+                                : "field")}
+                          </strong>
+                          . Set condition and date — gear goes back available.
+                        </p>
+                        <label>
+                          Condition of unit *
+                          <select
+                            value={xferCond}
+                            onChange={(e) => setXferCond(e.target.value)}
+                          >
+                            {CONDITIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c.replace("_", " ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Return date *
+                          <input
+                            type="date"
+                            value={xferDate}
+                            onChange={(e) => setXferDate(e.target.value)}
+                            required
+                          />
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={xferNotes}
+                            onChange={(e) => setXferNotes(e.target.value)}
+                            placeholder="scratches, works fine, missing case…"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn asset-xfer-primary"
+                          disabled={busy}
+                          onClick={() => void doReturn()}
+                        >
+                          {busy ? "Saving…" : "Mark returned → warehouse"}
+                        </button>
+                      </div>
+                    )}
+
+                    {xferMode === "checkout" && !isCheckedOut(selected) && (
+                      <div className="asset-xfer-panel">
+                        <h4 className="asset-xfer-title">Check out</h4>
+                        <p className="muted asset-xfer-hint">
+                          Who is taking this? Optional truck if it rides on a unit.
+                        </p>
+                        <label>
+                          Person *
+                          <select
+                            value={xferUser}
+                            onChange={(e) => setXferUser(e.target.value)}
+                          >
+                            <option value="">Select employee…</option>
+                            {peers.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.display_name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Truck / location (optional)
+                          <select
+                            value={xferLoc}
+                            onChange={(e) => setXferLoc(e.target.value)}
+                          >
+                            <option value="">Warehouse / with person</option>
+                            {allLocs.map((l) => (
+                              <option key={l.location_id} value={l.location_id}>
+                                {l.location_name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Condition at checkout *
+                          <select
+                            value={xferCond}
+                            onChange={(e) => setXferCond(e.target.value)}
+                          >
+                            {CONDITIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c.replace("_", " ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Checkout date *
+                          <input
+                            type="date"
+                            value={xferDate}
+                            onChange={(e) => setXferDate(e.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={xferNotes}
+                            onChange={(e) => setXferNotes(e.target.value)}
+                            placeholder="job, truck, special notes…"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn asset-xfer-primary"
+                          disabled={busy}
+                          onClick={() => void doCheckout()}
+                        >
+                          {busy ? "Saving…" : "Check out to person"}
+                        </button>
+                      </div>
+                    )}
+
+                    {xferMode === "transfer" && isCheckedOut(selected) && (
+                      <div className="asset-xfer-panel">
+                        <h4 className="asset-xfer-title">Transfer to another person</h4>
+                        <p className="muted asset-xfer-hint">
+                          Hand off without a warehouse stop. Records who had it and who gets it.
+                        </p>
+                        <label>
+                          New person *
+                          <select
+                            value={xferUser}
+                            onChange={(e) => setXferUser(e.target.value)}
+                          >
+                            <option value="">Select employee…</option>
+                            {peers.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.display_name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Condition at handoff *
+                          <select
+                            value={xferCond}
+                            onChange={(e) => setXferCond(e.target.value)}
+                          >
+                            {CONDITIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c.replace("_", " ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Transfer date *
+                          <input
+                            type="date"
+                            value={xferDate}
+                            onChange={(e) => setXferDate(e.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={xferNotes}
+                            onChange={(e) => setXferNotes(e.target.value)}
+                            placeholder="reason, job, etc."
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn asset-xfer-primary"
+                          disabled={busy}
+                          onClick={() => void doTransferPerson()}
+                        >
+                          {busy ? "Saving…" : "Transfer custody"}
+                        </button>
+                      </div>
+                    )}
+
+                    {xferMode === "condition" && (
+                      <div className="asset-xfer-panel">
+                        <h4 className="asset-xfer-title">Update condition only</h4>
+                        <p className="muted asset-xfer-hint">
+                          Log damage or wear without moving the unit. Builds the abuse trail.
+                        </p>
+                        <label>
+                          Condition
+                          <select value={condVal} onChange={(e) => setCondVal(e.target.value)}>
+                            {CONDITIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c.replace("_", " ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Notes *
+                          <textarea
+                            value={condNotes}
+                            onChange={(e) => setCondNotes(e.target.value)}
+                            rows={2}
+                            placeholder="e.g. bent foot, missing pad, cracked lens…"
+                          />
+                        </label>
+                        <div className="inv-adjust-row" style={{ gap: "0.5rem" }}>
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={() => void doCondition(false)}
+                          >
+                            Save condition
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={busy}
+                            onClick={() => void doCondition(true)}
+                          >
+                            Report damage
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!canManage && (
                   <>
-                    <h4 className="inv-section-title">Issue / return</h4>
+                    <h4 className="inv-section-title">Update condition</h4>
+                    <p className="muted" style={{ fontSize: "0.78rem", marginTop: 0 }}>
+                      Report damage when something is wrong on your truck.
+                    </p>
                     <label>
-                      Location (truck or warehouse)
-                      <select value={issueLoc} onChange={(e) => setIssueLoc(e.target.value)}>
-                        <option value="">Select…</option>
-                        {allLocs.map((l) => (
-                          <option key={l.location_id} value={l.location_id}>
-                            {l.location_name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Condition at issue/return
-                      <select value={issueCond} onChange={(e) => setIssueCond(e.target.value)}>
+                      Condition
+                      <select value={condVal} onChange={(e) => setCondVal(e.target.value)}>
                         {CONDITIONS.map((c) => (
                           <option key={c} value={c}>
                             {c.replace("_", " ")}
@@ -1046,40 +1421,30 @@ export function AssetsPage() {
                       </select>
                     </label>
                     <label>
-                      Issued to (person)
-                      <select value={issueUser} onChange={(e) => setIssueUser(e.target.value)}>
-                        <option value="">Optional…</option>
-                        {peers.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.display_name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Notes
-                      <input
-                        value={issueNotes}
-                        onChange={(e) => setIssueNotes(e.target.value)}
-                        placeholder="condition notes on issue/return"
+                      Notes *
+                      <textarea
+                        value={condNotes}
+                        onChange={(e) => setCondNotes(e.target.value)}
+                        rows={2}
+                        placeholder="e.g. bent foot, missing pad, cracked rung…"
                       />
                     </label>
                     <div className="inv-adjust-row" style={{ gap: "0.5rem" }}>
                       <button
                         type="button"
-                        className="btn"
+                        className="btn secondary"
                         disabled={busy}
-                        onClick={() => void doIssue()}
+                        onClick={() => void doCondition(false)}
                       >
-                        Issue to location
+                        Save condition
                       </button>
                       <button
                         type="button"
-                        className="btn secondary"
+                        className="btn"
                         disabled={busy}
-                        onClick={() => void doReturn()}
+                        onClick={() => void doCondition(true)}
                       >
-                        Return to warehouse
+                        Report damage
                       </button>
                     </div>
                   </>

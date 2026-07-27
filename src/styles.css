@@ -5470,6 +5470,83 @@ tr.row-low td {
   font-size: 0.85rem;
 }
 
+.asset-list-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+
+.asset-list-row .asset-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.asset-quick-return {
+  flex: 0 0 auto;
+  align-self: center;
+  white-space: nowrap;
+  min-height: 2.5rem;
+  font-weight: 750;
+}
+
+.asset-xfer {
+  margin: 0.75rem 0 0.5rem;
+  padding: 0.65rem 0.75rem 0.85rem;
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, #f59e0b 6%, var(--surface));
+}
+
+.asset-xfer-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.65rem;
+}
+
+.asset-xfer-tab {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.asset-xfer-tab.active {
+  background: color-mix(in srgb, #f59e0b 22%, var(--surface));
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--line));
+  color: inherit;
+}
+
+.asset-xfer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.asset-xfer-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.asset-xfer-hint {
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.asset-xfer-primary {
+  margin-top: 0.35rem;
+  min-height: 2.85rem;
+  font-weight: 800;
+  width: 100%;
+}
+
 /* Offline / pending sync banner */
 .offline-banner {
   display: flex;

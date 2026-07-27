@@ -734,16 +734,27 @@ async function logAssetEvent(
     .run();
 }
 
+function normalizeDateOnly(raw?: string | null): string | null {
+  if (!raw?.trim()) return null;
+  const s = raw.trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error("Date must be YYYY-MM-DD");
+  return s;
+}
+
 export async function issueAsset(
   db: D1Database,
   userId: number,
   assetId: number,
-  toLocationId: number,
+  toLocationId: number | null | undefined,
   condition: AssetCondition,
   notes?: string | null,
-  toUserId?: number | null
+  toUserId?: number | null,
+  issuedAt?: string | null
 ): Promise<void> {
   if (!isValidCondition(condition)) throw new Error("Invalid condition");
+  if (!toUserId && !toLocationId) {
+    throw new Error("Pick a person and/or truck to check out to");
+  }
   const asset = await db
     .prepare(`SELECT * FROM company_assets WHERE id = ? AND active = 1`)
     .bind(assetId)
@@ -756,47 +767,57 @@ export async function issueAsset(
     }>();
   if (!asset) throw new Error("Asset not found");
 
+  const warehouseId = await getWarehouseLocationId(db);
+  const destId = toLocationId || warehouseId;
   const loc = await db
     .prepare(
       `SELECT id, type FROM stock_locations WHERE id = ? AND active = 1`
     )
-    .bind(toLocationId)
+    .bind(destId)
     .first<{ id: number; type: string }>();
   if (!loc) throw new Error("Location not found");
+
+  const day = normalizeDateOnly(issuedAt);
+  const issuedTs = day ? `${day} 12:00:00` : null;
 
   await db
     .prepare(
       `UPDATE company_assets SET
          location_id = ?,
          condition = ?,
-         condition_date = date('now'),
+         condition_date = COALESCE(?, date('now')),
          condition_notes = ?,
-         issued_at = datetime('now'),
+         issued_at = COALESCE(?, datetime('now')),
          issued_to_user_id = ?,
          status = 'in_service',
          updated_at = datetime('now')
        WHERE id = ?`
     )
     .bind(
-      toLocationId,
+      destId,
       condition,
+      day,
       notes?.trim() || null,
+      issuedTs,
       toUserId || null,
       assetId
     )
     .run();
 
+  const who = toUserId ? `user #${toUserId}` : loc.type === "vehicle" ? "truck" : "location";
   await logAssetEvent(db, {
     asset_id: assetId,
     event_type: "issue",
     user_id: userId,
     from_location_id: asset.location_id,
-    to_location_id: toLocationId,
+    to_location_id: destId,
     from_user_id: asset.issued_to_user_id,
     to_user_id: toUserId || null,
     condition_before: asset.condition,
     condition_after: condition,
-    notes: notes || `Issued ${asset.name}`,
+    notes:
+      notes?.trim() ||
+      `Checked out ${asset.name} (${who})${day ? ` on ${day}` : ""} · ${condition}`,
   });
 }
 
@@ -805,7 +826,8 @@ export async function returnAsset(
   userId: number,
   assetId: number,
   condition: AssetCondition,
-  notes?: string | null
+  notes?: string | null,
+  returnedAt?: string | null
 ): Promise<void> {
   if (!isValidCondition(condition)) throw new Error("Invalid condition");
   const asset = await db
@@ -820,20 +842,21 @@ export async function returnAsset(
     }>();
   if (!asset) throw new Error("Asset not found");
   const warehouseId = await getWarehouseLocationId(db);
+  const day = normalizeDateOnly(returnedAt);
 
   await db
     .prepare(
       `UPDATE company_assets SET
          location_id = ?,
          condition = ?,
-         condition_date = date('now'),
+         condition_date = COALESCE(?, date('now')),
          condition_notes = ?,
          issued_at = NULL,
          issued_to_user_id = NULL,
          updated_at = datetime('now')
        WHERE id = ?`
     )
-    .bind(warehouseId, condition, notes?.trim() || null, assetId)
+    .bind(warehouseId, condition, day, notes?.trim() || null, assetId)
     .run();
 
   await logAssetEvent(db, {
@@ -845,7 +868,9 @@ export async function returnAsset(
     from_user_id: asset.issued_to_user_id,
     condition_before: asset.condition,
     condition_after: condition,
-    notes: notes || `Returned ${asset.name} to warehouse`,
+    notes:
+      notes?.trim() ||
+      `Returned ${asset.name} to warehouse${day ? ` on ${day}` : ""} · ${condition}`,
   });
 }
 

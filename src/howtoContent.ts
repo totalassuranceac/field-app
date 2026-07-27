@@ -372,15 +372,16 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "wh-bottles",
     title: "Bottles and company equipment",
-    summary: "Issue, return, and swap tanks, ladders, and tagged gear.",
+    summary: "Check out, return, and swap tanks, ladders, and tagged gear.",
     roles: ["warehouse", "admin", "office"],
     path: "/assets",
     steps: [
       "Open Bottles & gear / Company assets (Warehouse menu).",
       "Bottle totals sit at the top; Warehouse swap and Set counts are collapsible tools.",
-      "Tap By location to expand trucks/warehouse and see full/empty counts (collapsed by default).",
-      "Equipment tab groups gear by location — expand a truck to see ladders, dollies, etc.",
-      "Issue, return, swap bottles, and update condition so the abuse trail is accurate.",
+      "Equipment groups by person first (With Adam…), then warehouse available gear.",
+      "To return: open the person → tap the item or Return → set condition + date → Mark returned → warehouse.",
+      "To check out: open available gear → pick person (and optional truck) + condition + date → Check out.",
+      "Transfer hands gear person-to-person without a warehouse stop; Condition logs damage only.",
     ],
   },
   {

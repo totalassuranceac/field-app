@@ -8993,36 +8993,44 @@ api.post("/assets/:id/issue", requireRoles(ROLE_PERMS.manageCompanyAssets), asyn
   const user = c.get("user");
   const id = Number(c.req.param("id"));
   const body = await c.req.json<{
-    location_id: number;
+    location_id?: number | null;
     condition: string;
     notes?: string;
-    issued_to_user_id?: number;
+    issued_to_user_id?: number | null;
+    issued_at?: string | null;
   }>();
-  if (!body.location_id) return c.json({ error: "location_id required" }, 400);
   if (!body.condition || !isValidCondition(body.condition)) {
-    return c.json({ error: "Valid condition required on issue" }, 400);
+    return c.json({ error: "Valid condition required on checkout" }, 400);
+  }
+  if (!body.location_id && !body.issued_to_user_id) {
+    return c.json({ error: "Pick a person and/or truck to check out to" }, 400);
   }
   try {
     await issueAsset(
       c.env.DB,
       user.id,
       id,
-      Number(body.location_id),
+      body.location_id ? Number(body.location_id) : null,
       body.condition as AssetCondition,
       body.notes,
-      body.issued_to_user_id || null
+      body.issued_to_user_id ? Number(body.issued_to_user_id) : null,
+      body.issued_at || null
     );
-    await writeAudit(c.env.DB, user, "update", "company_asset", id, "Issued asset to location");
+    await writeAudit(c.env.DB, user, "update", "company_asset", id, "Checked out asset");
     return c.json({ ok: true });
   } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Issue failed" }, 400);
+    return c.json({ error: e instanceof Error ? e.message : "Checkout failed" }, 400);
   }
 });
 
 api.post("/assets/:id/return", requireRoles(ROLE_PERMS.manageCompanyAssets), async (c) => {
   const user = c.get("user");
   const id = Number(c.req.param("id"));
-  const body = await c.req.json<{ condition: string; notes?: string }>();
+  const body = await c.req.json<{
+    condition: string;
+    notes?: string;
+    returned_at?: string | null;
+  }>();
   if (!body.condition || !isValidCondition(body.condition)) {
     return c.json({ error: "Valid condition required on return" }, 400);
   }
@@ -9032,7 +9040,8 @@ api.post("/assets/:id/return", requireRoles(ROLE_PERMS.manageCompanyAssets), asy
       user.id,
       id,
       body.condition as AssetCondition,
-      body.notes
+      body.notes,
+      body.returned_at || null
     );
     await writeAudit(c.env.DB, user, "update", "company_asset", id, "Returned asset to warehouse");
     return c.json({ ok: true });
