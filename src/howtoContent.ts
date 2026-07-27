@@ -608,10 +608,24 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Check Vendor will-call / runs first — that shows who we ordered from for that job.",
       "Warranties at this address show vendor if it was filled in at drop-off.",
       "Catalog vendor shows the usual supplier for matching part numbers.",
+      "Or open Pickup log and search the part # to see completed issues and catalog vendor.",
     ],
     tips: [
       "Works best when vendor runs and warranties include the job address.",
       "Use a short street fragment if the full address doesn’t match (e.g. Allencrest).",
+    ],
+  },
+  {
+    id: "inv-pickup-log-search",
+    title: "Search the completed pickup log",
+    summary: "After parts go on a truck, find them later by part # or vendor when processing warranties.",
+    roles: ["warehouse", "admin", "office"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → Pickup → Pickup log.",
+      "Type part number, catalog vendor, tech name, truck unit, or job notes.",
+      "Open a match to see all lines and which truck they went on.",
+      "Use catalog vendor next to each line when the package doesn’t say who sold it.",
     ],
   },
   {

@@ -7203,7 +7203,9 @@ async function nextPickupNumber(db: D1Database): Promise<string> {
 
 api.get("/inventory/pickups", async (c) => {
   const status = (c.req.query("status") || "open").trim();
+  const q = (c.req.query("q") || "").trim().toLowerCase();
   try {
+    const binds: unknown[] = [];
     let sql = `SELECT p.*,
         ru.display_name as requested_by_name,
         fu.display_name as for_user_name,
@@ -7219,30 +7221,77 @@ api.get("/inventory/pickups", async (c) => {
        LEFT JOIN users ho ON ho.id = p.handed_over_by_user_id
        LEFT JOIN stock_locations l ON l.id = p.destination_location_id
        LEFT JOIN vehicles v ON v.id = l.vehicle_id`;
+    const where: string[] = [];
+
+    // history / log = completed transfers only (for warranty vendor search)
     if (status === "open") {
-      sql += ` WHERE p.status IN ('open','ready')`;
+      where.push(`p.status IN ('open','ready')`);
+    } else if (status === "history" || status === "log" || status === "picked_up") {
+      where.push(`p.status = 'picked_up'`);
     } else if (status && status !== "all") {
-      sql += ` WHERE p.status = ?`;
+      where.push(`p.status = ?`);
+      binds.push(status);
     }
-    sql += ` ORDER BY p.created_at DESC LIMIT 100`;
-    const rows =
-      status === "open" || status === "all" || !status
-        ? await c.env.DB.prepare(sql).all()
-        : await c.env.DB.prepare(sql).bind(status).all();
+
+    if (q) {
+      // Match request #, notes, people, truck, or any part line code/name/vendor
+      where.push(`(
+        lower(p.request_number) LIKE ? OR
+        lower(COALESCE(p.notes,'')) LIKE ? OR
+        lower(COALESCE(ru.display_name,'')) LIKE ? OR
+        lower(COALESCE(fu.display_name,'')) LIKE ? OR
+        lower(COALESCE(hu.display_name,'')) LIKE ? OR
+        lower(COALESCE(l.name,'')) LIKE ? OR
+        lower(COALESCE(v.unit_number,'')) LIKE ? OR
+        EXISTS (
+          SELECT 1 FROM part_pickup_lines pl
+          JOIN parts pt ON pt.id = pl.part_id
+          WHERE pl.pickup_id = p.id AND (
+            lower(pt.code) LIKE ? OR lower(pt.name) LIKE ? OR
+            lower(COALESCE(pt.primary_vendor,'')) LIKE ?
+          )
+        )
+      )`);
+      const like = `%${q}%`;
+      binds.push(like, like, like, like, like, like, like, like, like, like);
+    }
+
+    if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
+    // History: newest completed first; open: oldest first-ish then created
+    if (status === "history" || status === "log" || status === "picked_up") {
+      sql += ` ORDER BY COALESCE(p.picked_up_at, p.created_at) DESC LIMIT 200`;
+    } else {
+      sql += ` ORDER BY p.created_at DESC LIMIT 100`;
+    }
+
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
     const pickups = [];
     for (const p of rows.results || []) {
-      const lines = await c.env.DB.prepare(
-        `SELECT pl.*, pt.code, pt.name, pt.image_url
-         FROM part_pickup_lines pl
-         JOIN parts pt ON pt.id = pl.part_id
-         WHERE pl.pickup_id = ?
-         ORDER BY pl.id`
-      )
-        .bind((p as { id: number }).id)
-        .all();
+      let lines: { results?: unknown[] };
+      try {
+        lines = await c.env.DB.prepare(
+          `SELECT pl.*, pt.code, pt.name, pt.image_url, pt.primary_vendor
+           FROM part_pickup_lines pl
+           JOIN parts pt ON pt.id = pl.part_id
+           WHERE pl.pickup_id = ?
+           ORDER BY pl.id`
+        )
+          .bind((p as { id: number }).id)
+          .all();
+      } catch {
+        lines = await c.env.DB.prepare(
+          `SELECT pl.*, pt.code, pt.name, pt.image_url
+           FROM part_pickup_lines pl
+           JOIN parts pt ON pt.id = pl.part_id
+           WHERE pl.pickup_id = ?
+           ORDER BY pl.id`
+        )
+          .bind((p as { id: number }).id)
+          .all();
+      }
       pickups.push({ ...p, lines: lines.results || [] });
     }
-    return c.json({ pickups });
+    return c.json({ pickups, query: q || null, status });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) return c.json({ pickups: [] });
@@ -7296,7 +7345,8 @@ api.get("/inventory/purchase-log", requireRoles(ROLE_PERMS.viewInventory), async
     vendor_runs: unknown[];
     receipts: unknown[];
     catalog_hints: unknown[];
-  } = { warranties: [], vendor_runs: [], receipts: [], catalog_hints: [] };
+    pickups: unknown[];
+  } = { warranties: [], vendor_runs: [], receipts: [], catalog_hints: [], pickups: [] };
 
   try {
     const w = likeAll([
@@ -7364,6 +7414,58 @@ api.get("/inventory/purchase-log", requireRoles(ROLE_PERMS.viewInventory), async
     /* optional */
   }
 
+  // Completed pickup / issue log (parts transferred to trucks)
+  try {
+    const like = `%${q.toLowerCase()}%`;
+    const rows = await c.env.DB.prepare(
+      `SELECT p.id, p.request_number, p.status, p.notes, p.picked_up_at, p.created_at,
+              fu.display_name as for_user_name,
+              hu.display_name as handed_to_name,
+              l.name as dest_name, v.unit_number as dest_unit
+       FROM part_pickups p
+       LEFT JOIN users fu ON fu.id = p.for_user_id
+       LEFT JOIN users hu ON hu.id = p.handed_to_user_id
+       LEFT JOIN stock_locations l ON l.id = p.destination_location_id
+       LEFT JOIN vehicles v ON v.id = l.vehicle_id
+       WHERE p.status = 'picked_up' AND (
+         lower(p.request_number) LIKE ? OR
+         lower(COALESCE(p.notes,'')) LIKE ? OR
+         lower(COALESCE(fu.display_name,'')) LIKE ? OR
+         lower(COALESCE(hu.display_name,'')) LIKE ? OR
+         lower(COALESCE(l.name,'')) LIKE ? OR
+         lower(COALESCE(v.unit_number,'')) LIKE ? OR
+         EXISTS (
+           SELECT 1 FROM part_pickup_lines pl
+           JOIN parts pt ON pt.id = pl.part_id
+           WHERE pl.pickup_id = p.id AND (
+             lower(pt.code) LIKE ? OR lower(pt.name) LIKE ? OR
+             lower(COALESCE(pt.primary_vendor,'')) LIKE ?
+           )
+         )
+       )
+       ORDER BY COALESCE(p.picked_up_at, p.created_at) DESC
+       LIMIT 30`
+    )
+      .bind(like, like, like, like, like, like, like, like, like)
+      .all();
+    const pickupsOut = [];
+    for (const p of rows.results || []) {
+      const lines = await c.env.DB.prepare(
+        `SELECT pl.qty, pt.code, pt.name, pt.primary_vendor
+         FROM part_pickup_lines pl
+         JOIN parts pt ON pt.id = pl.part_id
+         WHERE pl.pickup_id = ?
+         ORDER BY pl.id`
+      )
+        .bind((p as { id: number }).id)
+        .all();
+      pickupsOut.push({ ...p, lines: lines.results || [] });
+    }
+    (results as { pickups?: unknown[] }).pickups = pickupsOut;
+  } catch {
+    (results as { pickups?: unknown[] }).pickups = [];
+  }
+
   // Catalog: if query looks like a part code, show primary vendor
   try {
     const codeLike = `%${tokens.join("%")}%`;
@@ -7424,7 +7526,8 @@ api.get("/inventory/purchase-log", requireRoles(ROLE_PERMS.viewInventory), async
     results.warranties.length +
     results.vendor_runs.length +
     results.receipts.length +
-    results.catalog_hints.length;
+    results.catalog_hints.length +
+    results.pickups.length;
 
   return c.json({
     query: q,

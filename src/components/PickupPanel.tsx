@@ -55,6 +55,7 @@ interface Pickup {
     qty: number;
     code: string;
     name: string;
+    primary_vendor?: string | null;
   }>;
 }
 
@@ -76,7 +77,9 @@ export function PickupPanel({
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
-  const [filter, setFilter] = useState<"open" | "all">("open");
+  const [filter, setFilter] = useState<"open" | "history" | "all">("open");
+  /** Search completed pickup log (part #, tech, notes, vendor) */
+  const [logSearch, setLogSearch] = useState("");
   /** Tech these parts are for (warehouse issue) */
   const [forTech, setForTech] = useState("");
   /** Per pickup: warehouse “handed to” choice */
@@ -132,20 +135,45 @@ export function PickupPanel({
       primary_vendor?: string | null;
       cost?: number | null;
     }>;
+    pickups?: Array<{
+      id: number;
+      request_number: string;
+      notes?: string | null;
+      for_user_name?: string | null;
+      handed_to_name?: string | null;
+      dest_unit?: string | null;
+      dest_name?: string | null;
+      picked_up_at?: string | null;
+      lines?: Array<{
+        qty: number;
+        code: string;
+        name: string;
+        primary_vendor?: string | null;
+      }>;
+    }>;
   } | null>(null);
 
   const load = useCallback(async () => {
+    const params = new URLSearchParams();
+    params.set("status", filter === "history" ? "history" : filter);
+    if (filter === "history" && logSearch.trim()) {
+      params.set("q", logSearch.trim());
+    }
     const [p, u] = await Promise.all([
-      api<{ pickups: Pickup[] }>(`/inventory/pickups?status=${filter}`),
+      api<{ pickups: Pickup[] }>(`/inventory/pickups?${params}`),
       api<{ users: Peer[] }>("/messages/users").catch(() => ({ users: [] as Peer[] })),
     ]);
     setPickups(p.pickups || []);
     setPeers(u.users || []);
-  }, [filter]);
+  }, [filter, logSearch]);
 
   useEffect(() => {
-    load().catch((e) => setError(e.message));
-  }, [load]);
+    const delay = filter === "history" && logSearch.trim() ? 220 : 0;
+    const t = window.setTimeout(() => {
+      load().catch((e) => setError(e.message));
+    }, delay);
+    return () => window.clearTimeout(t);
+  }, [load, filter, logSearch]);
 
   useEffect(() => {
     scanRef.current?.focus();
@@ -612,6 +640,40 @@ export function PickupPanel({
                   </ul>
                 </div>
               )}
+              {(addrLog.pickups?.length || 0) > 0 && (
+                <div className="pickup-addr-section">
+                  <h4>Completed issue / pickup log</h4>
+                  <ul className="pickup-addr-list">
+                    {addrLog.pickups!.map((p) => (
+                      <li key={`pk-${p.id}`}>
+                        <strong className="warranty-log">{p.request_number}</strong>
+                        <span>
+                          {(p.lines || [])
+                            .map(
+                              (l) =>
+                                `${l.qty}× ${l.code}${
+                                  l.primary_vendor ? ` (${l.primary_vendor})` : ""
+                                }`
+                            )
+                            .join(" · ") || "parts"}
+                        </span>
+                        <span className="muted">
+                          {p.handed_to_name || p.for_user_name || "—"}
+                          {p.dest_unit
+                            ? ` · Unit ${p.dest_unit}`
+                            : p.dest_name
+                              ? ` · ${p.dest_name}`
+                              : ""}
+                          {p.picked_up_at
+                            ? ` · ${String(p.picked_up_at).replace("T", " ").slice(0, 16)}`
+                            : ""}
+                          {p.notes ? ` · ${p.notes}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -780,14 +842,48 @@ export function PickupPanel({
         </button>
         <button
           type="button"
+          className={`inv-tab${filter === "history" ? " active" : ""}`}
+          onClick={() => setFilter("history")}
+        >
+          Pickup log
+        </button>
+        <button
+          type="button"
           className={`inv-tab${filter === "all" ? " active" : ""}`}
           onClick={() => setFilter("all")}
         >
           All
         </button>
+        {filter === "history" && (
+          <input
+            className="warranty-search"
+            type="search"
+            value={logSearch}
+            onChange={(e) => setLogSearch(e.target.value)}
+            placeholder="Search part #, vendor, tech, notes…"
+            title="Search completed pickups"
+            aria-label="Search pickup log"
+          />
+        )}
       </div>
 
-      <LogList className="pickup-list" empty="No open pickups.">
+      {filter === "history" && (
+        <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.5rem" }}>
+          Completed transfers only — search by <strong>part #</strong>, catalog{" "}
+          <strong>vendor</strong>, tech name, truck, or job notes when processing a warranty.
+        </p>
+      )}
+
+      <LogList
+        className="pickup-list"
+        empty={
+          filter === "history"
+            ? logSearch.trim()
+              ? "No completed pickups match that search."
+              : "No completed pickups yet — finished issues appear here."
+            : "No open pickups."
+        }
+      >
         {pickups.map((p) => {
           const receiverMode = p.status === "ready";
           const done = p.status === "picked_up";
@@ -854,9 +950,17 @@ export function PickupPanel({
                 {(p.lines || []).map((l) => (
                   <li key={l.id}>
                     {l.qty}× {l.code} — {l.name}
+                    {l.primary_vendor ? (
+                      <span className="muted"> · vendor {l.primary_vendor}</span>
+                    ) : null}
                   </li>
                 ))}
               </ul>
+              {done && p.notes ? (
+                <div className="muted" style={{ fontSize: "0.82rem", marginTop: "0.25rem" }}>
+                  Notes: {p.notes}
+                </div>
+              ) : null}
 
               {done ? (
                 <div className="pickup-custody-done">
