@@ -368,10 +368,9 @@ export function WarrantiesPage() {
       <form className="card warranty-form" onSubmit={submitDropoff}>
         <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Log warranty part drop-off</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-          <strong>Model # and serial # of the unit</strong> the part came off are required. Photo the
-          nameplate when you can — the app tries to fill them in. Then{" "}
-          <strong>photo the shelf/bin</strong> where you leave the part. You get a{" "}
-          <strong>log number to write on the box</strong>.
+          Model # and serial # of the unit are required. Use the small{" "}
+          <strong>📷 Photo</strong> next to them for the nameplate (optional — auto-fills). Location
+          photo is required before drop-off.
         </p>
         <div className="warranty-form-grid">
           <label>
@@ -387,26 +386,53 @@ export function WarrantiesPage() {
             Part code
             <input value={partCode} onChange={(e) => setPartCode(e.target.value)} placeholder="SKU" />
           </label>
-          <label>
-            Unit model # *
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              required
-              placeholder="From unit nameplate"
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            Unit serial # *
-            <input
-              value={serial}
-              onChange={(e) => setSerial(e.target.value)}
-              required
-              placeholder="From unit nameplate"
-              autoComplete="off"
-            />
-          </label>
+
+          <div className="span-2 warranty-model-serial-block">
+            <div className="warranty-ms-fields">
+              <label>
+                Unit model # *
+                <input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  required
+                  placeholder="From unit nameplate"
+                  autoComplete="off"
+                />
+              </label>
+              <label>
+                Unit serial # *
+                <input
+                  value={serial}
+                  onChange={(e) => setSerial(e.target.value)}
+                  required
+                  placeholder="From unit nameplate"
+                  autoComplete="off"
+                />
+              </label>
+            </div>
+            <div className="warranty-ms-upload">
+              <span className="warranty-ms-upload-label muted">Nameplate (optional)</span>
+              <PhotoCapture
+                compact
+                label="Nameplate"
+                hint={
+                  nameplateScanning
+                    ? "Reading…"
+                    : "Photo data plate to auto-fill model & serial"
+                }
+                previewUrl={nameplatePreview}
+                onPick={(f) => onNameplatePick(f)}
+                onClear={() => onNameplatePick(null)}
+                disabled={busy || nameplateScanning}
+              />
+            </div>
+          </div>
+          {nameplateNote ? (
+            <div className="span-2 info-banner" style={{ marginTop: 0 }}>
+              {nameplateNote}
+            </div>
+          ) : null}
+
           <label className="span-2">
             Service address
             <input
@@ -435,38 +461,43 @@ export function WarrantiesPage() {
               placeholder="e.g. left on blue shelf by door"
             />
           </label>
+
+          <div className="span-2 warranty-location-row">
+            <div className="warranty-location-text">
+              <strong>
+                Drop-off location photo *
+                {!photoFile ? (
+                  <span className="warranty-need-photo"> — required</span>
+                ) : (
+                  <span className="muted"> — attached</span>
+                )}
+              </strong>
+              <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.82rem" }}>
+                Shelf, bin, or counter where you left the part
+              </p>
+            </div>
+            <PhotoCapture
+              compact
+              required
+              label="Location"
+              previewUrl={photoPreview}
+              onPick={(f) => onPhotoPick(f)}
+              onClear={() => onPhotoPick(null)}
+              disabled={busy}
+            />
+          </div>
         </div>
 
-        <div className="warranty-photo-block">
-          <PhotoCapture
-            label="Unit nameplate photo (optional — speeds up model/serial)"
-            hint={
-              nameplateScanning
-                ? "Reading nameplate…"
-                : "Picture the equipment data plate (MODEL / SERIAL). The app fills model & serial when it can."
-            }
-            previewUrl={nameplatePreview}
-            onPick={(f) => onNameplatePick(f)}
-            onClear={() => onNameplatePick(null)}
-            disabled={busy || nameplateScanning}
-          />
-          {nameplateNote ? <div className="info-banner">{nameplateNote}</div> : null}
-        </div>
-
-        <div className="warranty-photo-block">
-          <PhotoCapture
-            required
-            label="Drop-off location photo *"
-            hint="Picture the shelf, bin, or counter where you left the part so warehouse can find it."
-            previewUrl={photoPreview}
-            onPick={(f) => onPhotoPick(f)}
-            onClear={() => onPhotoPick(null)}
-            disabled={busy}
-          />
-        </div>
-
-        <button className="btn" type="submit" disabled={busy || nameplateScanning}>
-          {busy ? "Saving…" : nameplateScanning ? "Still reading nameplate…" : "Drop off & notify warehouse"}
+        <button
+          className="btn warranty-submit-btn"
+          type="submit"
+          disabled={busy || nameplateScanning || !photoFile}
+        >
+          {busy
+            ? "Saving…"
+            : nameplateScanning
+              ? "Still reading nameplate…"
+              : "Drop off & notify warehouse"}
         </button>
       </form>
 
