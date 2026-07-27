@@ -90,7 +90,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "The bell / inbox icon shows notifications — tap one to jump to the related page.",
     ],
     tips: [
-      "You only see menus for what your role is allowed to do.",
+      "Menus are grouped like Command Center: Fleet, Warehouse, Shop, and Company — tap a group to open it.",
+      "You only see links for what your role is allowed to do.",
       "If the app feels “stuck offline,” check the yellow banner — work may save and send when signal returns.",
     ],
   },

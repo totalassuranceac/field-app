@@ -124,6 +124,7 @@ function NavCategory({
   );
 }
 
+/** Which collapsible nav section a path belongs to (same for every role). */
 function pathCategory(pathname: string): string {
   if (
     pathname.startsWith("/vehicles") ||
@@ -141,6 +142,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/inventory") ||
     pathname.startsWith("/part-pickup") ||
     pathname.startsWith("/vendor-runs") ||
+    pathname.startsWith("/truck-stock") ||
+    pathname.startsWith("/parts-receipts") ||
     pathname.startsWith("/assets") ||
     pathname.startsWith("/warranties")
   ) {
@@ -184,16 +187,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [unread, setUnread] = useState(0);
   /** Parts waiting at vendors — warehouse glance counter (shows 0 when clear) */
   const [vendorWaiting, setVendorWaiting] = useState(0);
-  const [adminOpen, setAdminOpen] = useState<string>(() => pathCategory(location.pathname));
+  /** Open collapsible nav section (same Command Center style for every role) */
+  const [openCat, setOpenCat] = useState<string>(() => pathCategory(location.pathname));
   const sidebarClass = open ? "sidebar open" : "sidebar";
   // White/light logo artwork on dark navy sidebar
   const logoSrc = "/logo-light.png";
   const isDriver = user?.role === "driver";
   const isOffice = user?.role === "office";
   const isWarehouse = user?.role === "warehouse";
+  const isMechanic = user?.role === "mechanic";
   const isTrueAdmin = realUser?.role === "admin";
+  const adminShell = usesAdminShell(user) && !viewAsRole;
+  const readOnly = isViewer(user);
   const showVendorCounter =
-    isWarehouse || isOffice || user?.role === "admin" || user?.role === "viewer";
+    isWarehouse || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
 
   useEffect(() => {
     let cancelled = false;
@@ -233,15 +240,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
     document.title = "Total Assurance";
   }, []);
 
-  const adminShell = usesAdminShell(user) && !viewAsRole;
-  const readOnly = isViewer(user);
-
-  // Keep the category matching the page open while browsing
+  // Keep the category matching the page open while browsing (all roles)
   useEffect(() => {
-    if (adminShell) {
-      setAdminOpen(pathCategory(location.pathname));
-    }
-  }, [location.pathname, adminShell]);
+    setOpenCat(pathCategory(location.pathname));
+  }, [location.pathname]);
 
   const vendorNavBadge = {
     badge: vendorWaiting,
@@ -252,113 +254,155 @@ export function Layout({ children }: { children: React.ReactNode }) {
         : "No parts waiting for pickup",
   };
 
-  const officeNav: NavItem[] = [
-    { to: "/", label: "Home", show: true },
-    { to: "/live", label: "Live map", show: true },
-    { to: "/issues", label: "Scheduled repairs", show: true },
-    { to: "/inventory", label: "Inventory", show: can(user, "viewInventory") },
-    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
-    { to: "/truck-stock", label: "Truck stock count", show: true },
-    { to: "/assets", label: "Assets", show: can(user, "viewCompanyAssets") },
-    { to: "/warranties", label: "Warranties", show: true },
+  /**
+   * Same Command Center categories for every role — only permitted links show.
+   * Empty categories are hidden automatically by NavCategory.
+   */
+  const homeNav: NavItem[] = [
     {
-      to: "/parts-receipts",
-      label: "Parts receipts",
-      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+      to: "/",
+      label: adminShell ? "Command center" : "Home",
+      show: true,
     },
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
-    { to: "/notifications", label: "Notifications", show: true, badge: unread },
-  ];
-  const officeAccount: NavItem[] = [
-    { to: "/admin", label: "People", show: can(user, "manageEmployees") },
   ];
 
-  const warehouseNav: NavItem[] = [
-    { to: "/", label: "Home", show: true },
-    { to: "/inventory", label: "Inventory", show: true },
-    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
-    { to: "/truck-stock", label: "Truck stock count", show: true },
-    { to: "/assets", label: "Bottles & gear", show: true },
-    { to: "/warranties", label: "Warranties", show: true },
+  // Fleet: trucks, map, fuel, checks, ops reports
+  const fleetNav: NavItem[] = [
     {
-      to: "/parts-receipts",
-      label: "Parts receipts",
-      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+      to: "/vehicles",
+      label: isWarehouse ? "Trucks" : "Vehicles",
+      // Admin, warehouse (trucks), mechanic — not field/office clutter
+      show: adminShell || isWarehouse || isMechanic,
     },
-    { to: "/vehicles", label: "Trucks", show: true },
-    { to: "/notifications", label: "Notifications", show: true, badge: unread },
-  ];
-  const warehouseAccount: NavItem[] = [
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
-    { to: "/settings", label: "Settings", show: true },
-  ];
-
-  const daily: NavItem[] = [
-    { to: "/", label: "Home", show: true },
-    { to: "/warranties", label: "Warranties", show: true },
-    { to: "/part-pickup", label: "Part pickup", show: true },
     {
-      to: "/parts-receipts",
-      label: "Parts receipts",
-      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+      to: "/live",
+      label: "Live map",
+      // Not on warehouse short-list (they focus on parts)
+      show: adminShell || isOffice || isDriver || isMechanic,
     },
-    { to: "/truck-stock", label: "Truck stock count", show: true },
-    { to: "/notifications", label: "Notifications", show: true, badge: unread },
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
+    {
+      to: "/yard",
+      label: "Yard walk",
+      show: adminShell || isMechanic,
+    },
     {
       to: "/fuel",
-      label: "Log fuel",
-      show: can(user, "logFuel") || (!isDriver && can(user, "viewReports")),
+      label: isDriver ? "Log fuel" : "Fuel log",
+      show:
+        adminShell ||
+        can(user, "logFuel") ||
+        isMechanic ||
+        (isOffice && can(user, "viewReports")),
     },
     {
       to: "/inspections",
       label: "Weekly checks",
-      show: true,
+      show: adminShell || isDriver || isMechanic || isOffice,
     },
-    {
-      to: "/assets",
-      label: isDriver ? "My truck gear" : "Assets",
-      show: can(user, "viewCompanyAssets"),
-    },
-    {
-      to: "/issues",
-      label: can(user, "manageIssues")
-        ? "Repairs & shop"
-        : can(user, "reportIssues")
-          ? "Request repair"
-          : "Repairs",
-      show: can(user, "reportIssues") || can(user, "manageIssues") || user?.role === "viewer",
-    },
-  ];
-
-  const fleet: NavItem[] = [
-    { to: "/live", label: "Live map", show: true },
     {
       to: "/alerts",
       label: "Mileage flags",
-      show: !isDriver && can(user, "viewAlerts"),
+      show: adminShell || isMechanic || (isOffice && can(user, "viewAlerts")),
     },
-    { to: "/yard", label: "Yard walk", show: !isDriver },
-    { to: "/vehicles", label: "Vehicles", show: !isDriver },
     {
       to: "/downtime",
       label: "Downtime",
-      show: !isDriver && (can(user, "viewReports") || can(user, "manageIssues")),
+      show:
+        adminShell ||
+        isMechanic ||
+        (isOffice && (can(user, "viewReports") || can(user, "manageIssues"))),
     },
-    { to: "/reports", label: "Reports", show: !isDriver && can(user, "viewReports") },
+    {
+      to: "/reports",
+      label: "Reports",
+      show: adminShell || isMechanic || (isOffice && can(user, "viewReports")),
+    },
   ];
 
-  const account: NavItem[] = [
+  // Warehouse: parts, pickups, bottles, warranties
+  const warehouseNav: NavItem[] = [
+    {
+      to: "/inventory",
+      label: adminShell ? "Inventory & pickup" : "Inventory",
+      show: adminShell || can(user, "viewInventory") || isWarehouse,
+    },
+    {
+      to: "/part-pickup",
+      label: "Part pickup",
+      show: true,
+      ...(showVendorCounter ? vendorNavBadge : {}),
+    },
+    {
+      to: "/truck-stock",
+      label: "Truck stock count",
+      show: true,
+    },
+    {
+      to: "/parts-receipts",
+      label: "Parts receipts",
+      show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+    },
+    {
+      to: "/assets",
+      label: isDriver
+        ? "My truck gear"
+        : isWarehouse
+          ? "Bottles & gear"
+          : adminShell
+            ? "Bottles & equipment"
+            : "Assets",
+      show: can(user, "viewCompanyAssets"),
+    },
+    {
+      to: "/warranties",
+      label: "Warranties",
+      show: true,
+    },
+  ];
+
+  // Shop: repairs & service
+  const shopNav: NavItem[] = [
+    {
+      to: "/issues",
+      label: isOffice
+        ? "Scheduled repairs"
+        : can(user, "manageIssues") || adminShell
+          ? "Repairs & shop"
+          : can(user, "reportIssues")
+            ? "Request repair"
+            : "Repairs",
+      show:
+        adminShell ||
+        can(user, "reportIssues") ||
+        can(user, "manageIssues") ||
+        user?.role === "viewer",
+    },
+    {
+      to: "/service",
+      label: "Oil / service",
+      show: adminShell || isMechanic,
+    },
+  ];
+
+  // Company: people, help, inbox
+  const companyNav: NavItem[] = [
     {
       to: "/admin",
-      label: "Admin",
-      show: can(user, "manageUsers") || can(user, "manageEmployees"),
+      label: adminShell
+        ? "People & settings"
+        : can(user, "manageEmployees")
+          ? "People"
+          : "Admin",
+      show: adminShell || can(user, "manageUsers") || can(user, "manageEmployees"),
+    },
+    { to: "/howto", label: "How-to", show: true },
+    { to: "/reviews", label: "Our reviews", show: true },
+    { to: "/handbook", label: "Handbook", show: true },
+    {
+      to: "/notifications",
+      label: "Notifications",
+      show: true,
+      badge: unread,
     },
     {
       to: "/roles",
@@ -366,61 +410,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
       show: isTrueAdmin && !viewAsRole,
     },
     {
-      to: "/inventory",
-      label: "Inventory",
-      show: can(user, "viewInventory"),
+      to: "/audit",
+      label: "Audit log",
+      show: can(user, "viewAudit"),
     },
-    {
-      to: "/assets",
-      label: "Assets",
-      show: can(user, "viewCompanyAssets") && !isDriver,
-    },
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
-    { to: "/audit", label: "Audit log", show: can(user, "viewAudit") },
   ];
 
-  // ——— Admin categories (click to expand) ———
-  const adminHome: NavItem[] = [{ to: "/", label: "Command center", show: true }];
-
-  const adminFleet: NavItem[] = [
-    { to: "/vehicles", label: "Vehicles", show: true },
-    { to: "/live", label: "Live map", show: true },
-    { to: "/yard", label: "Yard walk", show: true },
-    { to: "/fuel", label: "Fuel log", show: true },
-    { to: "/inspections", label: "Weekly checks", show: true },
-    { to: "/alerts", label: "Mileage flags", show: true },
-    { to: "/downtime", label: "Downtime", show: true },
-    { to: "/reports", label: "Reports", show: true },
-  ];
-
-  const adminWarehouse: NavItem[] = [
-    { to: "/inventory", label: "Inventory & pickup", show: true },
-    { to: "/part-pickup", label: "Part pickup", show: true, ...vendorNavBadge },
-    { to: "/truck-stock", label: "Truck stock count", show: true },
-    { to: "/parts-receipts", label: "Parts receipts", show: true },
-    { to: "/assets", label: "Bottles & equipment", show: true },
-    { to: "/warranties", label: "Warranties", show: true },
-  ];
-
-  const adminShop: NavItem[] = [
-    { to: "/issues", label: "Repairs & shop", show: true },
-    { to: "/service", label: "Oil / service", show: true },
-  ];
-
-  const adminCompany: NavItem[] = [
-    { to: "/admin", label: "People & settings", show: true },
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
-    { to: "/notifications", label: "Notifications", show: true, badge: unread },
-    { to: "/roles", label: "Role simulator", show: isTrueAdmin && !viewAsRole },
-    { to: "/audit", label: "Audit log", show: can(user, "viewAudit") },
-  ];
-
-  function toggleAdminCat(id: string) {
-    setAdminOpen((prev) => (prev === id ? "" : id));
+  function toggleCat(id: string) {
+    setOpenCat((prev) => (prev === id ? "" : id));
   }
 
   return (
@@ -448,59 +445,40 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <nav className="nav" onClick={() => setOpen(false)}>
-          {isWarehouse ? (
-            <>
-              <NavGroup title="Warehouse" items={warehouseNav} />
-              <NavGroup title="Account" items={warehouseAccount} />
-            </>
-          ) : isOffice ? (
-            <>
-              <NavGroup title="Office" items={officeNav} />
-              <NavGroup title="Account" items={officeAccount} />
-            </>
-          ) : adminShell ? (
-            <>
-              <NavGroup title="Home" items={adminHome} />
-              <NavCategory
-                id="fleet"
-                title="Fleet"
-                hint="Trucks · fuel · checks · map"
-                items={adminFleet}
-                open={adminOpen === "fleet"}
-                onToggle={toggleAdminCat}
-              />
-              <NavCategory
-                id="warehouse"
-                title="Warehouse"
-                hint="Parts · bottles · warranties"
-                items={adminWarehouse}
-                open={adminOpen === "warehouse"}
-                onToggle={toggleAdminCat}
-              />
-              <NavCategory
-                id="shop"
-                title="Shop"
-                hint="Repairs · service"
-                items={adminShop}
-                open={adminOpen === "shop"}
-                onToggle={toggleAdminCat}
-              />
-              <NavCategory
-                id="company"
-                title="Company"
-                hint="People · alerts · handbook"
-                items={adminCompany}
-                open={adminOpen === "company"}
-                onToggle={toggleAdminCat}
-              />
-            </>
-          ) : (
-            <>
-              <NavGroup title="Daily work" items={daily} />
-              <NavGroup title="Fleet" items={fleet} />
-              <NavGroup title="Account" items={account} />
-            </>
-          )}
+          {/* Same categorized menu as Command Center for every role */}
+          <NavGroup title="Home" items={homeNav} />
+          <NavCategory
+            id="fleet"
+            title="Fleet"
+            hint="Trucks · fuel · checks · map"
+            items={fleetNav}
+            open={openCat === "fleet"}
+            onToggle={toggleCat}
+          />
+          <NavCategory
+            id="warehouse"
+            title="Warehouse"
+            hint="Parts · bottles · warranties"
+            items={warehouseNav}
+            open={openCat === "warehouse"}
+            onToggle={toggleCat}
+          />
+          <NavCategory
+            id="shop"
+            title="Shop"
+            hint="Repairs · service"
+            items={shopNav}
+            open={openCat === "shop"}
+            onToggle={toggleCat}
+          />
+          <NavCategory
+            id="company"
+            title="Company"
+            hint="People · alerts · handbook"
+            items={companyNav}
+            open={openCat === "company"}
+            onToggle={toggleCat}
+          />
         </nav>
         <NavLink
           to="/settings"

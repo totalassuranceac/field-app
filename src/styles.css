@@ -4393,7 +4393,7 @@ tr.row-low td {
   padding: 0.35rem 0.85rem 0.25rem;
 }
 
-/* Collapsible admin nav categories (Fleet / Warehouse / Shop / Company) */
+/* Collapsible nav categories — same for all roles (Fleet / Warehouse / Shop / Company) */
 .nav-category {
   margin-bottom: 0.35rem;
   border-radius: 12px;
