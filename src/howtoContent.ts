@@ -189,20 +189,20 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "field-warranty",
     title: "Drop off a warranty part",
-    summary: "Photo where you left it — you get a log number to write on the box.",
+    summary: "Model & serial required · nameplate photo helps · log number on the box.",
     roles: ["driver", "warehouse", "office", "admin"],
     path: "/warranties",
     steps: [
       "Open Warranties.",
-      "Enter part name / code, model, serial if you have them.",
-      "Note job site or reason if useful.",
-      "Tap Take photo of the shelf or bin where you leave the part.",
-      "Submit — a popup shows the big warranty log number (e.g. W0726-001 for July 2026).",
-      "Write that number on the box with a marker, then tap Got it — take me home.",
-      "Warehouse matches the number + photo to process the claim.",
+      "Enter part name. Model # and serial # of the unit the part came off are required.",
+      "Optional: photo the unit nameplate — the app tries to fill model and serial.",
+      "Photo the shelf or bin where you leave the part.",
+      "Submit — a popup shows the warranty log number (e.g. W0726-001).",
+      "Write that number on the box, then tap Got it — take me home.",
     ],
     tips: [
-      "Do not skip the number on the box — that is how warehouse finds your part among others.",
+      "Do not skip the number on the box — warehouse matches it to your drop-off photo.",
+      "When you fix a wrong model/serial from a nameplate scan, the app learns for next time.",
     ],
   },
   {

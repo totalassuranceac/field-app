@@ -11,6 +11,9 @@ export type OcrFieldSnapshot = {
   vendor_name?: string | null;
   invoice_number?: string | null;
   purchase_date?: string | null;
+  /** Equipment nameplate (warranty drop-off) */
+  model_number?: string | null;
+  serial_number?: string | null;
 };
 
 export type OcrHints = {
@@ -29,6 +32,8 @@ export type OcrHints = {
 
 export function storeKeyFrom(store: string | null | undefined, rawText?: string | null): string {
   const s = (store || "").toLowerCase();
+  // Equipment nameplates (warranty model/serial OCR)
+  if (s === "nameplate" || s.startsWith("nameplate")) return "nameplate";
   // Explicit parts-purchase vendor keys (parts_johnstone, etc.)
   if (s.startsWith("parts_")) return s.slice(0, 48);
   if (/stripe/.test(s) || /\b2221\b/.test(s) || /\b2213\b/.test(s) || /\b2215\b/.test(s)) {
@@ -267,6 +272,8 @@ const LEARN_FIELDS = [
   "vendor_name",
   "invoice_number",
   "purchase_date",
+  "model_number",
+  "serial_number",
 ] as const;
 
 function looksLikePpg(n: number): boolean {
@@ -349,6 +356,19 @@ export async function recordOcrFeedback(
         await bumpMemory(db, "parts_global", field, "sub", ocrS, correct);
         // Mirror to store_number so fuel-style applyOcrLearning can help
         await bumpMemory(db, storeKey, "store_number", "sub", ocrS, correct);
+      }
+      // Nameplate model / serial — learn labels and known values
+      if (field === "model_number") {
+        await bumpMemory(db, "nameplate", field, "line_label", "MODEL", "1");
+        await bumpMemory(db, "nameplate", field, "line_label", "M/N", "1");
+        await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
+        await bumpMemory(db, "nameplate", field, "sub", ocrS, correct);
+      }
+      if (field === "serial_number") {
+        await bumpMemory(db, "nameplate", field, "line_label", "SERIAL", "1");
+        await bumpMemory(db, "nameplate", field, "line_label", "S/N", "1");
+        await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
+        await bumpMemory(db, "nameplate", field, "sub", ocrS, correct);
       }
       if (field === "fuel_time" && (storeKey.startsWith("murphy") || /murphy/i.test(rawText || ""))) {
         await bumpMemory(db, storeKey, field, "pattern", "date_time_same_line", "1");

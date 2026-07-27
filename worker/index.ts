@@ -2313,6 +2313,7 @@ api.post("/uploads/receipt", async (c) => {
     "fuel-receipts",
     "parts-receipts",
     "warranty-dropoffs",
+    "warranty-nameplates",
     "asset-photos",
     "issue-photos",
   ];
@@ -3841,10 +3842,11 @@ api.get("/warranties", async (c) => {
   }
 });
 
-/** Save warranty drop-off photo into R2 or receipt_blobs; returns storage key. */
-async function saveWarrantyDropoffPhoto(
+/** Save warranty photo into R2 or receipt_blobs; returns storage key. */
+async function saveWarrantyPhoto(
   env: Env,
-  file: File
+  file: File,
+  folder: "warranty-dropoffs" | "warranty-nameplates" = "warranty-dropoffs"
 ): Promise<string> {
   const maxBytes = env.RECEIPTS ? 10 * 1024 * 1024 : 900 * 1024;
   if (file.size > maxBytes) {
@@ -3856,7 +3858,7 @@ async function saveWarrantyDropoffPhoto(
   }
   const ext = receiptExt(file);
   const contentType = receiptContentType(file, ext);
-  const key = `warranty-dropoffs/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+  const key = `${folder}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
   const buf = await file.arrayBuffer();
   if (env.RECEIPTS) {
     await env.RECEIPTS.put(key, buf, { httpMetadata: { contentType } });
@@ -3870,11 +3872,15 @@ async function saveWarrantyDropoffPhoto(
   return key;
 }
 
+async function saveWarrantyDropoffPhoto(env: Env, file: File): Promise<string> {
+  return saveWarrantyPhoto(env, file, "warranty-dropoffs");
+}
+
 api.post("/warranties", async (c) => {
   const user = c.get("user");
   const ct = c.req.header("content-type") || "";
 
-  // Prefer multipart (fields + photo in one request) so offline queue keeps them together
+  // Prefer multipart (fields + photos) so offline queue keeps them together
   let partName = "";
   let partCode: string | null = null;
   let partId: number | null = null;
@@ -3886,6 +3892,12 @@ api.post("/warranties", async (c) => {
   let notes: string | null = null;
   let needsVendorReturn = false;
   let photoKey = "";
+  let nameplateKey = "";
+  let ocrFeedback: {
+    raw_text?: string;
+    ocr?: OcrFieldSnapshot;
+    final?: OcrFieldSnapshot;
+  } | null = null;
 
   try {
     if (ct.includes("multipart/form-data")) {
@@ -3905,9 +3917,23 @@ api.post("/warranties", async (c) => {
         form.get("needs_vendor_return") === "true";
       const file = form.get("photo") || form.get("file");
       if (file instanceof File && file.size > 0) {
-        photoKey = await saveWarrantyDropoffPhoto(c.env, file);
+        photoKey = await saveWarrantyPhoto(c.env, file, "warranty-dropoffs");
       } else {
         photoKey = String(form.get("dropoff_photo_key") || "").trim();
+      }
+      const nameplate = form.get("nameplate") || form.get("nameplate_photo");
+      if (nameplate instanceof File && nameplate.size > 0) {
+        nameplateKey = await saveWarrantyPhoto(c.env, nameplate, "warranty-nameplates");
+      } else {
+        nameplateKey = String(form.get("nameplate_photo_key") || "").trim();
+      }
+      const fbRaw = form.get("ocr_feedback");
+      if (typeof fbRaw === "string" && fbRaw.trim()) {
+        try {
+          ocrFeedback = JSON.parse(fbRaw) as typeof ocrFeedback;
+        } catch {
+          ocrFeedback = null;
+        }
       }
     } else {
       const body = await c.req.json<{
@@ -3922,6 +3948,12 @@ api.post("/warranties", async (c) => {
         notes?: string;
         needs_vendor_return?: boolean;
         dropoff_photo_key?: string;
+        nameplate_photo_key?: string;
+        ocr_feedback?: {
+          raw_text?: string;
+          ocr?: OcrFieldSnapshot;
+          final?: OcrFieldSnapshot;
+        };
       }>();
       partName = (body.part_name || "").trim();
       partCode = body.part_code?.trim() || null;
@@ -3934,9 +3966,23 @@ api.post("/warranties", async (c) => {
       notes = body.notes?.trim() || null;
       needsVendorReturn = !!body.needs_vendor_return;
       photoKey = (body.dropoff_photo_key || "").trim();
+      nameplateKey = (body.nameplate_photo_key || "").trim();
+      ocrFeedback = body.ocr_feedback || null;
     }
 
     if (!partName) return c.json({ error: "Part name is required" }, 400);
+    if (!modelNumber) {
+      return c.json(
+        { error: "Unit model number is required (from the unit the part was removed from)." },
+        400
+      );
+    }
+    if (!serialNumber) {
+      return c.json(
+        { error: "Unit serial number is required (from the unit the part was removed from)." },
+        400
+      );
+    }
     if (!photoKey) {
       return c.json(
         {
@@ -3954,8 +4000,8 @@ api.post("/warranties", async (c) => {
         `INSERT INTO warranty_claims (
            log_number, status, part_id, part_code, part_name, model_number, serial_number,
            service_address, customer_name, vendor_name, notes, needs_vendor_return,
-           dropoff_photo_key, dropped_off_by_user_id, dropped_off_at
-         ) VALUES (?, 'dropped_off', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+           dropoff_photo_key, nameplate_photo_key, dropped_off_by_user_id, dropped_off_at
+         ) VALUES (?, 'dropped_off', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
       )
         .bind(
           logNumber,
@@ -3970,43 +4016,90 @@ api.post("/warranties", async (c) => {
           notes,
           needsVendorReturn ? 1 : 0,
           photoKey,
+          nameplateKey || null,
           user.id
         )
         .run();
     } catch (colErr) {
       const msg = colErr instanceof Error ? colErr.message : String(colErr);
-      if (!/dropoff_photo|no such column/i.test(msg)) throw colErr;
-      r = await c.env.DB.prepare(
-        `INSERT INTO warranty_claims (
-           log_number, status, part_id, part_code, part_name, model_number, serial_number,
-           service_address, customer_name, vendor_name, notes, needs_vendor_return,
-           dropped_off_by_user_id, dropped_off_at
-         ) VALUES (?, 'dropped_off', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
-      )
-        .bind(
-          logNumber,
-          partId,
-          partCode,
-          partName,
-          modelNumber,
-          serialNumber,
-          serviceAddress,
-          customerName,
-          vendorName,
-          notes,
-          needsVendorReturn ? 1 : 0,
-          user.id
+      // Fallback without nameplate column (migration 038 not applied yet)
+      if (/nameplate_photo|no such column/i.test(msg)) {
+        r = await c.env.DB.prepare(
+          `INSERT INTO warranty_claims (
+             log_number, status, part_id, part_code, part_name, model_number, serial_number,
+             service_address, customer_name, vendor_name, notes, needs_vendor_return,
+             dropoff_photo_key, dropped_off_by_user_id, dropped_off_at
+           ) VALUES (?, 'dropped_off', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
         )
-        .run();
+          .bind(
+            logNumber,
+            partId,
+            partCode,
+            partName,
+            modelNumber,
+            serialNumber,
+            serviceAddress,
+            customerName,
+            vendorName,
+            notes,
+            needsVendorReturn ? 1 : 0,
+            photoKey,
+            user.id
+          )
+          .run();
+      } else if (/dropoff_photo|no such column/i.test(msg)) {
+        r = await c.env.DB.prepare(
+          `INSERT INTO warranty_claims (
+             log_number, status, part_id, part_code, part_name, model_number, serial_number,
+             service_address, customer_name, vendor_name, notes, needs_vendor_return,
+             dropped_off_by_user_id, dropped_off_at
+           ) VALUES (?, 'dropped_off', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+        )
+          .bind(
+            logNumber,
+            partId,
+            partCode,
+            partName,
+            modelNumber,
+            serialNumber,
+            serviceAddress,
+            customerName,
+            vendorName,
+            notes,
+            needsVendorReturn ? 1 : 0,
+            user.id
+          )
+          .run();
+      } else {
+        throw colErr;
+      }
     }
     const id = r.meta.last_row_id;
+
+    // Learn nameplate OCR corrections (model / serial)
+    if (ocrFeedback?.ocr && ocrFeedback?.final) {
+      try {
+        const ocrSnap = { ...ocrFeedback.ocr, store_number: "nameplate" };
+        const finSnap = { ...ocrFeedback.final, store_number: "nameplate" };
+        await recordOcrFeedback(
+          c.env.DB,
+          user.id,
+          ocrFeedback.raw_text || null,
+          ocrSnap,
+          finSnap
+        );
+      } catch {
+        /* learning best-effort */
+      }
+    }
+
     const targets = await usersByRoles(c.env.DB, ["admin", "warehouse"]);
     await notifyUsers(
       c.env.DB,
       targets,
       "warranty_dropoff",
       `Warranty drop-off ${logNumber}`,
-      `WRITE ON BOX: ${logNumber} · ${partName}${serialNumber ? ` · S/N ${serialNumber}` : ""} · by ${user.display_name}` +
+      `WRITE ON BOX: ${logNumber} · ${partName} · Model ${modelNumber} · S/N ${serialNumber} · by ${user.display_name}` +
         (needsVendorReturn ? " · NEEDS VENDOR RETURN" : "") +
         " · photo attached",
       { type: "warranty", id }
@@ -4017,7 +4110,7 @@ api.post("/warranties", async (c) => {
       "create",
       "warranty",
       id,
-      `Warranty ${logNumber} dropped off (photo ${photoKey})`
+      `Warranty ${logNumber} dropped off (model ${modelNumber} S/N ${serialNumber})`
     );
     const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first();
     return c.json({

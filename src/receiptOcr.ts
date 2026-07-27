@@ -2361,6 +2361,47 @@ export async function warmOcrEngine(): Promise<void> {
   }
 }
 
+/**
+ * Fast single-pass OCR → raw text (nameplates, packing slips, etc.).
+ * Reuses the shared worker; downscales for speed.
+ */
+export async function recognizeImageText(file: File): Promise<string> {
+  const worker = await getOcrWorker();
+  try {
+    const bmp = await createImageBitmap(file);
+    const maxW = 1200;
+    const scale = bmp.width > maxW ? maxW / bmp.width : 1;
+    const w = Math.round(bmp.width * scale);
+    const h = Math.round(bmp.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bmp.close?.();
+      const r = await worker.recognize(file);
+      return String(r?.data?.text || "");
+    }
+    ctx.drawImage(bmp, 0, 0, w, h);
+    bmp.close?.();
+    // Mild contrast for embossed/metal nameplates
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      let c = (g - 128) * 1.55 + 128;
+      const v = Math.max(0, Math.min(255, c));
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    ctx.putImageData(img, 0, 0);
+    const r = await worker.recognize(canvas);
+    return String(r?.data?.text || "");
+  } catch {
+    const r = await worker.recognize(file);
+    return String(r?.data?.text || "");
+  }
+}
+
 function normMoney(t: string): string {
   return t.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
 }
