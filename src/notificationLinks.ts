@@ -13,8 +13,7 @@ export function notificationLink(n: {
   const entity = String(n.entity_type || "").toLowerCase();
   const text = `${n.title || ""} ${n.body || ""}`.toLowerCase();
 
-  // Messages always open the conversation thread (never keyword-hijack to warranty/fuel/etc.)
-  // even if the message body mentions those words.
+  // Messaging UI removed — old chat alerts just open the inbox
   if (
     kind === "message" ||
     kind === "message_ack" ||
@@ -22,11 +21,7 @@ export function notificationLink(n: {
     entity === "conversation" ||
     entity === "message"
   ) {
-    if (n.entity_id != null && String(n.entity_id).trim() !== "") {
-      // entity_id is conversation_id for message / message_ack / conversation
-      return `/messages?c=${encodeURIComponent(String(n.entity_id))}`;
-    }
-    return "/messages";
+    return "/notifications";
   }
 
   // Explicit kinds

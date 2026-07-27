@@ -21,7 +21,7 @@ import { ServicePage } from "./pages/ServicePage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { AssetsPage } from "./pages/AssetsPage";
-import { MessagesPage } from "./pages/MessagesPage";
+
 import { VendorRunsPage } from "./pages/VendorRunsPage";
 import { TruckStockCountPage } from "./pages/TruckStockCountPage";
 import { WarrantiesPage } from "./pages/WarrantiesPage";
@@ -162,14 +162,8 @@ export default function App() {
                       </Page>
                     }
                   />
-                  <Route
-                    path="/messages"
-                    element={
-                      <Page title="Messages">
-                        <MessagesPage />
-                      </Page>
-                    }
-                  />
+                  {/* Messaging removed — keep old links from landing on a dead page */}
+                  <Route path="/messages" element={<Navigate to="/notifications" replace />} />
                   <Route
                     path="/part-pickup"
                     element={

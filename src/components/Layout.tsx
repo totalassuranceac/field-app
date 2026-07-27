@@ -9,7 +9,6 @@ import {
 } from "../navReturn";
 import { NotificationBell } from "./NotificationBell";
 import { OfflineBanner } from "./OfflineBanner";
-import { MessageBubble } from "./MessageBubble";
 
 type NavItem = {
   to: string;
@@ -157,7 +156,6 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/handbook") ||
     pathname.startsWith("/howto") ||
     pathname.startsWith("/reviews") ||
-    pathname.startsWith("/messages") ||
     pathname.startsWith("/notifications") ||
     pathname.startsWith("/settings")
   ) {
@@ -271,7 +269,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/howto", label: "How-to", show: true },
     { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
-    { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
   ];
   const officeAccount: NavItem[] = [
@@ -291,7 +288,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
       show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
     },
     { to: "/vehicles", label: "Trucks", show: true },
-    { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
   ];
   const warehouseAccount: NavItem[] = [
@@ -311,7 +307,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
       show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
     },
     { to: "/truck-stock", label: "Truck stock count", show: true },
-    { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
     { to: "/howto", label: "How-to", show: true },
     { to: "/reviews", label: "Our reviews", show: true },
@@ -419,7 +414,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { to: "/howto", label: "How-to", show: true },
     { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
-    { to: "/messages", label: "Messages", show: true },
     { to: "/notifications", label: "Notifications", show: true, badge: unread },
     { to: "/roles", label: "Role simulator", show: isTrueAdmin && !viewAsRole },
     { to: "/audit", label: "Audit log", show: can(user, "viewAudit") },
@@ -494,7 +488,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <NavCategory
                 id="company"
                 title="Company"
-                hint="People · messages · handbook"
+                hint="People · alerts · handbook"
                 items={adminCompany}
                 open={adminOpen === "company"}
                 onToggle={toggleAdminCat}
@@ -638,7 +632,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <main className="main">{children}</main>
         </div>
       </div>
-      <MessageBubble />
     </div>
   );
 }

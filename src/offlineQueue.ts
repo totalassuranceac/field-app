@@ -130,7 +130,6 @@ function labelFor(path: string, method: string): string {
   if (path.startsWith("/assets")) return "Assets update";
   if (path.startsWith("/inventory")) return "Inventory change";
   if (path.startsWith("/uploads")) return "Photo upload";
-  if (path.startsWith("/messages")) return "Message";
   return `${method} ${path}`;
 }
 

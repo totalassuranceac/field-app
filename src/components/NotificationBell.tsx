@@ -40,29 +40,34 @@ function InboxIcon() {
 }
 
 /**
- * Top-corner alerts: unread notifications + messages + open warranties.
+ * Top-corner alerts: unread notifications + open warranties.
  * Tapping a row marks it read and opens the related page (e.g. handbook).
  */
 export function NotificationBell() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<Panel>("closed");
   const [notifUnread, setNotifUnread] = useState(0);
-  const [msgUnread, setMsgUnread] = useState(0);
   const [warrantyOpen, setWarrantyOpen] = useState(0);
   const [preview, setPreview] = useState<PreviewNote[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const [n, m, w] = await Promise.all([
+      const [n, w] = await Promise.all([
         api<{ unread: number; notifications: PreviewNote[] }>("/notifications"),
-        api<{ unread: number }>("/messages").catch(() => ({ unread: 0 })),
         api<{ open_count: number }>("/warranties?status=open").catch(() => ({ open_count: 0 })),
       ]);
       setNotifUnread(n.unread || 0);
-      setMsgUnread(m.unread || 0);
       setWarrantyOpen(w.open_count || 0);
-      setPreview((n.notifications || []).slice(0, 12));
+      // Hide legacy chat alerts — messaging UI was removed
+      setPreview(
+        (n.notifications || [])
+          .filter((x) => {
+            const k = String(x.kind || "").toLowerCase();
+            return !k.startsWith("message");
+          })
+          .slice(0, 12)
+      );
     } catch {
       /* ignore poll errors */
     }
@@ -112,7 +117,7 @@ export function NotificationBell() {
     void load();
   }
 
-  const total = notifUnread + msgUnread;
+  const total = notifUnread;
   const showBadge = total > 0 || warrantyOpen > 0;
 
   return (
@@ -149,9 +154,6 @@ export function NotificationBell() {
               </button>
             </div>
             <div className="notif-panel-links">
-              <Link to="/messages" className="notif-panel-link" onClick={() => setOpen("closed")}>
-                Messages{msgUnread ? ` (${msgUnread})` : ""}
-              </Link>
               <Link to="/warranties" className="notif-panel-link" onClick={() => setOpen("closed")}>
                 Warranties{warrantyOpen ? ` · ${warrantyOpen} open` : ""}
               </Link>

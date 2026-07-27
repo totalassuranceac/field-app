@@ -298,8 +298,12 @@ export function NotificationsPage() {
 
   async function load() {
     const data = await api<{ notifications: Note[]; unread: number }>("/notifications");
-    setList(data.notifications || []);
-    setUnread(data.unread || 0);
+    // Messaging removed — hide legacy chat alerts from the inbox
+    const notes = (data.notifications || []).filter(
+      (n) => !String(n.kind || "").toLowerCase().startsWith("message")
+    );
+    setList(notes);
+    setUnread(notes.filter((n) => !n.read_at).length);
   }
 
   useEffect(() => {

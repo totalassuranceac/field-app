@@ -96,8 +96,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   },
   {
     id: "notifications",
-    title: "Notifications & messages",
-    summary: "Stay on top of repairs, handbook, and team notes.",
+    title: "Notifications & alerts",
+    summary: "Stay on top of repairs, warranties, handbook, and system alerts.",
     roles: ["everyone"],
     path: "/notifications",
     steps: [
@@ -105,7 +105,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Unread subjects are bold (like Gmail); read ones use regular weight.",
       "Swipe left on an unread alert to mark it read, or tap Mark read / Open.",
       "Tap a notification to open the related screen (handbook, warranty, etc.).",
-      "Use Messages for team chat: start a conversation with a subject, reply in the same thread, and tap 👍 when you got it.",
+      "Warranties stay under the Warranties page; mileage/fuel flags under Alerts.",
     ],
   },
   {

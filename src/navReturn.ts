@@ -69,6 +69,5 @@ export function readNavReturn(locationState: unknown): NavReturnState | null {
 export function returnBarLabel(r: NavReturnState): string {
   if (r.returnLabel) return r.returnLabel;
   if (r.returnTo.startsWith("/notifications")) return "Back to notifications";
-  if (r.returnTo.startsWith("/messages")) return "Back to messages";
   return "Back";
 }

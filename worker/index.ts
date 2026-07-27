@@ -3209,14 +3209,17 @@ api.get("/notifications", async (c) => {
   } catch {
     // table may not exist until migration
   }
+  // Exclude legacy team-chat alerts (messaging UI removed)
   const rows = await c.env.DB.prepare(
     `SELECT * FROM notifications WHERE user_id = ?
+       AND kind NOT LIKE 'message%'
      ORDER BY created_at DESC LIMIT 50`
   )
     .bind(user.id)
     .all();
   const unread = await c.env.DB.prepare(
-    `SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read_at IS NULL`
+    `SELECT COUNT(*) as c FROM notifications
+     WHERE user_id = ? AND read_at IS NULL AND kind NOT LIKE 'message%'`
   )
     .bind(user.id)
     .first<{ c: number }>();
@@ -3737,309 +3740,28 @@ api.get("/messages/users", async (c) => {
   return c.json({ users });
 });
 
+/** In-app team chat UI removed — warranties + alerts remain. */
 api.post("/messages", async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json<{
-    body?: string;
-    to_user_id?: number | null;
-    broadcast?: boolean;
-    subject?: string;
-    conversation_id?: number | null;
-  }>();
-  const text = (body.body || "").trim();
-  if (!text || text.length > 2000) {
-    return c.json({ error: "Message required (max 2000 characters)" }, 400);
-  }
-  try {
-    await backfillMessageConversations(c.env.DB);
-
-    let convId = body.conversation_id ? Number(body.conversation_id) : 0;
-    let isTeam = false;
-    let toId: number | null = null;
-    let subject = (body.subject || "").trim().slice(0, 120);
-
-    if (convId) {
-      const conv = await userCanAccessConversation(c.env.DB, user.id, convId);
-      if (!conv) return c.json({ error: "Conversation not found" }, 404);
-      isTeam = !!conv.is_team;
-      subject = conv.subject || subject;
-      if (!isTeam) {
-        const peer = await c.env.DB.prepare(
-          `SELECT user_id FROM app_conversation_members
-           WHERE conversation_id = ? AND user_id != ? LIMIT 1`
-        )
-          .bind(convId, user.id)
-          .first<{ user_id: number }>();
-        toId = peer?.user_id ?? null;
-      } else {
-        toId = null;
-      }
-    } else {
-      // New conversation — subject helps track the topic
-      if (!subject) {
-        subject = text.length > 48 ? `${text.slice(0, 48).trim()}…` : text;
-      }
-      const broadcast = body.broadcast === true || body.to_user_id == null;
-      toId = broadcast ? null : Number(body.to_user_id);
-      if (!broadcast && (!toId || toId === user.id)) {
-        return c.json({ error: "Pick a teammate to message" }, 400);
-      }
-      isTeam = broadcast;
-      const cr = await c.env.DB.prepare(
-        `INSERT INTO app_conversations (subject, is_team, created_by_user_id, last_message_at)
-         VALUES (?, ?, ?, datetime('now'))`
-      )
-        .bind(subject, isTeam ? 1 : 0, user.id)
-        .run();
-      convId = Number(cr.meta.last_row_id);
-      await c.env.DB.prepare(
-        `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
-      )
-        .bind(convId, user.id)
-        .run();
-      if (toId) {
-        await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO app_conversation_members (conversation_id, user_id) VALUES (?, ?)`
-        )
-          .bind(convId, toId)
-          .run();
-      }
-    }
-
-    // For team threads, to_user_id stays null (visible to whole team)
-    const r = await c.env.DB.prepare(
-      `INSERT INTO app_messages (from_user_id, to_user_id, body, conversation_id) VALUES (?, ?, ?, ?)`
-    )
-      .bind(user.id, isTeam ? null : toId, text, convId)
-      .run();
-    const mid = r.meta.last_row_id;
-
-    await c.env.DB.prepare(
-      `UPDATE app_conversations SET last_message_at = datetime('now') WHERE id = ?`
-    )
-      .bind(convId)
-      .run();
-
-    // Mark sender as read
-    await c.env.DB.prepare(
-      `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
-    )
-      .bind(mid, user.id)
-      .run();
-
-    const notifyTitle = isTeam
-      ? `Team · ${subject || "Message"} · ${user.display_name}`
-      : `${user.display_name}: ${subject || "Message"}`;
-    const entity = { type: "conversation", id: convId };
-
-    if (!isTeam && toId) {
-      await notifyUsers(c.env.DB, [toId], "message", notifyTitle, text.slice(0, 200), entity);
-    } else {
-      const all = await c.env.DB.prepare(`SELECT id FROM users WHERE active = 1 AND id != ?`)
-        .bind(user.id)
-        .all<{ id: number }>();
-      await notifyUsers(
-        c.env.DB,
-        (all.results || []).map((u) => u.id),
-        "message",
-        notifyTitle,
-        text.slice(0, 200),
-        entity
-      );
-    }
-    return c.json({ ok: true, id: mid, conversation_id: convId });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/no such (table|column)/i.test(msg)) {
-      return c.json({ error: "Run migration 032_message_conversations.sql" }, 503);
-    }
-    return c.json({ error: msg || "Send failed" }, 500);
-  }
+  return c.json(
+    {
+      error:
+        "Messaging has been turned off in the Field App. Use notifications, warranties, and alerts instead.",
+    },
+    410
+  );
 });
 
 /** Thumbs-up / "got it" confirmation on a message */
 api.post("/messages/:id/ack", async (c) => {
-  const user = c.get("user");
-  const mid = Number(c.req.param("id"));
-  if (!mid) return c.json({ error: "Invalid message" }, 400);
-  try {
-    const msg = await c.env.DB.prepare(
-      `SELECT id, from_user_id, to_user_id, conversation_id, body FROM app_messages WHERE id = ?`
-    )
-      .bind(mid)
-      .first<{
-        id: number;
-        from_user_id: number;
-        to_user_id: number | null;
-        conversation_id: number | null;
-        body: string;
-      }>();
-    if (!msg) return c.json({ error: "Message not found" }, 404);
-
-    if (msg.conversation_id) {
-      const conv = await userCanAccessConversation(c.env.DB, user.id, msg.conversation_id);
-      if (!conv) return c.json({ error: "Not allowed" }, 403);
-    } else if (
-      msg.from_user_id !== user.id &&
-      msg.to_user_id !== user.id &&
-      msg.to_user_id != null
-    ) {
-      return c.json({ error: "Not allowed" }, 403);
-    }
-
-    const existing = await c.env.DB.prepare(
-      `SELECT 1 as ok FROM app_message_acks WHERE message_id = ? AND user_id = ?`
-    )
-      .bind(mid, user.id)
-      .first<{ ok: number }>();
-
-    if (existing) {
-      await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ? AND user_id = ?`)
-        .bind(mid, user.id)
-        .run();
-      return c.json({ ok: true, acked: false });
-    }
-
-    await c.env.DB.prepare(
-      `INSERT INTO app_message_acks (message_id, user_id) VALUES (?, ?)`
-    )
-      .bind(mid, user.id)
-      .run();
-
-    // Notify the original sender that someone confirmed (unless self)
-    if (msg.from_user_id !== user.id) {
-      await notifyUsers(
-        c.env.DB,
-        [msg.from_user_id],
-        "message_ack",
-        `${user.display_name} 👍 got your message`,
-        msg.body.slice(0, 120),
-        msg.conversation_id
-          ? { type: "conversation", id: msg.conversation_id }
-          : { type: "message", id: mid }
-      );
-    }
-    return c.json({ ok: true, acked: true });
-  } catch (e) {
-    const err = e instanceof Error ? e.message : String(e);
-    if (/no such table/i.test(err)) {
-      return c.json({ error: "Run migration 032_message_conversations.sql" }, 503);
-    }
-    return c.json({ error: err }, 500);
-  }
+  return c.json({ error: "Messaging has been turned off." }, 410);
 });
 
 api.post("/messages/read", async (c) => {
-  const user = c.get("user");
-  type ReadBody = { id?: number; all?: boolean; conversation_id?: number };
-  const body: ReadBody = await c.req.json<ReadBody>().catch(() => ({}));
-  try {
-    if (body.conversation_id) {
-      const conv = await userCanAccessConversation(c.env.DB, user.id, Number(body.conversation_id));
-      if (!conv) return c.json({ error: "Conversation not found" }, 404);
-      const rows = await c.env.DB.prepare(
-        `SELECT id FROM app_messages WHERE conversation_id = ? AND from_user_id != ?`
-      )
-        .bind(Number(body.conversation_id), user.id)
-        .all<{ id: number }>();
-      for (const m of rows.results || []) {
-        await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
-        )
-          .bind(m.id, user.id)
-          .run();
-      }
-    } else if (body.all) {
-      const rows = await c.env.DB.prepare(
-        `SELECT m.id FROM app_messages m
-         WHERE m.from_user_id != ?
-           AND (
-             m.to_user_id = ?
-             OR m.to_user_id IS NULL
-             OR EXISTS (
-               SELECT 1 FROM app_conversation_members cm
-               WHERE cm.conversation_id = m.conversation_id AND cm.user_id = ?
-             )
-           )`
-      )
-        .bind(user.id, user.id, user.id)
-        .all<{ id: number }>();
-      for (const m of rows.results || []) {
-        await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
-        )
-          .bind(m.id, user.id)
-          .run();
-      }
-    } else if (body.id) {
-      await c.env.DB.prepare(
-        `INSERT OR IGNORE INTO app_message_reads (message_id, user_id) VALUES (?, ?)`
-      )
-        .bind(Number(body.id), user.id)
-        .run();
-    }
-    return c.json({ ok: true });
-  } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Read failed" }, 500);
-  }
+  return c.json({ error: "Messaging has been turned off." }, 410);
 });
 
-/** Delete a conversation (and its messages) entirely — any participant. Also removes inbox alerts. */
 api.delete("/messages/conversations/:id", async (c) => {
-  const user = c.get("user");
-  const convId = Number(c.req.param("id"));
-  if (!convId) return c.json({ error: "Invalid conversation" }, 400);
-  try {
-    const conv = await userCanAccessConversation(c.env.DB, user.id, convId);
-    if (!conv) return c.json({ error: "Conversation not found" }, 404);
-
-    const msgs = await c.env.DB.prepare(
-      `SELECT id FROM app_messages WHERE conversation_id = ?`
-    )
-      .bind(convId)
-      .all<{ id: number }>();
-    const messageIds = (msgs.results || []).map((m) => m.id);
-
-    for (const mid of messageIds) {
-      await c.env.DB.prepare(`DELETE FROM app_message_reads WHERE message_id = ?`).bind(mid).run();
-      try {
-        await c.env.DB.prepare(`DELETE FROM app_message_acks WHERE message_id = ?`).bind(mid).run();
-      } catch {
-        /* acks table optional */
-      }
-    }
-
-    // Remove every inbox alert for this thread so it never reappears after delete.
-    // New: entity_type=conversation, entity_id=conversation id
-    // Legacy: entity_type=message, entity_id=message id
-    try {
-      const idsToClear = new Set<string>([String(convId), ...messageIds.map(String)]);
-      for (const eid of idsToClear) {
-        await c.env.DB.prepare(
-          `DELETE FROM notifications
-           WHERE entity_id = ?
-             AND (
-               entity_type IN ('conversation', 'message')
-               OR kind IN ('message', 'message_ack')
-             )`
-        )
-          .bind(eid)
-          .run();
-      }
-    } catch {
-      /* notifications table always exists in prod */
-    }
-
-    await c.env.DB.prepare(`DELETE FROM app_messages WHERE conversation_id = ?`).bind(convId).run();
-    await c.env.DB.prepare(`DELETE FROM app_conversation_members WHERE conversation_id = ?`)
-      .bind(convId)
-      .run();
-    await c.env.DB.prepare(`DELETE FROM app_conversations WHERE id = ?`).bind(convId).run();
-
-    return c.json({ ok: true, deleted_messages: messageIds.length });
-  } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : "Delete failed" }, 500);
-  }
+  return c.json({ error: "Messaging has been turned off." }, 410);
 });
 
 // ——— Warranty claims ———

@@ -708,7 +708,7 @@ export function DashboardPage() {
         { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card photos" },
         { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
         { to: "/inventory", icon: "📊", title: "Stock levels", hint: "Stage · order" },
-        { to: "/messages", icon: "💬", title: "Messages", hint: "Team" },
+
       ];
     }
     if (isMechanic) {
