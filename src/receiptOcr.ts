@@ -1707,14 +1707,17 @@ function cropToReceiptPaper(
   return { sx: minX, sy: minY, sw, sh };
 }
 
+/**
+ * Prepare image for OCR — small on purpose (phone Tesseract is pixel-bound).
+ * ~1100px wide is usually enough for pump qty / totals and ~3–10× faster than 2k.
+ */
 async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
   try {
     const bmp = await createImageBitmap(file);
-    // Upscale small phone photos so 20.220G / footer date stay readable
-    const maxW = 2200;
-    const minW = 1400;
+    // Fast path: keep resolution modest — multi-megapixel phone photos crush OCR speed
+    const maxW = 1100;
     let scale = bmp.width > maxW ? maxW / bmp.width : 1;
-    if (bmp.width * scale < minW) scale = minW / bmp.width;
+    // Don't upscale small images (slow + no gain)
     let w = Math.round(bmp.width * scale);
     let h = Math.round(bmp.height * scale);
     const full = document.createElement("canvas");
@@ -1723,13 +1726,13 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
     const fctx = full.getContext("2d");
     if (!fctx) return file;
     fctx.imageSmoothingEnabled = true;
-    fctx.imageSmoothingQuality = "high";
+    fctx.imageSmoothingQuality = "medium";
     fctx.drawImage(bmp, 0, 0, w, h);
     bmp.close?.();
 
     // Crop dark table/wood away when receipt paper is clearly brighter
     const crop = cropToReceiptPaper(fctx, w, h);
-    let srcCanvas = full;
+    let srcCanvas: HTMLCanvasElement = full;
     if (crop) {
       const cropped = document.createElement("canvas");
       cropped.width = crop.sw;
@@ -1743,39 +1746,28 @@ async function preprocessImage(file: File): Promise<HTMLCanvasElement | File> {
       }
     }
 
-    // Re-upscale if crop made it small
-    let outW = w;
-    let outH = h;
-    if (outW < minW) {
-      const s2 = minW / outW;
-      outW = Math.round(outW * s2);
-      outH = Math.round(outH * s2);
-    }
     const canvas = document.createElement("canvas");
-    canvas.width = outW;
-    canvas.height = outH;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (!ctx) return file;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(srcCanvas, 0, 0, outW, outH);
-    const img = ctx.getImageData(0, 0, outW, outH);
+    ctx.drawImage(srcCanvas, 0, 0);
+    const img = ctx.getImageData(0, 0, w, h);
     const d = img.data;
+    // Fast contrast: sample mean then single pass (no second full-image stats)
     let sum = 0;
-    const step = Math.max(4, Math.floor(d.length / 4 / 8000)) * 4;
+    const step = Math.max(16, Math.floor(d.length / 4 / 2000)) * 4;
     let samples = 0;
     for (let i = 0; i < d.length; i += step) {
       sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
       samples++;
     }
     const mean = samples ? sum / samples : 128;
-    // Mild contrast — keep thermal ink (dark wood crop already helped)
-    const contrast = mean < 140 ? 1.7 : 1.55;
+    const contrast = mean < 140 ? 1.65 : 1.45;
     for (let i = 0; i < d.length; i += 4) {
       const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
       let c = (g - 128) * contrast + 128;
-      if (c < 140) c = c * 0.9;
-      else c = 255 - (255 - c) * 0.92;
+      if (c < 140) c *= 0.92;
       const v = Math.max(0, Math.min(255, c));
       d[i] = d[i + 1] = d[i + 2] = v;
     }
@@ -2308,93 +2300,122 @@ export function clearOcrHintsCache() {
   hintsLoadedAt = 0;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let tesseractScriptPromise: Promise<any> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ocrWorkerPromise: Promise<any> | null = null;
+
+/** Load Tesseract CDN once (call on Fuel page mount to warm up). */
+async function loadTesseractLib(): Promise<// eslint-disable-next-line @typescript-eslint/no-explicit-any
+any> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let Tesseract: any = (window as any).Tesseract;
+  if (Tesseract) return Tesseract;
+  if (!tesseractScriptPromise) {
+    tesseractScriptPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+      s.async = true;
+      s.onload = () => resolve((window as any).Tesseract);
+      s.onerror = () => {
+        tesseractScriptPromise = null;
+        reject(new Error("Could not load OCR engine"));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return tesseractScriptPromise;
+}
+
+/**
+ * One shared worker for the session — createWorker is expensive; reusing it
+ * is the biggest speed win after the first receipt.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getOcrWorker(): Promise<any> {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      const Tesseract = await loadTesseractLib();
+      const worker = await Tesseract.createWorker("eng", 1, {
+        logger: () => {},
+      });
+      // Uniform block of text — best speed/accuracy for thermal receipts
+      await worker.setParameters({
+        tessedit_pageseg_mode: "6",
+      });
+      return worker;
+    })().catch((err) => {
+      ocrWorkerPromise = null;
+      throw err;
+    });
+  }
+  return ocrWorkerPromise;
+}
+
+/** Preload OCR engine on the fuel page so the first photo is faster. */
+export async function warmOcrEngine(): Promise<void> {
+  try {
+    await getOcrWorker();
+  } catch {
+    /* optional warm-up */
+  }
+}
+
+function normMoney(t: string): string {
+  return t.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
+}
+
+/**
+ * Fast receipt OCR for techs in the field.
+ * - 1 recognize pass on a downscaled/cropped image (typical: seconds, not minutes)
+ * - At most 1 rescue pass if gallons+total both missing
+ * - Reuses a single Tesseract worker
+ */
 export async function ocrReceiptImage(
   file: File,
   hints?: OcrHints | null
 ): Promise<ReceiptParseResult> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let Tesseract: any = (window as any).Tesseract;
-  if (!Tesseract) {
-    await new Promise<void>((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
-      s.async = true;
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("Could not load OCR engine"));
-      document.head.appendChild(s);
-    });
-    Tesseract = (window as any).Tesseract;
-  }
-
-  // Always OCR both raw photo and preprocessed — phone preprocess can wipe thermal ink.
-  // PSM 6 (uniform block) reads Circle K body+card better than default on phones.
+  const worker = await getOcrWorker();
   const source = await preprocessImage(file);
-  const recognize = (img: unknown, psm?: string) =>
-    Tesseract.recognize(img, "eng", {
-      logger: () => {},
-      ...(psm ? { tessedit_pageseg_mode: psm } : {}),
-    });
-  const [preResult, rawResult, prePsm6] = await Promise.all([
-    recognize(source),
-    recognize(file),
-    recognize(source, "6"),
-  ]);
-  let text: string = preResult?.data?.text || "";
-  const rawFull: string = rawResult?.data?.text || "";
-  const psm6Text: string = prePsm6?.data?.text || "";
-  const textChunks: string[] = [text];
-  if (rawFull.trim()) textChunks.push(rawFull);
-  if (psm6Text.trim()) textChunks.push(psm6Text);
 
-  // Extra region passes on preprocessed image — store header + fuel body + pan
-  try {
-    if (source && typeof (source as HTMLCanvasElement).getContext === "function") {
-      const full = source as HTMLCanvasElement;
-      const runStrip = async (y0: number, y1: number): Promise<string> => {
-        const h = Math.max(8, y1 - y0);
-        const strip = document.createElement("canvas");
-        strip.width = full.width;
-        strip.height = h;
-        const sctx = strip.getContext("2d");
-        if (!sctx) return "";
-        sctx.drawImage(full, 0, y0, full.width, h, 0, 0, full.width, h);
-        // No digit whitelist — whitelist passes invented bad card last-4s (1716 vs 7716)
-        const r = await Tesseract.recognize(strip, "eng", { logger: () => {} });
-        return (r?.data?.text || "").trim();
-      };
-
-      const topText = await runStrip(0, Math.round(full.height * 0.3));
-      const fuel0 = Math.round(full.height * 0.2);
-      const fuel1 = Math.round(full.height * 0.58);
-      const fuelText = await runStrip(fuel0, fuel1);
-      const mid0 = Math.round(full.height * 0.45);
-      const mid1 = Math.round(full.height * 0.85);
-      const midText = await runStrip(mid0, mid1);
-      const footText = await runStrip(Math.round(full.height * 0.72), full.height);
-
-      for (const chunk of [topText, fuelText, midText, footText]) {
-        if (chunk) textChunks.push(chunk);
-      }
-    }
-  } catch {
-    /* region passes optional */
-  }
-
-  // Normalize OCR spaces inside money before parse (USD$55. 78)
-  const normMoney = (t: string) =>
-    t.replace(/(\d)\s+\.\s*(\d)/g, "$1.$2").replace(/(\d)\.\s+(\d{2})\b/g, "$1.$2");
-  text = normMoney(textChunks.filter(Boolean).join("\n"));
-
-  // Parse each chunk and keep the best merge (raw full image often beats preprocess on phones)
+  const result = await worker.recognize(source);
+  let text = normMoney(result?.data?.text || "");
   let parsed = parseReceiptText(text);
-  for (const chunk of textChunks) {
-    if (!chunk?.trim()) continue;
-    const partial = parseReceiptText(normMoney(chunk));
-    parsed = mergeParseFields(parsed, partial);
+
+  // Rescue only when we still lack both pump qty and total (one extra pass, not 6)
+  const needsRescue =
+    (parsed.gallons == null && parsed.total_cost == null) ||
+    (parsed.missing_core.length >= 2 && !parsed.is_prepay);
+
+  if (needsRescue) {
+    try {
+      // Different view: raw file lightly scaled (no contrast) in case preprocess hurt ink
+      const bmp = await createImageBitmap(file);
+      const maxW = 1000;
+      const scale = bmp.width > maxW ? maxW / bmp.width : 1;
+      const w = Math.round(bmp.width * scale);
+      const h = Math.round(bmp.height * scale);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(bmp, 0, 0, w, h);
+        bmp.close?.();
+        const r2 = await worker.recognize(c);
+        const t2 = normMoney(r2?.data?.text || "");
+        if (t2.trim()) {
+          text = `${text}\n${t2}`;
+          parsed = mergeParseFields(parsed, parseReceiptText(t2));
+          parsed = mergeParseFields(parsed, parseReceiptText(text));
+        }
+      } else {
+        bmp.close?.();
+      }
+    } catch {
+      /* rescue optional */
+    }
   }
-  // Final re-parse of concatenated text for cross-field consensus
-  const combined = parseReceiptText(text);
-  parsed = mergeParseFields(combined, parsed);
 
   if (hints) {
     parsed = applyOcrLearning(parsed, text, hints);

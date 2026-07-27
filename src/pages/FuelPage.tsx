@@ -5,10 +5,12 @@ import { useAuth } from "../auth";
 import { CollapsibleSection, LogItem, LogList } from "../components/CollapsibleLog";
 import { PhotoCapture } from "../components/PhotoCapture";
 import {
+  applyOcrLearning,
   clearOcrHintsCache,
   formatGallonsDisplay,
   loadOcrHints,
   ocrReceiptImage,
+  warmOcrEngine,
   type OcrHints,
   type ReceiptParseResult,
 } from "../receiptOcr";
@@ -249,6 +251,8 @@ export function FuelPage() {
 
   useEffect(() => {
     load().catch((e) => setError(e.message));
+    // Warm OCR while tech picks unit / waits — first photo is much faster
+    void warmOcrEngine();
   }, []);
 
   function applyVehicleCrew(id: string) {
@@ -383,9 +387,15 @@ export function FuelPage() {
 
     setScanning(true);
     try {
-      // Load correction memory so common mistakes (e.g. $5.76 → $55.76) get fixed up front
-      const hints = await loadOcrHints((path) => api<OcrHints>(path));
-      const parsed = await ocrReceiptImage(f, hints);
+      // Run OCR and hints in parallel (don't wait on API before scanning)
+      const [hints, rawParsed] = await Promise.all([
+        loadOcrHints((path) => api<OcrHints>(path)).catch(() => null),
+        ocrReceiptImage(f, null),
+      ]);
+      const parsed =
+        hints != null
+          ? { ...applyOcrLearning(rawParsed, rawParsed.raw_text || "", hints), raw_text: rawParsed.raw_text }
+          : rawParsed;
       applyParsed(parsed);
     } catch (e) {
       setLastOcr(null);
