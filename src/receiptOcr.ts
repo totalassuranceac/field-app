@@ -2362,7 +2362,7 @@ export async function warmOcrEngine(): Promise<void> {
 }
 
 /**
- * Fast single-pass OCR → raw text (nameplates, packing slips, etc.).
+ * Fast single-pass OCR → raw text (packing slips, generic).
  * Reuses the shared worker; downscales for speed.
  */
 export async function recognizeImageText(file: File): Promise<string> {
@@ -2400,6 +2400,120 @@ export async function recognizeImageText(file: File): Promise<string> {
     const r = await worker.recognize(file);
     return String(r?.data?.text || "");
   }
+}
+
+/** Draw bitmap scaled into a canvas (caller owns cleanup of bmp if needed). */
+function drawScaledBitmap(
+  bmp: ImageBitmap,
+  maxW: number
+): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; w: number; h: number } | null {
+  const scale = bmp.width > maxW ? maxW / bmp.width : 1;
+  // Prefer slight upscale for small phone crops of nameplates
+  const up = bmp.width < 900 ? Math.min(2.5, 1600 / bmp.width) : scale;
+  const w = Math.round(bmp.width * up);
+  const h = Math.round(bmp.height * up);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(bmp, 0, 0, w, h);
+  return { canvas, ctx, w, h };
+}
+
+function applyGreyscaleContrast(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  contrast: number,
+  threshold: number | null
+) {
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    let c = (g - 128) * contrast + 128;
+    c = Math.max(0, Math.min(255, c));
+    if (threshold != null) c = c >= threshold ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = c;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/**
+ * Multi-pass OCR tuned for HVAC nameplates (Lennox etc.).
+ * Metal stickers OCR poorly on a single mild-contrast pass — run soft +
+ * several binarized thresholds and a top crop focused on M/N + S/N lines.
+ */
+export async function recognizeNameplateImageText(file: File): Promise<string> {
+  const worker = await getOcrWorker();
+  const chunks: string[] = [];
+
+  try {
+    const bmp = await createImageBitmap(file);
+    const maxW = 1800;
+
+    // Pass A: soft contrast full plate (preserves thin strokes)
+    {
+      const drawn = drawScaledBitmap(bmp, maxW);
+      if (drawn) {
+        applyGreyscaleContrast(drawn.ctx, drawn.w, drawn.h, 1.65, null);
+        const r = await worker.recognize(drawn.canvas);
+        chunks.push(String(r?.data?.text || ""));
+      }
+    }
+
+    // Passes B–D: hard thresholds (M/N and S/N ink varies with lighting)
+    for (const thr of [130, 150, 170]) {
+      const drawn = drawScaledBitmap(bmp, maxW);
+      if (!drawn) continue;
+      applyGreyscaleContrast(drawn.ctx, drawn.w, drawn.h, 1.45, thr);
+      const r = await worker.recognize(drawn.canvas);
+      chunks.push(String(r?.data?.text || ""));
+    }
+
+    // Pass E: top ~42% only (header + M/N + S/N) at higher effective scale
+    {
+      const topH = Math.max(80, Math.round(bmp.height * 0.42));
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(3, 2000 / bmp.width);
+      canvas.width = Math.round(bmp.width * scale);
+      canvas.height = Math.round(topH * scale);
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(
+          bmp,
+          0,
+          0,
+          bmp.width,
+          topH,
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+        applyGreyscaleContrast(ctx, canvas.width, canvas.height, 1.5, 155);
+        const r = await worker.recognize(canvas);
+        chunks.push(String(r?.data?.text || ""));
+      }
+    }
+
+    bmp.close?.();
+  } catch {
+    /* fall through */
+  }
+
+  if (!chunks.some((t) => t.trim())) {
+    try {
+      const r = await worker.recognize(file);
+      return String(r?.data?.text || "");
+    } catch {
+      return "";
+    }
+  }
+
+  // Join all passes — parser picks best M/N and S/N across noise
+  return chunks.join("\n---\n");
 }
 
 function normMoney(t: string): string {
