@@ -1,8 +1,5 @@
 -- Warranty statuses: dropped_off → claim_submitted → approved | rejected
--- Map legacy values first, then rebuild CHECK constraint
-
-UPDATE warranty_claims SET status = 'approved' WHERE status = 'processed';
-UPDATE warranty_claims SET status = 'rejected' WHERE status IN ('return_to_vendor', 'cancelled');
+-- Rebuild table so CHECK allows new values; map legacy statuses on INSERT
 
 CREATE TABLE IF NOT EXISTS warranty_claims_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +34,18 @@ INSERT INTO warranty_claims_new (
   created_at, updated_at, dropoff_photo_key, nameplate_photo_key
 )
 SELECT
-  id, log_number, status, part_id, part_code, part_name, model_number, serial_number,
+  id,
+  log_number,
+  CASE status
+    WHEN 'processed' THEN 'approved'
+    WHEN 'return_to_vendor' THEN 'rejected'
+    WHEN 'cancelled' THEN 'rejected'
+    WHEN 'approved' THEN 'approved'
+    WHEN 'rejected' THEN 'rejected'
+    WHEN 'claim_submitted' THEN 'claim_submitted'
+    ELSE 'dropped_off'
+  END,
+  part_id, part_code, part_name, model_number, serial_number,
   service_address, customer_name, vendor_name, notes, needs_vendor_return,
   dropped_off_by_user_id, dropped_off_at, claim_submitted_at, processed_at, processed_by_user_id,
   created_at, updated_at, dropoff_photo_key, nameplate_photo_key
