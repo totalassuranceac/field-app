@@ -3445,6 +3445,63 @@ tr.row-dup td {
   max-width: 100%;
 }
 
+.pickup-addr-lookup {
+  margin-bottom: 0.75rem;
+}
+
+.pickup-addr-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.pickup-addr-row input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.pickup-addr-results {
+  margin-bottom: 0.75rem;
+}
+
+.pickup-addr-section {
+  margin-top: 0.65rem;
+}
+
+.pickup-addr-section h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #94a3b8);
+}
+
+.pickup-addr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.pickup-addr-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  font-size: 0.88rem;
+}
+
+.pickup-addr-vendor {
+  color: #86efac;
+  font-size: 0.95rem;
+}
+
 .inv-browse-toolbar {
   display: flex;
   flex-wrap: wrap;

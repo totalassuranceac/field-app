@@ -596,6 +596,25 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "inv-purchase-by-address",
+    title: "Find where we bought a warranty part (by address)",
+    summary: "Type the job address on Pickup to see vendor will-calls and warranty vendors.",
+    roles: ["warehouse", "admin", "office"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → Pickup.",
+      "Under Where did we buy this?, type the service address or street name.",
+      "Tap Look up.",
+      "Check Vendor will-call / runs first — that shows who we ordered from for that job.",
+      "Warranties at this address show vendor if it was filled in at drop-off.",
+      "Catalog vendor shows the usual supplier for matching part numbers.",
+    ],
+    tips: [
+      "Works best when vendor runs and warranties include the job address.",
+      "Use a short street fragment if the full address doesn’t match (e.g. Allencrest).",
+    ],
+  },
+  {
     id: "warranty-vendor-credit",
     title: "Warranty return to vendor & credit",
     summary: "Return to vendor stays open until Approved or Rejected.",

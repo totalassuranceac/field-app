@@ -7260,6 +7260,180 @@ api.get("/inventory/pickups", async (c) => {
   }
 });
 
+/**
+ * Where did we buy a part for this job? Search by service address (or street fragment).
+ * Pulls warranties + vendor-run will-calls + receipt notes so warehouse can find the vendor.
+ */
+api.get("/inventory/purchase-log", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
+  const q = (c.req.query("q") || "").trim();
+  if (q.length < 2) {
+    return c.json({ error: "Type at least 2 characters of the address or street name" }, 400);
+  }
+  const tokens = q
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2)
+    .slice(0, 6);
+  if (!tokens.length) {
+    return c.json({ error: "Type a street name or address" }, 400);
+  }
+
+  const likeAll = (cols: string[]) => {
+    // Every token must appear in at least one of the columns (AND across tokens)
+    const parts: string[] = [];
+    const binds: string[] = [];
+    for (const t of tokens) {
+      const orCols = cols.map((c) => `lower(COALESCE(${c},'')) LIKE ?`).join(" OR ");
+      parts.push(`(${orCols})`);
+      for (let i = 0; i < cols.length; i++) binds.push(`%${t}%`);
+    }
+    return { sql: parts.join(" AND "), binds };
+  };
+
+  const results: {
+    warranties: unknown[];
+    vendor_runs: unknown[];
+    receipts: unknown[];
+    catalog_hints: unknown[];
+  } = { warranties: [], vendor_runs: [], receipts: [], catalog_hints: [] };
+
+  try {
+    const w = likeAll([
+      "service_address",
+      "customer_name",
+      "part_name",
+      "part_code",
+      "vendor_name",
+      "notes",
+      "log_number",
+    ]);
+    const rows = await c.env.DB.prepare(
+      `SELECT id, log_number, status, part_name, part_code, vendor_name, service_address,
+              customer_name, model_number, serial_number, notes, dropped_off_at, rma_number
+       FROM warranty_claims
+       WHERE ${w.sql}
+       ORDER BY dropped_off_at DESC
+       LIMIT 40`
+    )
+      .bind(...w.binds)
+      .all();
+    results.warranties = rows.results || [];
+  } catch {
+    /* optional */
+  }
+
+  try {
+    const v = likeAll([
+      "job_address",
+      "job_number",
+      "customer_name",
+      "part_name",
+      "part_code",
+      "vendor_name",
+      "notes",
+    ]);
+    const rows = await c.env.DB.prepare(
+      `SELECT id, status, vendor_name, part_name, part_code, qty, job_number, job_address,
+              customer_name, notes, needed_for_date, created_at, picked_at
+       FROM vendor_run_lines
+       WHERE ${v.sql}
+       ORDER BY created_at DESC
+       LIMIT 40`
+    )
+      .bind(...v.binds)
+      .all();
+    results.vendor_runs = rows.results || [];
+  } catch {
+    /* optional */
+  }
+
+  try {
+    const r = likeAll(["notes", "vendor_name", "invoice_number"]);
+    const rows = await c.env.DB.prepare(
+      `SELECT id, vendor_name, invoice_number, purchase_date, total_cost, notes, purchase_kind, created_at
+       FROM parts_purchase_receipts
+       WHERE ${r.sql}
+       ORDER BY created_at DESC
+       LIMIT 20`
+    )
+      .bind(...r.binds)
+      .all();
+    results.receipts = rows.results || [];
+  } catch {
+    /* optional */
+  }
+
+  // Catalog: if query looks like a part code, show primary vendor
+  try {
+    const codeLike = `%${tokens.join("%")}%`;
+    const parts = await c.env.DB.prepare(
+      `SELECT id, code, name, primary_vendor, cost
+       FROM parts
+       WHERE active = 1 AND (
+         lower(code) LIKE lower(?) OR lower(name) LIKE lower(?)
+       )
+       ORDER BY
+         CASE WHEN lower(code) LIKE lower(?) THEN 0 ELSE 1 END,
+         name
+       LIMIT 15`
+    )
+      .bind(`%${q}%`, `%${q}%`, `${tokens[0]}%`)
+      .all();
+    results.catalog_hints = parts.results || [];
+  } catch {
+    /* optional */
+  }
+
+  // Also pull primary vendors for part codes found in warranty/vendor-run hits
+  try {
+    const codes = new Set<string>();
+    for (const row of results.warranties as Array<{ part_code?: string | null; part_name?: string }>) {
+      if (row.part_code?.trim()) codes.add(row.part_code.trim());
+    }
+    for (const row of results.vendor_runs as Array<{ part_code?: string | null }>) {
+      if (row.part_code?.trim()) codes.add(row.part_code.trim());
+    }
+    if (codes.size) {
+      const list = [...codes].slice(0, 20);
+      const ph = list.map(() => "?").join(",");
+      const cat = await c.env.DB.prepare(
+        `SELECT id, code, name, primary_vendor, cost FROM parts
+         WHERE active = 1 AND lower(code) IN (${list.map(() => "lower(?)").join(",")})
+         LIMIT 20`
+      )
+        .bind(...list)
+        .all();
+      const existing = new Set(
+        (results.catalog_hints as Array<{ code: string }>).map((x) => x.code?.toLowerCase())
+      );
+      for (const p of cat.results || []) {
+        const code = String((p as { code: string }).code || "").toLowerCase();
+        if (!existing.has(code)) {
+          (results.catalog_hints as unknown[]).push(p);
+          existing.add(code);
+        }
+      }
+      void ph;
+    }
+  } catch {
+    /* optional */
+  }
+
+  const total =
+    results.warranties.length +
+    results.vendor_runs.length +
+    results.receipts.length +
+    results.catalog_hints.length;
+
+  return c.json({
+    query: q,
+    tokens,
+    total,
+    ...results,
+  });
+});
+
 /** Resolve vehicle stock location from unit # / name / truck:id scan. */
 async function resolveTruckLocation(
   db: D1Database,

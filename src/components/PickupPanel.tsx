@@ -86,6 +86,54 @@ export function PickupPanel({
   /** Truck barcode scan field per pickup (or global when one selected) */
   const [truckScan, setTruckScan] = useState<Record<number, string>>({});
 
+  /** Address → where we bought parts (warranty / vendor run log) */
+  const [addrQ, setAddrQ] = useState("");
+  const [addrBusy, setAddrBusy] = useState(false);
+  const [addrLog, setAddrLog] = useState<{
+    query: string;
+    total: number;
+    warranties: Array<{
+      id: number;
+      log_number: string;
+      status: string;
+      part_name: string;
+      part_code?: string | null;
+      vendor_name?: string | null;
+      service_address?: string | null;
+      customer_name?: string | null;
+      dropped_off_at?: string | null;
+      notes?: string | null;
+    }>;
+    vendor_runs: Array<{
+      id: number;
+      status: string;
+      vendor_name: string;
+      part_name: string;
+      part_code?: string | null;
+      qty?: number;
+      job_address?: string | null;
+      job_number?: string | null;
+      customer_name?: string | null;
+      created_at?: string | null;
+      notes?: string | null;
+    }>;
+    receipts: Array<{
+      id: number;
+      vendor_name: string;
+      invoice_number?: string | null;
+      purchase_date?: string | null;
+      total_cost?: number | null;
+      notes?: string | null;
+    }>;
+    catalog_hints: Array<{
+      id: number;
+      code: string;
+      name: string;
+      primary_vendor?: string | null;
+      cost?: number | null;
+    }>;
+  } | null>(null);
+
   const load = useCallback(async () => {
     const [p, u] = await Promise.all([
       api<{ pickups: Pickup[] }>(`/inventory/pickups?status=${filter}`),
@@ -378,6 +426,36 @@ export function PickupPanel({
     return status.replace("_", " ");
   }
 
+  async function searchPurchaseLog(e?: FormEvent) {
+    e?.preventDefault();
+    const q = addrQ.trim();
+    if (q.length < 2) {
+      setError("Type at least 2 characters of the service address (e.g. street name).");
+      return;
+    }
+    setAddrBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const d = await api<NonNullable<typeof addrLog>>(
+        `/inventory/purchase-log?q=${encodeURIComponent(q)}`
+      );
+      setAddrLog(d);
+      if (!d.total) {
+        setOk(`No purchase / warranty matches for “${q}”. Try a shorter street name.`);
+      } else {
+        setOk(
+          `Found ${d.total} match${d.total === 1 ? "" : "es"} for “${q}” — see purchase log below.`
+        );
+      }
+    } catch (err) {
+      setAddrLog(null);
+      setError(err instanceof Error ? err.message : "Lookup failed");
+    } finally {
+      setAddrBusy(false);
+    }
+  }
+
   return (
     <div className="pickup-panel">
       <div className="page-header no-print" style={{ marginBottom: "0.75rem" }}>
@@ -401,6 +479,143 @@ export function PickupPanel({
       </div>
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
+
+      <form className="card pickup-addr-lookup" onSubmit={(e) => void searchPurchaseLog(e)}>
+        <h3 className="inv-section-title" style={{ marginTop: 0 }}>
+          Where did we buy this? (by address)
+        </h3>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+          Warranty part with no vendor on the box? Type the <strong>service address</strong> (or
+          street name) to see warranties, vendor will-calls, and catalog vendors for that job.
+        </p>
+        <div className="pickup-addr-row">
+          <input
+            type="search"
+            value={addrQ}
+            onChange={(e) => setAddrQ(e.target.value)}
+            placeholder="e.g. 2738 Allencrest or Whitecap"
+            autoComplete="street-address"
+            enterKeyHint="search"
+            aria-label="Search purchase log by address"
+          />
+          <button className="btn" type="submit" disabled={addrBusy || addrQ.trim().length < 2}>
+            {addrBusy ? "…" : "Look up"}
+          </button>
+        </div>
+      </form>
+
+      {addrLog && (
+        <div className="card pickup-addr-results">
+          <h3 className="inv-section-title" style={{ marginTop: 0 }}>
+            Purchase log · “{addrLog.query}”
+          </h3>
+          {!addrLog.total ? (
+            <p className="muted" style={{ margin: 0 }}>
+              Nothing matched. Try fewer words (street only) or check the warranty drop-off had an
+              address.
+            </p>
+          ) : (
+            <>
+              {addrLog.vendor_runs.length > 0 && (
+                <div className="pickup-addr-section">
+                  <h4>Vendor will-call / runs</h4>
+                  <ul className="pickup-addr-list">
+                    {addrLog.vendor_runs.map((r) => (
+                      <li key={`vr-${r.id}`}>
+                        <strong className="pickup-addr-vendor">{r.vendor_name}</strong>
+                        <span>
+                          {r.qty != null ? `${r.qty}× ` : ""}
+                          {r.part_code ? `${r.part_code} · ` : ""}
+                          {r.part_name}
+                        </span>
+                        <span className="muted">
+                          {r.job_address || "—"}
+                          {r.job_number ? ` · job ${r.job_number}` : ""}
+                          {r.customer_name ? ` · ${r.customer_name}` : ""}
+                          {r.created_at
+                            ? ` · ${String(r.created_at).replace("T", " ").slice(0, 10)}`
+                            : ""}
+                          {r.status ? ` · ${r.status}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {addrLog.warranties.length > 0 && (
+                <div className="pickup-addr-section">
+                  <h4>Warranties at this address</h4>
+                  <ul className="pickup-addr-list">
+                    {addrLog.warranties.map((w) => (
+                      <li key={`w-${w.id}`}>
+                        <strong className="warranty-log">{w.log_number}</strong>
+                        <span>
+                          {w.part_code ? `${w.part_code} · ` : ""}
+                          {w.part_name}
+                        </span>
+                        <span>
+                          Vendor:{" "}
+                          <strong>
+                            {w.vendor_name?.trim() ? w.vendor_name : "not recorded"}
+                          </strong>
+                        </span>
+                        <span className="muted">
+                          {w.service_address || "—"}
+                          {w.customer_name ? ` · ${w.customer_name}` : ""}
+                          {w.dropped_off_at
+                            ? ` · ${String(w.dropped_off_at).replace("T", " ").slice(0, 10)}`
+                            : ""}
+                          {` · ${w.status.replace(/_/g, " ")}`}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {addrLog.receipts.length > 0 && (
+                <div className="pickup-addr-section">
+                  <h4>Parts receipts (notes / vendor match)</h4>
+                  <ul className="pickup-addr-list">
+                    {addrLog.receipts.map((r) => (
+                      <li key={`rc-${r.id}`}>
+                        <strong className="pickup-addr-vendor">{r.vendor_name}</strong>
+                        <span>
+                          {r.invoice_number ? `Inv ${r.invoice_number}` : "Receipt"}
+                          {r.total_cost != null
+                            ? ` · $${Number(r.total_cost).toFixed(2)}`
+                            : ""}
+                        </span>
+                        <span className="muted">
+                          {r.purchase_date || r.created_at?.slice(0, 10) || ""}
+                          {r.notes ? ` · ${r.notes}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {addrLog.catalog_hints.length > 0 && (
+                <div className="pickup-addr-section">
+                  <h4>Catalog vendor (part # / name)</h4>
+                  <ul className="pickup-addr-list">
+                    {addrLog.catalog_hints.map((p) => (
+                      <li key={`p-${p.id}`}>
+                        <strong>{p.code}</strong>
+                        <span>{p.name}</span>
+                        <span>
+                          Usually buy from:{" "}
+                          <strong>{p.primary_vendor?.trim() || "—"}</strong>
+                          {p.cost != null ? ` · ~$${Number(p.cost).toFixed(2)}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       <form className="card pickup-build" onSubmit={createPickup}>
         <h3 className="inv-section-title" style={{ marginTop: 0 }}>
