@@ -4970,6 +4970,188 @@ tr.row-low td {
   font-size: 0.85rem;
 }
 
+/* Compact bottles tab */
+.bottle-totals-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.55rem;
+}
+
+.bottle-total-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 0.8rem;
+}
+
+.bottle-total-code {
+  font-size: 0.82rem;
+  margin-right: 0.1rem;
+}
+
+.bottle-total-chip .full {
+  color: #86efac;
+  font-weight: 600;
+}
+
+.bottle-total-chip .empty {
+  color: #fcd34d;
+  font-weight: 600;
+}
+
+.bottle-total-chip .sep {
+  opacity: 0.5;
+}
+
+.bottle-total-all {
+  font-size: 0.75rem;
+  margin-left: 0.1rem;
+}
+
+.bottle-tools-section {
+  margin-bottom: 0.5rem;
+}
+
+.bottle-tool-form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.bottle-swap-lines-compact {
+  gap: 0.35rem !important;
+}
+
+.bottle-swap-lines-compact .asset-swap-line {
+  padding: 0.35rem 0.45rem;
+  gap: 0.4rem;
+}
+
+.bottle-locations {
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.bottle-loc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.bottle-loc-details {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.bottle-loc-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.65rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  min-height: 2.5rem;
+}
+
+.bottle-loc-summary::-webkit-details-marker {
+  display: none;
+}
+
+.bottle-loc-chevron {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  flex-shrink: 0;
+  margin-right: 0.15rem;
+  opacity: 0.75;
+  transition: transform 0.15s ease;
+}
+
+.bottle-loc-details[open] .bottle-loc-chevron {
+  transform: rotate(45deg);
+}
+
+.bottle-loc-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bottle-loc-peek {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.bottle-loc-peek .full {
+  color: #86efac;
+  font-weight: 600;
+}
+
+.bottle-loc-peek .empty {
+  color: #fcd34d;
+  font-weight: 600;
+}
+
+.bottle-loc-total {
+  margin-left: 0.2rem;
+  opacity: 0.8;
+}
+
+.bottle-loc-body {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.4rem 0.65rem 0.55rem;
+  border-top: 1px solid var(--line);
+}
+
+.bottle-loc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.2rem 0.15rem;
+  font-size: 0.85rem;
+}
+
+.bottle-loc-gas {
+  font-weight: 700;
+  min-width: 2.5rem;
+}
+
+.bottle-loc-counts {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: baseline;
+}
+
+.bottle-loc-counts .full {
+  color: #86efac;
+}
+
+.bottle-loc-counts .empty {
+  color: #fcd34d;
+}
+
+.bottle-loc-counts .sep {
+  opacity: 0.45;
+}
+
 .asset-swap-form .asset-swap-lines {
   display: grid;
   gap: 0.45rem;

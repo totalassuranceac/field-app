@@ -470,221 +470,227 @@ export function AssetsPage() {
 
       {tab === "bottles" && (
         <>
-          <div className="asset-summary-grid">
+          {/* Compact fleet totals */}
+          <div className="bottle-totals-strip card">
             {types.map((t) => (
-              <div key={t.id} className="card asset-summary-card">
-                <div className="asset-gas-code">{t.code}</div>
-                <div className="asset-gas-name">{t.name}</div>
-                <div className="asset-gas-counts">
-                  <span>
-                    <strong>{t.full_total}</strong> full
-                  </span>
-                  <span>
-                    <strong>{t.empty_total}</strong> empty
-                  </span>
-                  <span className="muted">
-                    <strong>{t.total}</strong> total
-                  </span>
-                </div>
+              <div key={t.id} className="bottle-total-chip" title={t.name}>
+                <strong className="bottle-total-code">{t.code}</strong>
+                <span className="full">{t.full_total}F</span>
+                <span className="sep">·</span>
+                <span className="empty">{t.empty_total}E</span>
+                <span className="muted bottle-total-all">{t.total}</span>
               </div>
             ))}
             {!types.length && (
-              <p className="muted">No bottle types yet — run migration 026 or refresh.</p>
+              <p className="muted" style={{ margin: 0 }}>
+                No bottle types yet — run migration 026 or refresh.
+              </p>
             )}
           </div>
 
           {canManage && (
-            <form className="card asset-swap-form" onSubmit={doSwap}>
-              <h3 className="inv-section-title" style={{ marginTop: 0 }}>
-                Warehouse swap
-              </h3>
-              <p className="muted" style={{ fontSize: "0.82rem", marginTop: 0 }}>
-                Tech brings empties in → warehouse takes empties and hands out fulls to the truck.
-              </p>
-              <div className="inv-adjust-row">
-                <label style={{ flex: "1 1 10rem" }}>
-                  Truck *
-                  <select value={swapTruck} onChange={(e) => setSwapTruck(e.target.value)} required>
-                    <option value="">Select unit…</option>
-                    {trucks.map((t) => (
-                      <option key={t.location_id} value={t.location_id}>
-                        {t.location_name}
-                      </option>
-                    ))}
-                  </select>
+            <CollapsibleSection
+              title="Warehouse swap"
+              hint="Empties in · fulls out"
+              defaultOpen={false}
+              className="bottle-tools-section"
+            >
+              <form className="asset-swap-form bottle-tool-form" onSubmit={doSwap}>
+                <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.5rem" }}>
+                  Tech brings empties → warehouse hands fulls to the truck.
+                </p>
+                <div className="inv-adjust-row">
+                  <label style={{ flex: "1 1 9rem" }}>
+                    Truck *
+                    <select value={swapTruck} onChange={(e) => setSwapTruck(e.target.value)} required>
+                      <option value="">Select unit…</option>
+                      {trucks.map((t) => (
+                        <option key={t.location_id} value={t.location_id}>
+                          {t.location_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ flex: "1 1 9rem" }}>
+                    Tech
+                    <select value={swapTech} onChange={(e) => setSwapTech(e.target.value)}>
+                      <option value="">Optional…</option>
+                      {peers.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="asset-swap-lines bottle-swap-lines-compact">
+                  {types.map((t) => (
+                    <div key={t.id} className="asset-swap-line">
+                      <strong>{t.code}</strong>
+                      <label>
+                        Empty in
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={swapLines[t.id]?.empty_in ?? "0"}
+                          onChange={(e) =>
+                            setSwapLines((prev) => ({
+                              ...prev,
+                              [t.id]: {
+                                empty_in: e.target.value,
+                                full_out: prev[t.id]?.full_out ?? "0",
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Full out
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={swapLines[t.id]?.full_out ?? "0"}
+                          onChange={(e) =>
+                            setSwapLines((prev) => ({
+                              ...prev,
+                              [t.id]: {
+                                empty_in: prev[t.id]?.empty_in ?? "0",
+                                full_out: e.target.value,
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </div>
+                <label>
+                  Notes
+                  <input
+                    value={swapNotes}
+                    onChange={(e) => setSwapNotes(e.target.value)}
+                    placeholder="optional"
+                  />
                 </label>
-                <label style={{ flex: "1 1 10rem" }}>
-                  Tech (who swapped)
-                  <select value={swapTech} onChange={(e) => setSwapTech(e.target.value)}>
-                    <option value="">Optional…</option>
-                    {peers.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.display_name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="asset-swap-lines">
-                {types.map((t) => (
-                  <div key={t.id} className="asset-swap-line">
-                    <strong>{t.code}</strong>
-                    <label>
-                      Empty in
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={swapLines[t.id]?.empty_in ?? "0"}
-                        onChange={(e) =>
-                          setSwapLines((prev) => ({
-                            ...prev,
-                            [t.id]: {
-                              empty_in: e.target.value,
-                              full_out: prev[t.id]?.full_out ?? "0",
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Full out
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={swapLines[t.id]?.full_out ?? "0"}
-                        onChange={(e) =>
-                          setSwapLines((prev) => ({
-                            ...prev,
-                            [t.id]: {
-                              empty_in: prev[t.id]?.empty_in ?? "0",
-                              full_out: e.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                  </div>
-                ))}
-              </div>
-              <label>
-                Notes
-                <input
-                  value={swapNotes}
-                  onChange={(e) => setSwapNotes(e.target.value)}
-                  placeholder="optional"
-                />
-              </label>
-              <button className="btn" type="submit" disabled={busy}>
-                {busy ? "Saving…" : "Complete swap"}
-              </button>
-            </form>
+                <button className="btn" type="submit" disabled={busy}>
+                  {busy ? "Saving…" : "Complete swap"}
+                </button>
+              </form>
+            </CollapsibleSection>
           )}
 
           {canManage && (
-            <form className="card" onSubmit={doSetCounts}>
-              <h3 className="inv-section-title" style={{ marginTop: 0 }}>
-                Set counts (cycle count)
-              </h3>
-              <div className="inv-adjust-row">
-                <label style={{ flex: "1 1 8rem" }}>
-                  Location
-                  <select value={setLoc} onChange={(e) => setSetLoc(e.target.value)} required>
-                    <option value="">Select…</option>
-                    {allLocs.map((l) => (
-                      <option key={l.location_id} value={l.location_id}>
-                        {l.location_name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ flex: "1 1 6rem" }}>
-                  Gas
-                  <select value={setType} onChange={(e) => setSetType(e.target.value)} required>
-                    <option value="">Select…</option>
-                    {types.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.code} — {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ flex: "0 0 5rem" }}>
-                  Full
-                  <input
-                    type="number"
-                    min={0}
-                    value={setFull}
-                    onChange={(e) => setSetFull(e.target.value)}
-                  />
-                </label>
-                <label style={{ flex: "0 0 5rem" }}>
-                  Empty
-                  <input
-                    type="number"
-                    min={0}
-                    value={setEmpty}
-                    onChange={(e) => setSetEmpty(e.target.value)}
-                  />
-                </label>
-              </div>
-              <button className="btn secondary" type="submit" disabled={busy}>
-                Save counts
-              </button>
-            </form>
+            <CollapsibleSection
+              title="Set counts"
+              hint="Cycle count"
+              defaultOpen={false}
+              className="bottle-tools-section"
+            >
+              <form className="bottle-tool-form" onSubmit={doSetCounts}>
+                <div className="inv-adjust-row">
+                  <label style={{ flex: "1 1 8rem" }}>
+                    Location
+                    <select value={setLoc} onChange={(e) => setSetLoc(e.target.value)} required>
+                      <option value="">Select…</option>
+                      {allLocs.map((l) => (
+                        <option key={l.location_id} value={l.location_id}>
+                          {l.location_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ flex: "1 1 6rem" }}>
+                    Gas
+                    <select value={setType} onChange={(e) => setSetType(e.target.value)} required>
+                      <option value="">Select…</option>
+                      {types.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.code}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ flex: "0 0 4.5rem" }}>
+                    Full
+                    <input
+                      type="number"
+                      min={0}
+                      value={setFull}
+                      onChange={(e) => setSetFull(e.target.value)}
+                    />
+                  </label>
+                  <label style={{ flex: "0 0 4.5rem" }}>
+                    Empty
+                    <input
+                      type="number"
+                      min={0}
+                      value={setEmpty}
+                      onChange={(e) => setSetEmpty(e.target.value)}
+                    />
+                  </label>
+                </div>
+                <button className="btn secondary" type="submit" disabled={busy}>
+                  Save counts
+                </button>
+              </form>
+            </CollapsibleSection>
           )}
 
-          <div className="card" style={{ overflowX: "auto" }}>
-            <h3 className="inv-section-title" style={{ marginTop: 0 }}>
+          <div className="bottle-locations card">
+            <h3 className="inv-section-title" style={{ marginTop: 0, marginBottom: "0.45rem" }}>
               {isField ? "Your truck" : "By location"}
+              <span className="muted" style={{ fontWeight: 400, fontSize: "0.8rem", marginLeft: "0.4rem" }}>
+                tap a location to expand
+              </span>
             </h3>
-            <table className="asset-matrix">
-              <thead>
-                <tr>
-                  <th>Location</th>
-                  {types.map((t) => (
-                    <th key={t.id} colSpan={2}>
-                      {t.code}
-                    </th>
-                  ))}
-                </tr>
-                <tr>
-                  <th />
-                  {types.map((t) => (
-                    <th key={`${t.id}-h`} colSpan={2} className="muted" style={{ fontWeight: 400 }}>
-                      full · empty
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {matrix.map((row) => (
-                  <tr key={row.location_id}>
-                    <td>
-                      <strong>{row.location_name}</strong>
-                    </td>
-                    {types.map((t) => {
-                      const cell = row.bottles.find((b) => b.bottle_type_id === t.id);
-                      return (
-                        <td key={t.id} colSpan={2} className="asset-matrix-cell">
-                          <span className="full">{cell?.full_qty ?? 0}</span>
+            {!matrix.length ? (
+              <p className="muted" style={{ margin: 0 }}>
+                No locations yet.
+              </p>
+            ) : (
+              <div className="bottle-loc-list">
+                {matrix.map((row) => {
+                  const totalFull = row.bottles.reduce((s, b) => s + (b.full_qty || 0), 0);
+                  const totalEmpty = row.bottles.reduce((s, b) => s + (b.empty_qty || 0), 0);
+                  const locTotal = totalFull + totalEmpty;
+                  return (
+                    <details key={row.location_id} className="bottle-loc-details">
+                      <summary className="bottle-loc-summary">
+                        <span className="bottle-loc-chevron" aria-hidden />
+                        <strong className="bottle-loc-name">{row.location_name}</strong>
+                        <span className="bottle-loc-peek muted">
+                          <span className="full">{totalFull}F</span>
                           <span className="sep">·</span>
-                          <span className="empty">{cell?.empty_qty ?? 0}</span>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-                {!matrix.length && (
-                  <tr>
-                    <td colSpan={1 + types.length * 2} className="muted">
-                      No locations yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                          <span className="empty">{totalEmpty}E</span>
+                          <span className="bottle-loc-total">{locTotal}</span>
+                        </span>
+                      </summary>
+                      <div className="bottle-loc-body">
+                        {types.map((t) => {
+                          const cell = row.bottles.find((b) => b.bottle_type_id === t.id);
+                          const f = cell?.full_qty ?? 0;
+                          const e = cell?.empty_qty ?? 0;
+                          return (
+                            <div key={t.id} className="bottle-loc-row">
+                              <span className="bottle-loc-gas" title={t.name}>
+                                {t.code}
+                              </span>
+                              <span className="bottle-loc-counts">
+                                <span className="full">{f} full</span>
+                                <span className="sep">·</span>
+                                <span className="empty">{e} empty</span>
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {!isField && (
