@@ -670,13 +670,13 @@ export function AssetsPage() {
             </CollapsibleSection>
           )}
 
-          <div className="bottle-locations card">
-            <h3 className="inv-section-title" style={{ marginTop: 0, marginBottom: "0.45rem" }}>
-              {isField ? "Your truck" : "By location"}
-              <span className="muted" style={{ fontWeight: 400, fontSize: "0.8rem", marginLeft: "0.4rem" }}>
-                tap a location to expand
-              </span>
-            </h3>
+          <CollapsibleSection
+            title={isField ? "Your truck" : "By location"}
+            count={matrix.length}
+            hint={isField ? "Bottle counts on your unit" : "Tap to show trucks & warehouse"}
+            defaultOpen={isField}
+            className="bottle-tools-section bottle-locations-section"
+          >
             {!matrix.length ? (
               <p className="muted" style={{ margin: 0 }}>
                 No locations yet.
@@ -723,7 +723,7 @@ export function AssetsPage() {
                 })}
               </div>
             )}
-          </div>
+          </CollapsibleSection>
 
           {!isField && (
             <CollapsibleSection
@@ -797,75 +797,87 @@ export function AssetsPage() {
           </div>
 
           <div className="asset-equip-layout">
-            <div className="asset-loc-list">
-              {!assets.length ? (
-                <p className="muted empty" style={{ margin: 0 }}>
-                  {isField
-                    ? "No company equipment assigned to your truck yet."
-                    : "No equipment yet — use Add equipment for ladders, dollies, tools."}
-                </p>
-              ) : (
-                equipmentByLocation.map((group) => (
-                  <details
-                    key={group.key}
-                    className="bottle-loc-details asset-loc-details"
-                    open={
-                      isField ||
-                      group.items.some((a) => a.id === selected?.id) ||
-                      (needsOnly && group.needs > 0)
-                        ? true
-                        : undefined
-                    }
-                  >
-                    <summary className="bottle-loc-summary">
-                      <span className="bottle-loc-chevron" aria-hidden />
-                      <strong className="bottle-loc-name">{group.label}</strong>
-                      <span className="bottle-loc-peek muted">
-                        <span className="bottle-loc-total">{group.items.length}</span>
-                        {group.needs > 0 ? (
-                          <span className="asset-loc-needs">
-                            {group.needs} need
-                            {group.needs === 1 ? "s" : ""} attention
-                          </span>
-                        ) : null}
-                      </span>
-                    </summary>
-                    <ul className="asset-list asset-list-in-loc">
-                      {group.items.map((a) => (
-                        <li key={a.id}>
-                          <button
-                            type="button"
-                            className={`card asset-card cond-${conditionClass(a.condition)}${
-                              selected?.id === a.id ? " selected" : ""
-                            }`}
-                            onClick={() => void openDetail(a)}
-                          >
-                            <div className="asset-card-top">
-                              <strong>
-                                {a.asset_tag ? `${a.asset_tag} · ` : ""}
-                                {a.name}
-                              </strong>
-                              <span
-                                className={`asset-cond-badge ${conditionClass(a.condition)}`}
-                              >
-                                {a.condition.replace("_", " ")}
-                              </span>
-                            </div>
-                            <div className="muted" style={{ fontSize: "0.82rem" }}>
-                              {a.category}
-                              {a.subcategory ? ` · ${a.subcategory}` : ""}
-                              {a.issued_at
-                                ? ` · issued ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
-                                : ""}
-                            </div>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ))
-              )}
-            </div>
+            <CollapsibleSection
+              title={isField ? "Your truck gear" : "By location"}
+              count={assets.length}
+              hint={
+                isField
+                  ? "Equipment on your unit"
+                  : "Tap to show trucks & warehouse"
+              }
+              defaultOpen={isField || Boolean(selected) || needsOnly}
+              className="bottle-tools-section"
+            >
+              <div className="asset-loc-list">
+                {!assets.length ? (
+                  <p className="muted empty" style={{ margin: 0 }}>
+                    {isField
+                      ? "No company equipment assigned to your truck yet."
+                      : "No equipment yet — use Add equipment for ladders, dollies, tools."}
+                  </p>
+                ) : (
+                  equipmentByLocation.map((group) => (
+                    <details
+                      key={group.key}
+                      className="bottle-loc-details asset-loc-details"
+                      open={
+                        isField ||
+                        group.items.some((a) => a.id === selected?.id) ||
+                        (needsOnly && group.needs > 0)
+                          ? true
+                          : undefined
+                      }
+                    >
+                      <summary className="bottle-loc-summary">
+                        <span className="bottle-loc-chevron" aria-hidden />
+                        <strong className="bottle-loc-name">{group.label}</strong>
+                        <span className="bottle-loc-peek muted">
+                          <span className="bottle-loc-total">{group.items.length}</span>
+                          {group.needs > 0 ? (
+                            <span className="asset-loc-needs">
+                              {group.needs} need
+                              {group.needs === 1 ? "s" : ""} attention
+                            </span>
+                          ) : null}
+                        </span>
+                      </summary>
+                      <ul className="asset-list asset-list-in-loc">
+                        {group.items.map((a) => (
+                          <li key={a.id}>
+                            <button
+                              type="button"
+                              className={`card asset-card cond-${conditionClass(a.condition)}${
+                                selected?.id === a.id ? " selected" : ""
+                              }`}
+                              onClick={() => void openDetail(a)}
+                            >
+                              <div className="asset-card-top">
+                                <strong>
+                                  {a.asset_tag ? `${a.asset_tag} · ` : ""}
+                                  {a.name}
+                                </strong>
+                                <span
+                                  className={`asset-cond-badge ${conditionClass(a.condition)}`}
+                                >
+                                  {a.condition.replace("_", " ")}
+                                </span>
+                              </div>
+                              <div className="muted" style={{ fontSize: "0.82rem" }}>
+                                {a.category}
+                                {a.subcategory ? ` · ${a.subcategory}` : ""}
+                                {a.issued_at
+                                  ? ` · issued ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
+                                  : ""}
+                              </div>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ))
+                )}
+              </div>
+            </CollapsibleSection>
 
             {selected && (
               <div className="card asset-detail">
