@@ -3445,6 +3445,16 @@ tr.row-dup td {
   max-width: 100%;
 }
 
+.admin-login-edit {
+  margin-bottom: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.admin-login-edit h2 {
+  margin-top: 0;
+}
+
 .admin-user-actions {
   display: flex;
   flex-wrap: wrap;

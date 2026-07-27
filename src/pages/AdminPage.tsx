@@ -43,6 +43,11 @@ interface AdminUser {
   must_change_password: number;
   auth_provider: string;
   active: number;
+  /** 1 when password_hash is set */
+  has_password?: number;
+  /** 1 when open invite or still needs password setup */
+  invite_pending?: number;
+  invite_expires_at?: string | null;
 }
 
 type UserMatch = {
@@ -86,11 +91,70 @@ export function AdminPage() {
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   /** Invite link or (legacy) temp password text to share with the new user */
-  const [inviteNotice, setInviteNotice] = useState("");
-  const [inviteUrl, setInviteUrl] = useState("");
+  const [inviteNotice, setInviteNotice] = useState(() => {
+    try {
+      return sessionStorage.getItem("admin_invite_notice") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [inviteUrl, setInviteUrl] = useState(() => {
+    try {
+      return sessionStorage.getItem("admin_invite_url") || "";
+    } catch {
+      return "";
+    }
+  });
   const [busyUser, setBusyUser] = useState(false);
   const [busyEmp, setBusyEmp] = useState(false);
   const [justAddedId, setJustAddedId] = useState<number | null>(null);
+
+  /** Edit login (username / resend invite) — survives lost one-time banner */
+  const [loginEdit, setLoginEdit] = useState<AdminUser | null>(null);
+  const [loginEditName, setLoginEditName] = useState("");
+  const [loginEditUser, setLoginEditUser] = useState("");
+  const [loginEditBusy, setLoginEditBusy] = useState(false);
+  const loginEditRef = useRef<HTMLDivElement>(null);
+
+  function persistInvite(notice: string, url: string) {
+    setInviteNotice(notice);
+    setInviteUrl(url);
+    try {
+      if (notice) sessionStorage.setItem("admin_invite_notice", notice);
+      else sessionStorage.removeItem("admin_invite_notice");
+      if (url) sessionStorage.setItem("admin_invite_url", url);
+      else sessionStorage.removeItem("admin_invite_url");
+    } catch {
+      /* private mode */
+    }
+  }
+
+  function clearInviteBanner() {
+    persistInvite("", "");
+  }
+
+  function openLoginEdit(u: AdminUser) {
+    setLoginEdit(u);
+    setLoginEditName(u.display_name);
+    setLoginEditUser(u.username || "");
+    setError("");
+    requestAnimationFrame(() => {
+      loginEditRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
+
+  function closeLoginEdit() {
+    setLoginEdit(null);
+    setLoginEditBusy(false);
+  }
+
+  function isPendingSetup(u: AdminUser): boolean {
+    return (
+      Number(u.invite_pending) === 1 ||
+      Number(u.must_change_password) === 1 ||
+      Number(u.has_password) === 0
+    );
+  }
 
   const [empName, setEmpName] = useState("");
   const [empPhone, setEmpPhone] = useState("");
@@ -350,14 +414,14 @@ export function AdminPage() {
           const login = res.user.username || editUsername;
           note = `Saved ${editName.trim()} · login @${login} (${roleLabel(editRole)})`;
           if (res.invite_url) {
-            setInviteUrl(res.invite_url);
-            setInviteNotice(
-              `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${login}\n• They create their password and are signed in immediately.`
+            persistInvite(
+              `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${login}\n• They create their password and are signed in immediately.\n\nTip: Banner stays until dismissed. Use Edit login on their user row to fix username or resend.`,
+              res.invite_url
             );
           } else if (res.temporary_password) {
-            setInviteUrl("");
-            setInviteNotice(
-              `Give them:\n• Username: ${login}\n• Password: ${res.temporary_password}`
+            persistInvite(
+              `Give them:\n• Username: ${login}\n• Password: ${res.temporary_password}`,
+              ""
             );
           }
         } else if (linkId) {
@@ -572,8 +636,7 @@ export function AdminPage() {
     setBusyUser(true);
     setError("");
     setOk("");
-    setInviteNotice("");
-    setInviteUrl("");
+    clearInviteBanner();
     try {
       const res = await api<{
         user: AdminUser;
@@ -607,14 +670,14 @@ export function AdminPage() {
       const login = created.username || uUser.trim().toLowerCase();
       showFeedback(`User added: ${created.display_name} (login: ${login})`);
       if (res.invite_url) {
-        setInviteUrl(res.invite_url);
-        setInviteNotice(
-          `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${login}\n• They create their password and are signed in immediately.`
+        persistInvite(
+          `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${login}\n• They create their password and are signed in immediately.\n\nTip: Banner stays until dismissed. Use Edit login to fix username or resend.`,
+          res.invite_url
         );
       } else if (res.temporary_password) {
-        setInviteUrl("");
-        setInviteNotice(
-          `Give them:\n• Username: ${login}\n• Password: ${res.temporary_password}`
+        persistInvite(
+          `Give them:\n• Username: ${login}\n• Password: ${res.temporary_password}`,
+          ""
         );
       }
       requestAnimationFrame(() => {
@@ -632,8 +695,7 @@ export function AdminPage() {
     e.preventDefault();
     setError("");
     setOk("");
-    setInviteNotice("");
-    setInviteUrl("");
+    clearInviteBanner();
     if (!uUser.trim()) {
       showFeedback("Username is required — that is their login.", true);
       return;
@@ -653,35 +715,88 @@ export function AdminPage() {
   }
 
   /** Preferred: send join link so they set their own password (no temp password). */
-  async function sendInviteLink(u: AdminUser) {
-    if (!u.username) {
+  async function sendInviteLink(
+    u: AdminUser,
+    opts?: { username?: string; display_name?: string; skipConfirm?: boolean }
+  ) {
+    const un = (opts?.username || u.username || "").trim().toLowerCase();
+    if (!un) {
       showFeedback("User needs a username before you can send an invite link", true);
-      return;
+      return false;
     }
     if (
+      !opts?.skipConfirm &&
       !window.confirm(
-        `Send ${u.display_name} a join link?\n\nThey open the link, type username “${u.username}”, create a password, and are signed in.\nAny existing password is cleared until they finish.`
+        `Send ${opts?.display_name || u.display_name} a join link?\n\nThey open the link, type username “${un}”, create a password, and are signed in.\nAny existing password is cleared until they finish.`
       )
     ) {
-      return;
+      return false;
     }
     try {
       const res = await api<{ invite_url?: string; username?: string }>(`/users/${u.id}/invite`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          username: un,
+          display_name: opts?.display_name?.trim() || undefined,
+        }),
       });
-      showFeedback(`Invite link ready for ${u.display_name}`);
+      showFeedback(`Invite link ready for ${opts?.display_name || u.display_name}`);
       if (res.invite_url) {
-        setInviteUrl(res.invite_url);
-        setInviteNotice(
-          `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${res.username || u.username}\n• They create their password and are signed in immediately.`
+        const login = res.username || un;
+        persistInvite(
+          `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${login}\n• They create their password and are signed in immediately.\n\nTip: This banner stays until you dismiss it — you can also open Edit login anytime to resend.`,
+          res.invite_url
         );
         requestAnimationFrame(() => {
           feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
         });
       }
+      await load();
+      return true;
     } catch (err) {
       showFeedback(err instanceof Error ? err.message : "Invite failed", true);
+      return false;
+    }
+  }
+
+  /** Save username/name and optionally re-issue invite in one step. */
+  async function saveLoginEdit(e: FormEvent, alsoInvite: boolean) {
+    e.preventDefault();
+    if (!loginEdit) return;
+    const un = loginEditUser.trim().toLowerCase();
+    if (!un) {
+      showFeedback("Username is required", true);
+      return;
+    }
+    if (!/^[a-z0-9._-]{2,40}$/i.test(un)) {
+      showFeedback("Username: 2–40 characters, letters/numbers . _ - only", true);
+      return;
+    }
+    setLoginEditBusy(true);
+    try {
+      if (alsoInvite) {
+        const okInvite = await sendInviteLink(loginEdit, {
+          username: un,
+          display_name: loginEditName.trim() || loginEdit.display_name,
+          skipConfirm: true,
+        });
+        if (okInvite) closeLoginEdit();
+      } else {
+        await api(`/users/${loginEdit.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            username: un,
+            display_name: loginEditName.trim() || loginEdit.display_name,
+          }),
+        });
+        await load();
+        showFeedback(`Saved login @${un} for ${loginEditName.trim() || loginEdit.display_name}`);
+        closeLoginEdit();
+      }
+    } catch (err) {
+      showFeedback(err instanceof Error ? err.message : "Could not save login", true);
+    } finally {
+      setLoginEditBusy(false);
     }
   }
 
@@ -703,14 +818,15 @@ export function AdminPage() {
         );
         showFeedback(`Join link ready for ${u.display_name}`);
         if (res.invite_url) {
-          setInviteUrl(res.invite_url);
-          setInviteNotice(
-            `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${res.username || u.username}\n• They create their password and are signed in immediately.`
+          persistInvite(
+            `Send them this link (one-time, ~7 days):\n${res.invite_url}\n\n• Username to type: ${res.username || u.username}\n• They create their password and are signed in immediately.\n\nTip: Banner stays until dismissed. Use Edit login to fix username or resend.`,
+            res.invite_url
           );
           requestAnimationFrame(() => {
             feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
           });
         }
+        await load();
         return;
       }
       if (choice.trim().length < 8) {
@@ -722,10 +838,11 @@ export function AdminPage() {
         body: JSON.stringify({ password: choice.trim() }),
       });
       showFeedback(`Password set for ${u.display_name}`);
-      setInviteUrl("");
-      setInviteNotice(
-        `Give them:\n• Username: ${u.username || u.display_name}\n• Password: ${choice.trim()}\nThey can change it later in Settings.`
+      persistInvite(
+        `Give them:\n• Username: ${u.username || u.display_name}\n• Password: ${choice.trim()}\nThey can change it later in Settings.`,
+        ""
       );
+      await load();
     } catch (err) {
       showFeedback(err instanceof Error ? err.message : "Reset failed", true);
     }
@@ -870,10 +987,7 @@ export function AdminPage() {
               <button
                 className="btn secondary"
                 type="button"
-                onClick={() => {
-                  setInviteNotice("");
-                  setInviteUrl("");
-                }}
+                onClick={() => clearInviteBanner()}
               >
                 Dismiss
               </button>
@@ -881,6 +995,72 @@ export function AdminPage() {
           </div>
         )}
       </div>
+
+      {loginEdit && can(user, "manageUsers") && (
+        <div className="card admin-card admin-login-edit" ref={loginEditRef}>
+          <h2>Edit login · {loginEdit.display_name}</h2>
+          <p className="muted admin-card-hint">
+            Fix a mistyped username, then save or save &amp; resend their join link. Open invites
+            stay valid with the corrected username.
+            {isPendingSetup(loginEdit) ? (
+              <>
+                {" "}
+                <strong>Pending setup</strong>
+                {loginEdit.invite_expires_at
+                  ? ` · invite expires ${String(loginEdit.invite_expires_at).replace("T", " ").slice(0, 16)}`
+                  : " · no password yet"}
+              </>
+            ) : null}
+          </p>
+          <form
+            className="form admin-compact-form"
+            onSubmit={(e) => void saveLoginEdit(e, false)}
+          >
+            <label>
+              Display name
+              <input
+                value={loginEditName}
+                onChange={(e) => setLoginEditName(e.target.value)}
+                required
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              Username (login)
+              <input
+                value={loginEditUser}
+                onChange={(e) => setLoginEditUser(e.target.value.toLowerCase())}
+                required
+                autoComplete="off"
+                spellCheck={false}
+                pattern="[a-z0-9._\-]{2,40}"
+                title="2–40 characters: letters, numbers, . _ -"
+              />
+            </label>
+            <div className="admin-match-actions">
+              <button className="btn secondary" type="submit" disabled={loginEditBusy}>
+                {loginEditBusy ? "Saving…" : "Save username"}
+              </button>
+              <button
+                className="btn"
+                type="button"
+                disabled={loginEditBusy}
+                onClick={(e) => void saveLoginEdit(e as unknown as FormEvent, true)}
+              >
+                {loginEditBusy ? "Working…" : "Save & resend invite"}
+              </button>
+              <button
+                className="btn ghost"
+                type="button"
+                disabled={loginEditBusy}
+                onClick={() => closeLoginEdit()}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className={`admin-people-grid${readOnly ? " is-readonly" : ""}`}>
         {(can(user, "manageEmployees") || readOnly) && (
@@ -1423,8 +1603,8 @@ export function AdminPage() {
                             </span>
                           )}
                           {!u.active && <span className="badge">off</span>}
-                          {!!u.must_change_password && (
-                            <div className="muted admin-cell-hint">must set password</div>
+                          {isPendingSetup(u) && (
+                            <div className="muted admin-cell-hint">pending setup</div>
                           )}
                         </td>
                         <td className="admin-login-cell">
@@ -1486,10 +1666,22 @@ export function AdminPage() {
                               <button
                                 className="btn secondary btn-sm"
                                 type="button"
-                                title="Send join link so they set a password"
-                                onClick={() => sendInviteLink(u)}
+                                title="Change username or name"
+                                onClick={() => openLoginEdit(u)}
                               >
-                                Invite
+                                Edit
+                              </button>
+                              <button
+                                className="btn secondary btn-sm"
+                                type="button"
+                                title={
+                                  isPendingSetup(u)
+                                    ? "Resend join link (they set their password)"
+                                    : "Send a new join link (clears current password until they finish)"
+                                }
+                                onClick={() => void sendInviteLink(u)}
+                              >
+                                {isPendingSetup(u) ? "Resend" : "Invite"}
                               </button>
                               <button
                                 className="btn ghost btn-sm"
@@ -1542,8 +1734,8 @@ export function AdminPage() {
                         <div className="admin-user-card-badges">
                           {u.id === justAddedId && <span className="badge ok">new</span>}
                           {!u.active && <span className="badge">off</span>}
-                          {!!u.must_change_password && (
-                            <span className="badge">must set password</span>
+                          {isPendingSetup(u) && (
+                            <span className="badge">pending setup</span>
                           )}
                         </div>
                       </div>
@@ -1552,10 +1744,22 @@ export function AdminPage() {
                           <button
                             className="btn secondary btn-sm"
                             type="button"
-                            title="Send join link so they set a password"
-                            onClick={() => sendInviteLink(u)}
+                            title="Change username or name"
+                            onClick={() => openLoginEdit(u)}
                           >
-                            Invite
+                            Edit
+                          </button>
+                          <button
+                            className="btn secondary btn-sm"
+                            type="button"
+                            title={
+                              isPendingSetup(u)
+                                ? "Resend join link"
+                                : "Send a new join link"
+                            }
+                            onClick={() => void sendInviteLink(u)}
+                          >
+                            {isPendingSetup(u) ? "Resend" : "Invite"}
                           </button>
                           <button
                             className="btn ghost btn-sm"
@@ -1651,9 +1855,10 @@ export function AdminPage() {
               </ul>
             </div>
             <p className="muted" style={{ marginTop: "0.75rem", fontSize: "0.85rem" }}>
-              Username is their login. Use <strong>Employee link</strong> anytime to match a login
-              to someone on the employee list. Reset password when they forget it; deactivate when
-              they leave.
+              Username is their login. Use <strong>Edit</strong> to fix a mistyped username,{" "}
+              <strong>Resend</strong> for a new join link (always available — the share banner stays
+              until you dismiss it). <strong>Employee link</strong> matches a login to the employee
+              list. Deactivate when they leave.
             </p>
           </div>
         )}

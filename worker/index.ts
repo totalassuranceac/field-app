@@ -5118,12 +5118,39 @@ api.get("/users", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
     const rows = await c.env.DB.prepare(
       `SELECT u.id, u.email, u.username, u.display_name, u.role, u.employee_id, u.phone,
               u.must_change_password, u.auth_provider, u.active, u.created_at,
-              u.manager_user_id, m.display_name as manager_name
+              u.manager_user_id, m.display_name as manager_name,
+              CASE WHEN u.password_hash IS NOT NULL AND TRIM(u.password_hash) != '' THEN 1 ELSE 0 END as has_password
        FROM users u
        LEFT JOIN users m ON m.id = u.manager_user_id
        ORDER BY u.display_name`
     ).all();
-    return c.json({ users: rows.results });
+    // Attach open invite expiry when available (migration 030)
+    let inviteByUser = new Map<number, string>();
+    try {
+      const invites = await c.env.DB.prepare(
+        `SELECT user_id, MAX(expires_at) as expires_at
+         FROM invite_tokens
+         WHERE used_at IS NULL AND expires_at > datetime('now')
+         GROUP BY user_id`
+      ).all<{ user_id: number; expires_at: string }>();
+      for (const r of invites.results || []) {
+        inviteByUser.set(Number(r.user_id), String(r.expires_at));
+      }
+    } catch {
+      /* invite table optional */
+    }
+    const users = (rows.results || []).map((u: Record<string, unknown>) => {
+      const id = Number(u.id);
+      const exp = inviteByUser.get(id) || null;
+      const hasPw = Number(u.has_password) === 1;
+      return {
+        ...u,
+        has_password: hasPw ? 1 : 0,
+        invite_pending: exp || (!hasPw && Number(u.must_change_password) === 1) ? 1 : 0,
+        invite_expires_at: exp,
+      };
+    });
+    return c.json({ users });
   } catch {
     // Pre-migration 018 fallback
     const rows = await c.env.DB.prepare(
@@ -5300,6 +5327,7 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const sets: string[] = [];
   const values: unknown[] = [];
+  let newUsername: string | null = null;
 
   if (body.role !== undefined) {
     const mapped = dbRoleFor(String(body.role) as Role);
@@ -5312,7 +5340,17 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
     if (body[f] !== undefined) {
       sets.push(`${f} = ?`);
       let val = body[f] === "" ? null : body[f];
-      if (f === "username" && typeof val === "string") val = val.trim().toLowerCase();
+      if (f === "username" && typeof val === "string") {
+        val = val.trim().toLowerCase();
+        if (!val) return c.json({ error: "Username cannot be empty" }, 400);
+        if (!/^[a-z0-9._-]{2,40}$/.test(val)) {
+          return c.json(
+            { error: "Username: 2–40 chars, letters/numbers . _ - only" },
+            400
+          );
+        }
+        newUsername = val;
+      }
       values.push(val);
     }
   }
@@ -5329,11 +5367,43 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
     );
   }
   if (!sets.length) return c.json({ error: "No fields" }, 400);
+
+  // Duplicate username check
+  if (newUsername) {
+    const clash = await c.env.DB.prepare(
+      `SELECT id FROM users WHERE lower(username) = ? AND id != ?`
+    )
+      .bind(newUsername, id)
+      .first();
+    if (clash) return c.json({ error: `Username @${newUsername} is already taken` }, 400);
+  }
+
   sets.push("updated_at = datetime('now')");
   values.push(id);
-  await c.env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`)
-    .bind(...values)
-    .run();
+  try {
+    await c.env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...values)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/unique|constraint/i.test(msg)) {
+      return c.json({ error: "Username or email already in use" }, 400);
+    }
+    throw e;
+  }
+  // Keep open invite tokens in sync with corrected username (so join page matches)
+  if (newUsername) {
+    try {
+      await c.env.DB.prepare(
+        `UPDATE invite_tokens SET username = ?
+         WHERE user_id = ? AND used_at IS NULL`
+      )
+        .bind(newUsername, id)
+        .run();
+    } catch {
+      /* optional table */
+    }
+  }
   // Invalidate sessions on password reset or deactivate
   if (body.password || body.active === false || body.active === 0) {
     await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
@@ -5350,7 +5420,11 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
     body.password ? "password_reset" : "update",
     "user",
     id,
-    body.password ? "Password reset by admin" : "Updated user",
+    body.password
+      ? "Password reset by admin"
+      : newUsername
+        ? `Updated user (username → @${newUsername})`
+        : "Updated user",
     before,
     after
   );
@@ -5361,16 +5435,56 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
 api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
   const id = Number(c.req.param("id"));
   const admin = c.get("user");
+  const body = await c.req
+    .json<{ username?: string; display_name?: string }>()
+    .catch(() => ({} as { username?: string; display_name?: string }));
+
   const before = await c.env.DB.prepare(
     `SELECT id, username, display_name, active FROM users WHERE id = ?`
   )
     .bind(id)
     .first<{ id: number; username: string | null; display_name: string; active: number }>();
   if (!before) return c.json({ error: "Not found" }, 404);
-  if (!before.username?.trim()) {
+  if (!before.active) return c.json({ error: "Reactivate the user before inviting" }, 400);
+
+  // Optional: fix username / display name in the same step as resending invite
+  let username = (before.username || "").trim().toLowerCase();
+  const wantUser = body.username?.trim().toLowerCase();
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (wantUser && wantUser !== username) {
+    if (!/^[a-z0-9._-]{2,40}$/.test(wantUser)) {
+      return c.json({ error: "Username: 2–40 chars, letters/numbers . _ - only" }, 400);
+    }
+    const clash = await c.env.DB.prepare(
+      `SELECT id FROM users WHERE lower(username) = ? AND id != ?`
+    )
+      .bind(wantUser, id)
+      .first();
+    if (clash) return c.json({ error: `Username @${wantUser} is already taken` }, 400);
+    sets.push("username = ?");
+    vals.push(wantUser);
+    username = wantUser;
+  }
+  if (body.display_name?.trim()) {
+    sets.push("display_name = ?");
+    vals.push(body.display_name.trim());
+  }
+  if (sets.length) {
+    sets.push("updated_at = datetime('now')");
+    vals.push(id);
+    try {
+      await c.env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`)
+        .bind(...vals)
+        .run();
+    } catch {
+      return c.json({ error: "Could not update username (already taken?)" }, 400);
+    }
+  }
+
+  if (!username) {
     return c.json({ error: "User needs a username before you can send an invite link" }, 400);
   }
-  if (!before.active) return c.json({ error: "Reactivate the user before inviting" }, 400);
   try {
     // Clear password so they must use the invite (optional hard lock)
     await c.env.DB.prepare(
@@ -5382,7 +5496,7 @@ api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) =>
     await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
     const invite = await issueInviteToken(c.env.DB, {
       userId: id,
-      username: before.username,
+      username,
       createdByUserId: admin.id,
     });
     await writeAudit(
@@ -5391,7 +5505,7 @@ api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) =>
       "password_reset",
       "user",
       id,
-      `Invite link issued for ${before.username}`
+      `Invite link issued for ${username}`
     );
     const base = new URL(c.req.url).origin;
     return c.json({
@@ -5399,7 +5513,7 @@ api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) =>
       invite_path: invite.invite_path,
       invite_url: `${base}${invite.invite_path}`,
       expires_at: invite.expires_at,
-      username: before.username,
+      username,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
