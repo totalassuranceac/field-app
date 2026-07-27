@@ -3832,7 +3832,7 @@ api.get("/warranties", async (c) => {
         binds.push(mapped);
       }
     } else {
-      // Match log # fragments (005 → W0726-005), part fields, RMA, tracking
+      // Match log #, address, part fields, vendor, RMA, tracking, notes
       const whereParts = [
         `lower(w.log_number) LIKE ?`,
         `lower(w.part_name) LIKE ?`,
@@ -3841,6 +3841,8 @@ api.get("/warranties", async (c) => {
         `lower(COALESCE(w.serial_number,'')) LIKE ?`,
         `lower(COALESCE(w.customer_name,'')) LIKE ?`,
         `lower(COALESCE(w.vendor_name,'')) LIKE ?`,
+        `lower(COALESCE(w.service_address,'')) LIKE ?`,
+        `lower(COALESCE(w.notes,'')) LIKE ?`,
         `lower(COALESCE(w.rma_number,'')) LIKE ?`,
         `lower(COALESCE(w.tracking_number,'')) LIKE ?`,
       ];
@@ -3853,7 +3855,7 @@ api.get("/warranties", async (c) => {
       }
       sql += ` WHERE (${whereParts.join(" OR ")})`;
       const like = `%${q}%`;
-      binds.push(like, like, like, like, like, like, like, like, like);
+      binds.push(like, like, like, like, like, like, like, like, like, like, like);
       if (compact && compact !== q) binds.push(`%${compact}%`);
     }
     sql += ` ORDER BY

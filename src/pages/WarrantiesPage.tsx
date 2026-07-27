@@ -630,7 +630,7 @@ export function WarrantiesPage() {
           value={searchQ}
           onChange={(e) => setSearchQ(e.target.value)}
           placeholder="Search…"
-          title="Search log #, part, model, RMA"
+          title="Search log #, address, part, vendor, RMA"
           aria-label="Search warranties"
         />
       </div>
