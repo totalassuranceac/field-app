@@ -12,17 +12,13 @@ import {
   type OcrHints,
 } from "../nameplateOcr";
 
-type WStatus =
-  | "dropped_off"
-  | "claim_submitted"
-  | "processed"
-  | "return_to_vendor"
-  | "cancelled";
+/** Flow: Dropped off → Claim submitted → Approved | Rejected */
+type WStatus = "dropped_off" | "claim_submitted" | "approved" | "rejected";
 
 interface Warranty {
   id: number;
   log_number: string;
-  status: WStatus;
+  status: WStatus | string;
   part_name: string;
   part_code: string | null;
   model_number: string | null;
@@ -44,13 +40,30 @@ interface Warranty {
   urgent?: boolean;
 }
 
-const STATUS_LABEL: Record<WStatus, string> = {
+const STATUS_LABEL: Record<string, string> = {
   dropped_off: "Dropped off",
   claim_submitted: "Claim submitted",
-  processed: "Processed ✓",
-  return_to_vendor: "Return to vendor",
-  cancelled: "Cancelled",
+  approved: "Approved",
+  rejected: "Rejected",
+  // legacy (mapped server-side)
+  processed: "Approved",
+  return_to_vendor: "Rejected",
+  cancelled: "Rejected",
 };
+
+function normalizeStatus(s: string): WStatus {
+  if (s === "processed") return "approved";
+  if (s === "return_to_vendor" || s === "cancelled") return "rejected";
+  if (s === "dropped_off" || s === "claim_submitted" || s === "approved" || s === "rejected") {
+    return s;
+  }
+  return "dropped_off";
+}
+
+function isOpenStatus(s: string): boolean {
+  const n = normalizeStatus(s);
+  return n === "dropped_off" || n === "claim_submitted";
+}
 
 /** Shrink phone photos for D1 blob storage (~900KB). */
 async function compressPhoto(file: File, maxBytes = 850_000): Promise<File> {
@@ -97,7 +110,7 @@ export function WarrantiesPage() {
     user?.role === "mechanic";
 
   const [list, setList] = useState<Warranty[]>([]);
-  const [filter, setFilter] = useState<"open" | "all" | "processed">("open");
+  const [filter, setFilter] = useState<"open" | "all" | "decided">("open");
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,7 +136,7 @@ export function WarrantiesPage() {
 
   async function load() {
     const status =
-      filter === "open" ? "open" : filter === "processed" ? "processed" : "";
+      filter === "open" ? "open" : filter === "decided" ? "decided" : "";
     const d = await api<{ warranties: Warranty[] }>(
       `/warranties${status ? `?status=${status}` : ""}`
     );
@@ -305,7 +318,7 @@ export function WarrantiesPage() {
         method: "PATCH",
         body: JSON.stringify({ status }),
       });
-      setOk(status === "processed" ? "Marked processed." : `Updated → ${STATUS_LABEL[status]}`);
+      setOk(`Updated → ${STATUS_LABEL[status] || status}`);
       await load();
     } catch (err) {
       if (err instanceof OfflineQueuedError) {
@@ -506,7 +519,7 @@ export function WarrantiesPage() {
           [
             ["open", "Open"],
             ["all", "All"],
-            ["processed", "Processed"],
+            ["decided", "Approved / rejected"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -522,13 +535,17 @@ export function WarrantiesPage() {
 
       <LogList className="warranty-list" empty="No warranties in this filter.">
         {list.map((w) => {
-          const tone = w.urgent
-            ? "urgent"
-            : w.overdue
-              ? "overdue"
-              : w.status === "processed"
-                ? "done"
-                : undefined;
+          const st = normalizeStatus(String(w.status));
+          const tone =
+            st === "approved"
+              ? "done"
+              : st === "rejected"
+                ? "urgent"
+                : w.urgent
+                  ? "urgent"
+                  : w.overdue
+                    ? "overdue"
+                    : undefined;
           return (
             <LogItem
               key={w.id}
@@ -537,10 +554,14 @@ export function WarrantiesPage() {
               summary={
                 <>
                   <strong className="warranty-log">{w.log_number}</strong>
-                  <span className="log-item-badge">{STATUS_LABEL[w.status] || w.status}</span>
+                  <span
+                    className={`log-item-badge warranty-status-${st}`}
+                  >
+                    {STATUS_LABEL[st] || st}
+                  </span>
                   <span className="log-item-meta">
                     {w.part_name}
-                    {w.days_open != null
+                    {w.days_open != null && isOpenStatus(st)
                       ? ` · ${w.days_open}d${w.urgent ? "!" : w.overdue ? " aging" : ""}`
                       : ""}
                   </span>
@@ -555,9 +576,6 @@ export function WarrantiesPage() {
               {w.service_address ? <div className="warranty-meta">{w.service_address}</div> : null}
               {w.customer_name ? (
                 <div className="muted">Customer: {w.customer_name}</div>
-              ) : null}
-              {w.needs_vendor_return ? (
-                <div className="warranty-vendor-flag">↩ Return to vendor</div>
               ) : null}
               {w.notes ? <div className="muted">{w.notes}</div> : null}
               <div className="warranty-photos-row">
@@ -600,12 +618,13 @@ export function WarrantiesPage() {
                 Dropped off {w.dropped_off_at?.replace("T", " ").slice(0, 16)}
                 {w.dropped_off_by_name ? ` by ${w.dropped_off_by_name}` : ""}
                 {w.processed_at
-                  ? ` · processed ${w.processed_at.replace("T", " ").slice(0, 16)}`
+                  ? ` · ${st === "rejected" ? "rejected" : st === "approved" ? "approved" : "closed"} ${w.processed_at.replace("T", " ").slice(0, 16)}`
                   : ""}
+                {w.processed_by_name ? ` by ${w.processed_by_name}` : ""}
               </div>
-              {canProcess && w.status !== "processed" && w.status !== "cancelled" && (
+              {canProcess && isOpenStatus(st) && (
                 <div className="log-item-actions warranty-actions">
-                  {w.status === "dropped_off" && (
+                  {st === "dropped_off" && (
                     <button
                       type="button"
                       className="btn secondary"
@@ -615,23 +634,21 @@ export function WarrantiesPage() {
                       Claim submitted
                     </button>
                   )}
-                  {(w.status === "dropped_off" || w.status === "claim_submitted") && (
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      disabled={busy}
-                      onClick={() => void setStatus(w.id, "return_to_vendor")}
-                    >
-                      Return to vendor
-                    </button>
-                  )}
                   <button
                     type="button"
-                    className="btn"
+                    className="btn secondary"
                     disabled={busy}
-                    onClick={() => void setStatus(w.id, "processed")}
+                    onClick={() => void setStatus(w.id, "approved")}
                   >
-                    Mark processed
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    disabled={busy}
+                    onClick={() => void setStatus(w.id, "rejected")}
+                  >
+                    Reject
                   </button>
                 </div>
               )}

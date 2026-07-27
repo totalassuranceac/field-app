@@ -5322,6 +5322,24 @@ tr.row-low td {
   font-weight: 700;
 }
 
+.warranty-status-approved {
+  background: color-mix(in srgb, #22c55e 25%, var(--surface)) !important;
+  color: #86efac !important;
+}
+
+.warranty-status-rejected {
+  background: color-mix(in srgb, #ef4444 22%, var(--surface)) !important;
+  color: #fca5a5 !important;
+}
+
+.warranty-status-claim_submitted {
+  background: color-mix(in srgb, #3b82f6 20%, var(--surface)) !important;
+}
+
+.warranty-status-dropped_off {
+  background: color-mix(in srgb, #eab308 18%, var(--surface)) !important;
+}
+
 .pickup-scan-actions {
   display: flex;
   flex-wrap: wrap;

@@ -869,7 +869,7 @@ api.get("/dashboard", async (c) => {
   try {
     const w = await c.env.DB.prepare(
       `SELECT COUNT(*) as c FROM warranty_claims
-       WHERE status IN ('dropped_off','claim_submitted','return_to_vendor')`
+       WHERE status IN ('dropped_off','claim_submitted')`
     ).first<{ c: number }>();
     openWarranties = w?.c ?? 0;
   } catch {
@@ -3809,13 +3809,24 @@ api.get("/warranties", async (c) => {
        LEFT JOIN users pu ON pu.id = w.processed_by_user_id`;
     const binds: unknown[] = [];
     if (status === "open") {
-      sql += ` WHERE w.status IN ('dropped_off','claim_submitted','return_to_vendor')`;
+      sql += ` WHERE w.status IN ('dropped_off','claim_submitted')`;
+    } else if (status === "decided" || status === "closed") {
+      sql += ` WHERE w.status IN ('approved','rejected')`;
     } else if (status) {
+      // Map legacy query params
+      const mapped =
+        status === "processed" ? "approved" : status === "return_to_vendor" || status === "cancelled" ? "rejected" : status;
       sql += ` WHERE w.status = ?`;
-      binds.push(status);
+      binds.push(mapped);
     }
     sql += ` ORDER BY
-      CASE w.status WHEN 'dropped_off' THEN 0 WHEN 'return_to_vendor' THEN 1 WHEN 'claim_submitted' THEN 2 ELSE 3 END,
+      CASE w.status
+        WHEN 'dropped_off' THEN 0
+        WHEN 'claim_submitted' THEN 1
+        WHEN 'approved' THEN 2
+        WHEN 'rejected' THEN 3
+        ELSE 4
+      END,
       w.dropped_off_at ASC
       LIMIT 200`;
     const rows = await c.env.DB.prepare(sql)
@@ -3823,16 +3834,16 @@ api.get("/warranties", async (c) => {
       .all();
     const list = (rows.results || []).map((r: Record<string, unknown>) => {
       const days = warrantyDaysOpen(String(r.dropped_off_at), r.processed_at ? String(r.processed_at) : null);
+      const open = r.status === "dropped_off" || r.status === "claim_submitted";
       return {
         ...r,
         days_open: days,
-        overdue: days >= 7 && r.status !== "processed" && r.status !== "cancelled",
-        urgent: days >= 14 && r.status !== "processed" && r.status !== "cancelled",
+        overdue: open && days >= 7,
+        urgent: open && days >= 14,
       };
     });
     const openCount = list.filter(
-      (r: { status: string }) =>
-        r.status === "dropped_off" || r.status === "claim_submitted" || r.status === "return_to_vendor"
+      (r: { status: string }) => r.status === "dropped_off" || r.status === "claim_submitted"
     ).length;
     return c.json({ warranties: list, open_count: openCount });
   } catch (e) {
@@ -4171,21 +4182,22 @@ api.patch("/warranties/:id", async (c) => {
 
   let newStatus = before.status;
   if (body.status && canProcess) {
-    const allowed = ["dropped_off", "claim_submitted", "processed", "return_to_vendor", "cancelled"];
-    if (!allowed.includes(body.status)) return c.json({ error: "Invalid status" }, 400);
-    newStatus = body.status;
+    // Normalize legacy client values
+    let next = body.status;
+    if (next === "processed") next = "approved";
+    if (next === "return_to_vendor" || next === "cancelled") next = "rejected";
+    const allowed = ["dropped_off", "claim_submitted", "approved", "rejected"];
+    if (!allowed.includes(next)) return c.json({ error: "Invalid status" }, 400);
+    newStatus = next;
     sets.push("status = ?");
-    vals.push(body.status);
-    if (body.status === "claim_submitted") {
+    vals.push(next);
+    if (next === "claim_submitted") {
       sets.push("claim_submitted_at = COALESCE(claim_submitted_at, datetime('now'))");
     }
-    if (body.status === "processed") {
+    if (next === "approved" || next === "rejected") {
       sets.push("processed_at = datetime('now')");
       sets.push("processed_by_user_id = ?");
       vals.push(user.id);
-    }
-    if (body.status === "return_to_vendor") {
-      sets.push("needs_vendor_return = 1");
     }
   } else if (body.claim_submitted && canProcess) {
     newStatus = "claim_submitted";
@@ -4199,24 +4211,23 @@ api.patch("/warranties/:id", async (c) => {
     .bind(...vals)
     .run();
 
-  if (newStatus === "processed" && before.dropped_off_by_user_id) {
+  if (newStatus === "approved" && before.dropped_off_by_user_id) {
     await notifyUsers(
       c.env.DB,
       [before.dropped_off_by_user_id],
-      "warranty_processed",
-      `Warranty ${before.log_number} processed`,
-      `${before.part_name} claim is complete.`,
+      "warranty_approved",
+      `Warranty ${before.log_number} approved`,
+      `${before.part_name} claim was approved.`,
       { type: "warranty", id }
     );
   }
-  if (newStatus === "return_to_vendor") {
-    const targets = await usersByRoles(c.env.DB, ["admin", "warehouse", "mechanic"]);
+  if (newStatus === "rejected" && before.dropped_off_by_user_id) {
     await notifyUsers(
       c.env.DB,
-      targets,
-      "warranty_vendor_return",
-      `Warranty ${before.log_number} — return to vendor`,
-      `${before.part_name} needs to go back to the vendor.`,
+      [before.dropped_off_by_user_id],
+      "warranty_rejected",
+      `Warranty ${before.log_number} rejected`,
+      `${before.part_name} claim was rejected.`,
       { type: "warranty", id }
     );
   }
