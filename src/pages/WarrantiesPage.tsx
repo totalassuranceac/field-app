@@ -629,10 +629,16 @@ export function WarrantiesPage() {
           className="warranty-search"
           value={searchQ}
           onChange={(e) => setSearchQ(e.target.value)}
-          placeholder="Search log #, part, model, RMA…"
+          placeholder="Search log # (e.g. 005), part, RMA…"
           aria-label="Search warranties"
         />
       </div>
+      {searchQ.trim() ? (
+        <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.5rem" }}>
+          Searching <strong>all</strong> warranties (including approved/rejected) for “
+          {searchQ.trim()}”
+        </p>
+      ) : null}
 
       <LogList className="warranty-list" empty="No warranties in this filter.">
         {list.map((w) => {

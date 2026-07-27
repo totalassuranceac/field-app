@@ -3815,29 +3815,46 @@ api.get("/warranties", async (c) => {
        LEFT JOIN users pu ON pu.id = w.processed_by_user_id`;
     const binds: unknown[] = [];
     const OPEN_WARRANTY = `('dropped_off','claim_submitted','return_to_vendor','delivered')`;
-    if (status === "open") {
-      sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
-    } else if (status === "vendor" || status === "vendor_waiting" || status === "waiting_vendor") {
-      // Waiting on vendor return / credit — still open
-      sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
-    } else if (status === "decided" || status === "closed") {
-      sql += ` WHERE w.status IN ('approved','rejected')`;
-    } else if (status) {
-      // Map legacy query params only
-      const mapped = status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
-      sql += ` WHERE w.status = ?`;
-      binds.push(mapped);
-    }
     const q = (c.req.query("q") || "").trim().toLowerCase();
-    if (q) {
-      sql += ` AND (
-        lower(w.log_number) LIKE ? OR lower(w.part_name) LIKE ? OR lower(COALESCE(w.part_code,'')) LIKE ?
-        OR lower(COALESCE(w.model_number,'')) LIKE ? OR lower(COALESCE(w.serial_number,'')) LIKE ?
-        OR lower(COALESCE(w.customer_name,'')) LIKE ? OR lower(COALESCE(w.vendor_name,'')) LIKE ?
-        OR lower(COALESCE(w.rma_number,'')) LIKE ? OR lower(COALESCE(w.tracking_number,'')) LIKE ?
-      )`;
+    // Text query searches ALL statuses so typing "005" finds W0726-005 even if approved.
+    // Without q, honor open / vendor / decided tabs.
+    if (!q) {
+      if (status === "open") {
+        sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
+      } else if (status === "vendor" || status === "vendor_waiting" || status === "waiting_vendor") {
+        sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
+      } else if (status === "decided" || status === "closed") {
+        sql += ` WHERE w.status IN ('approved','rejected')`;
+      } else if (status) {
+        const mapped =
+          status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
+        sql += ` WHERE w.status = ?`;
+        binds.push(mapped);
+      }
+    } else {
+      // Match log # fragments (005 → W0726-005), part fields, RMA, tracking
+      const whereParts = [
+        `lower(w.log_number) LIKE ?`,
+        `lower(w.part_name) LIKE ?`,
+        `lower(COALESCE(w.part_code,'')) LIKE ?`,
+        `lower(COALESCE(w.model_number,'')) LIKE ?`,
+        `lower(COALESCE(w.serial_number,'')) LIKE ?`,
+        `lower(COALESCE(w.customer_name,'')) LIKE ?`,
+        `lower(COALESCE(w.vendor_name,'')) LIKE ?`,
+        `lower(COALESCE(w.rma_number,'')) LIKE ?`,
+        `lower(COALESCE(w.tracking_number,'')) LIKE ?`,
+      ];
+      // Also match if user types full log without hyphens: w0726005 vs W0726-005
+      const compact = q.replace(/[^a-z0-9]/g, "");
+      if (compact && compact !== q) {
+        whereParts.push(
+          `lower(replace(replace(w.log_number, '-', ''), ' ', '')) LIKE ?`
+        );
+      }
+      sql += ` WHERE (${whereParts.join(" OR ")})`;
       const like = `%${q}%`;
       binds.push(like, like, like, like, like, like, like, like, like);
+      if (compact && compact !== q) binds.push(`%${compact}%`);
     }
     sql += ` ORDER BY
       CASE w.status
