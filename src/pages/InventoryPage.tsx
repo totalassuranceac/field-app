@@ -57,6 +57,13 @@ interface PartRow {
   external_st_id?: string | null;
 }
 
+interface PartBarcode {
+  id: number;
+  barcode: string;
+  label?: string | null;
+  created_at?: string;
+}
+
 /**
  * Product thumbnail.
  * Same-origin /api/* URLs send session cookies automatically via <img> —
@@ -298,6 +305,9 @@ export function InventoryPage() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [homeBusy, setHomeBusy] = useState(false);
   const [vendors, setVendors] = useState<PartVendor[]>([]);
+  const [partBarcodes, setPartBarcodes] = useState<PartBarcode[]>([]);
+  const [barcodeBusy, setBarcodeBusy] = useState(false);
+  const [manualBarcode, setManualBarcode] = useState("");
   const [newVendorName, setNewVendorName] = useState("");
   const [newVendorCost, setNewVendorCost] = useState("");
   const [newVendorSku, setNewVendorSku] = useState("");
@@ -683,9 +693,12 @@ export function InventoryPage() {
     setError("");
     setOk("");
     try {
-      const d = await api<{ part: PartRow; balances: PartBalance[]; vendors?: PartVendor[] }>(
-        `/inventory/parts/${p.id}`
-      );
+      const d = await api<{
+        part: PartRow;
+        balances: PartBalance[];
+        vendors?: PartVendor[];
+        barcodes?: PartBarcode[];
+      }>(`/inventory/parts/${p.id}`);
       const bals = d.balances || [];
       const totalFromBal = bals.reduce((s, b) => s + (Number(b.qty) || 0), 0);
       const merged = {
@@ -696,6 +709,8 @@ export function InventoryPage() {
       setSelectedPart(merged);
       setBalances(bals);
       setVendors(d.vendors || []);
+      setPartBarcodes(d.barcodes || []);
+      setManualBarcode("");
       setMinQty(merged.min_qty != null ? String(merged.min_qty) : "");
       setMaxQty(merged.max_qty != null ? String(merged.max_qty) : "");
       setNewVendorName("");
@@ -725,6 +740,65 @@ export function InventoryPage() {
     setSelectedPart(null);
     setBalances([]);
     setVendors([]);
+    setPartBarcodes([]);
+    setManualBarcode("");
+  }
+
+  async function linkBarcodeToPart(raw: string) {
+    if (!selectedId || !canManage) return;
+    const barcode = raw.trim();
+    if (barcode.length < 3) {
+      setError("Barcode too short — scan again or type the full code.");
+      return;
+    }
+    setBarcodeBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const res = await api<{ ok: boolean; already?: boolean; barcodes?: PartBarcode[]; error?: string }>(
+        `/inventory/parts/${selectedId}/barcodes`,
+        {
+          method: "POST",
+          body: JSON.stringify({ barcode }),
+        }
+      );
+      if (res.barcodes) setPartBarcodes(res.barcodes);
+      else {
+        // refresh list
+        const d = await api<{ barcodes?: PartBarcode[] }>(
+          `/inventory/parts/${selectedId}/barcodes`
+        );
+        setPartBarcodes(d.barcodes || []);
+      }
+      setManualBarcode("");
+      setOk(
+        res.already
+          ? `Barcode ${barcode} was already linked to this part.`
+          : `Linked barcode ${barcode} — scan will open this part.`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not link barcode");
+    } finally {
+      setBarcodeBusy(false);
+    }
+  }
+
+  async function removePartBarcode(barcodeId: number, barcode: string) {
+    if (!selectedId || !canManage) return;
+    if (!confirm(`Remove barcode ${barcode} from this part?`)) return;
+    setBarcodeBusy(true);
+    setError("");
+    try {
+      await api(`/inventory/parts/${selectedId}/barcodes/${barcodeId}`, {
+        method: "DELETE",
+      });
+      setPartBarcodes((prev) => prev.filter((b) => b.id !== barcodeId));
+      setOk(`Removed barcode ${barcode}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not remove barcode");
+    } finally {
+      setBarcodeBusy(false);
+    }
   }
 
   async function applyStock(mode: "set" | "in" | "out") {
@@ -2135,6 +2209,10 @@ export function InventoryPage() {
               </div>
               <div className="inv-detail-meta">
                 <span className="inv-meta-chip">
+                  <span className="muted">Part #</span>{" "}
+                  <strong>{selectedPart.code || "—"}</strong>
+                </span>
+                <span className="inv-meta-chip">
                   <span className="muted">Vendor</span>{" "}
                   <strong>{selectedPart.primary_vendor || "—"}</strong>
                 </span>
@@ -2151,6 +2229,70 @@ export function InventoryPage() {
                   <strong>{Number(selectedPart.total_qty || 0)}</strong>
                 </span>
               </div>
+
+              {canManage && (
+                <div className="inv-barcode-box no-print">
+                  <h3 className="inv-section-title" style={{ marginTop: 0 }}>
+                    Barcodes for this part
+                  </h3>
+                  <p className="muted inv-section-hint" style={{ marginTop: 0 }}>
+                    Scan the package UPC or vendor sticker to link it. Next time{" "}
+                    <strong>Scan to receive</strong> finds this part. Part #{" "}
+                    <code>{selectedPart.code}</code> already works as a barcode if you print it.
+                  </p>
+                  <div className="inv-barcode-actions">
+                    <BarcodeScanButton
+                      label="Scan barcode to link"
+                      disabled={barcodeBusy}
+                      onCode={(code) => void linkBarcodeToPart(code)}
+                    />
+                    <div className="inv-barcode-manual">
+                      <input
+                        type="text"
+                        value={manualBarcode}
+                        onChange={(e) => setManualBarcode(e.target.value)}
+                        placeholder="Or type barcode / UPC"
+                        disabled={barcodeBusy}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void linkBarcodeToPart(manualBarcode);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={barcodeBusy || !manualBarcode.trim()}
+                        onClick={() => void linkBarcodeToPart(manualBarcode)}
+                      >
+                        {barcodeBusy ? "…" : "Add"}
+                      </button>
+                    </div>
+                  </div>
+                  {partBarcodes.length > 0 ? (
+                    <ul className="inv-barcode-list">
+                      {partBarcodes.map((b) => (
+                        <li key={b.id}>
+                          <code className="inv-barcode-value">{b.barcode}</code>
+                          <button
+                            type="button"
+                            className="btn ghost btn-sm"
+                            disabled={barcodeBusy}
+                            onClick={() => void removePartBarcode(b.id, b.barcode)}
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted" style={{ fontSize: "0.82rem", margin: "0.4rem 0 0" }}>
+                      No package barcodes linked yet — scan one when you have the part in hand.
+                    </p>
+                  )}
+                </div>
+              )}
 
               <h3 className="inv-section-title">Where to find it</h3>
               {canManage && (

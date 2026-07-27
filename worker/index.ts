@@ -6002,11 +6002,9 @@ api.get("/inventory/parts", requireRoles(ROLE_PERMS.viewInventory), async (c) =>
   }
 });
 
-/** Lookup part by barcode / code / QR payload for scan UI (before /parts/:id). */
-api.get("/inventory/parts/lookup", async (c) => {
-  const code = (c.req.query("code") || "").trim();
-  if (!code) return c.json({ error: "code required" }, 400);
-  let raw = code;
+/** Normalize scanned payload to a bare code string. */
+function normalizeScanCode(code: string): string {
+  let raw = (code || "").trim();
   if (raw.includes("part:")) raw = raw.split("part:").pop() || raw;
   if (raw.includes("code=")) {
     try {
@@ -6015,10 +6013,36 @@ api.get("/inventory/parts/lookup", async (c) => {
       /* keep */
     }
   }
-  raw = raw.trim();
+  return raw.trim();
+}
+
+/** Lookup part by barcode / code / QR payload for scan UI (before /parts/:id). */
+api.get("/inventory/parts/lookup", async (c) => {
+  const code = (c.req.query("code") || "").trim();
+  if (!code) return c.json({ error: "code required" }, 400);
+  const raw = normalizeScanCode(code);
   const tokens = partSearchTokens(raw);
   try {
-    // Exact / prefix code first
+    // Linked package/vendor barcodes first (migration 042)
+    try {
+      const byBarcode = await c.env.DB.prepare(
+        `SELECT p.id, p.code, p.name, p.image_url, p.primary_vendor, p.cost,
+           COALESCE((SELECT SUM(b.qty) FROM stock_balances b WHERE b.part_id = p.id), 0) as total_qty
+         FROM part_barcodes pb
+         JOIN parts p ON p.id = pb.part_id AND p.active = 1
+         WHERE lower(pb.barcode) = lower(?)
+         LIMIT 5`
+      )
+        .bind(raw)
+        .all();
+      if ((byBarcode.results || []).length) {
+        return c.json({ parts: byBarcode.results || [], query: raw, tokens, matched: "barcode" });
+      }
+    } catch {
+      /* table optional until migration 042 */
+    }
+
+    // Exact / prefix catalog part number
     const exact = await c.env.DB.prepare(
       `SELECT id, code, name, image_url, primary_vendor, cost,
          COALESCE((SELECT SUM(b.qty) FROM stock_balances b WHERE b.part_id = parts.id), 0) as total_qty
@@ -6029,7 +6053,7 @@ api.get("/inventory/parts/lookup", async (c) => {
       .bind(raw, `${raw}%`, raw)
       .all();
     if ((exact.results || []).length) {
-      return c.json({ parts: exact.results || [], query: raw, tokens });
+      return c.json({ parts: exact.results || [], query: raw, tokens, matched: "code" });
     }
     // Multi-token name/code search (e.g. "pvc 90" → PVC 3/4 90)
     let sql = `SELECT id, code, name, image_url, primary_vendor, cost,
@@ -6710,8 +6734,145 @@ api.get("/inventory/parts/:id", requireRoles(ROLE_PERMS.viewInventory), async (c
   } catch {
     vendors = [];
   }
-  return c.json({ part, balances: balances.results || [], vendors });
+  let barcodes: unknown[] = [];
+  try {
+    const b = await c.env.DB.prepare(
+      `SELECT id, barcode, label, created_at FROM part_barcodes
+       WHERE part_id = ? ORDER BY created_at DESC`
+    )
+      .bind(id)
+      .all();
+    barcodes = b.results || [];
+  } catch {
+    barcodes = [];
+  }
+  return c.json({ part, balances: balances.results || [], vendors, barcodes });
 });
+
+/** List / add barcodes for a part (package UPC, vendor sticker, etc.). */
+api.get("/inventory/parts/:id/barcodes", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
+  const id = Number(c.req.param("id"));
+  try {
+    const rows = await c.env.DB.prepare(
+      `SELECT id, barcode, label, created_at FROM part_barcodes
+       WHERE part_id = ? ORDER BY created_at DESC`
+    )
+      .bind(id)
+      .all();
+    return c.json({ barcodes: rows.results || [] });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ barcodes: [], error: "Run migration 042_part_barcodes.sql" });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/inventory/parts/:id/barcodes", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
+  const id = Number(c.req.param("id"));
+  const user = c.get("user");
+  const part = await c.env.DB.prepare(`SELECT id, code, name FROM parts WHERE id = ? AND active = 1`)
+    .bind(id)
+    .first<{ id: number; code: string; name: string }>();
+  if (!part) return c.json({ error: "Part not found" }, 404);
+
+  const body = await c.req.json<{ barcode?: string; label?: string | null }>().catch(() => ({}));
+  const barcode = normalizeScanCode(String(body.barcode || ""));
+  if (!barcode || barcode.length < 3) {
+    return c.json({ error: "Scan or enter a barcode (at least 3 characters)" }, 400);
+  }
+  const label = body.label?.trim() || null;
+
+  // Already this part's barcode?
+  try {
+    const existing = await c.env.DB.prepare(
+      `SELECT id, part_id FROM part_barcodes WHERE lower(barcode) = lower(?)`
+    )
+      .bind(barcode)
+      .first<{ id: number; part_id: number }>();
+    if (existing) {
+      if (existing.part_id === id) {
+        return c.json({ ok: true, already: true, barcode });
+      }
+      const other = await c.env.DB.prepare(`SELECT code, name FROM parts WHERE id = ?`)
+        .bind(existing.part_id)
+        .first<{ code: string; name: string }>();
+      return c.json(
+        {
+          error: `Barcode already linked to ${other?.code || "another part"}${
+            other?.name ? ` (${other.name})` : ""
+          }`,
+        },
+        409
+      );
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO part_barcodes (part_id, barcode, label, created_by_user_id)
+       VALUES (?, ?, ?, ?)`
+    )
+      .bind(id, barcode, label, user.id)
+      .run();
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "part",
+      id,
+      `Linked barcode ${barcode} → ${part.code}`
+    );
+    const rows = await c.env.DB.prepare(
+      `SELECT id, barcode, label, created_at FROM part_barcodes
+       WHERE part_id = ? ORDER BY created_at DESC`
+    )
+      .bind(id)
+      .all();
+    return c.json({ ok: true, barcodes: rows.results || [] }, 201);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ error: "Run migration 042_part_barcodes.sql" }, 503);
+    }
+    if (/unique/i.test(msg)) {
+      return c.json({ error: "That barcode is already linked to a part" }, 409);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.delete(
+  "/inventory/parts/:id/barcodes/:barcodeId",
+  requireRoles(ROLE_PERMS.manageInventory),
+  async (c) => {
+    const id = Number(c.req.param("id"));
+    const barcodeId = Number(c.req.param("barcodeId"));
+    const user = c.get("user");
+    try {
+      const row = await c.env.DB.prepare(
+        `SELECT id, barcode FROM part_barcodes WHERE id = ? AND part_id = ?`
+      )
+        .bind(barcodeId, id)
+        .first<{ id: number; barcode: string }>();
+      if (!row) return c.json({ error: "Barcode not found on this part" }, 404);
+      await c.env.DB.prepare(`DELETE FROM part_barcodes WHERE id = ?`).bind(barcodeId).run();
+      await writeAudit(
+        c.env.DB,
+        user,
+        "update",
+        "part",
+        id,
+        `Removed barcode ${row.barcode}`
+      );
+      return c.json({ ok: true });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such table/i.test(msg)) {
+        return c.json({ error: "Run migration 042_part_barcodes.sql" }, 503);
+      }
+      return c.json({ error: msg }, 500);
+    }
+  }
+);
 
 /** Add/update a vendor quote; default vendor becomes cheapest available. */
 api.post("/inventory/parts/:id/vendors", requireRoles(ROLE_PERMS.manageInventory), async (c) => {

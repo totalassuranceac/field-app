@@ -3445,6 +3445,61 @@ tr.row-dup td {
   max-width: 100%;
 }
 
+.inv-barcode-box {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent, #3b82f6) 6%, var(--surface));
+}
+
+.inv-barcode-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.inv-barcode-manual {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.inv-barcode-manual input {
+  flex: 1 1 8rem;
+  min-width: 0;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.inv-barcode-list {
+  list-style: none;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.inv-barcode-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--border);
+}
+
+.inv-barcode-value {
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
 .admin-user-search {
   display: flex;
   flex-direction: column;

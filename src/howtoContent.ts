@@ -534,13 +534,31 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     steps: [
       "Open Inventory → Stock.",
       "Tap Scan to receive (camera).",
-      "Point at the part barcode or QR — the app looks up the part code.",
+      "Point at the part barcode or QR — the app looks up part # or a linked barcode.",
       "Confirm location, set quantity, tap + Receive.",
-      "If the code isn’t in the catalog, type it or add the part first.",
+      "If the code isn’t found, open the part and use “Scan barcode to link” first.",
     ],
     tips: [
       "Works best in Chrome on Android with a clear barcode; iPhones may open the camera photo fallback.",
       "USB/Bluetooth wedge scanners that type into the search box also work.",
+    ],
+  },
+  {
+    id: "inv-link-barcode",
+    title: "Link a package barcode to a part",
+    summary: "On the part page, scan the UPC so future receives find this part.",
+    roles: ["warehouse", "admin"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → find the part → open it.",
+      "Under Barcodes for this part, tap Scan barcode to link.",
+      "Point at the package/vendor barcode (or type the UPC and tap Add).",
+      "The code is saved on this part only.",
+      "Later, Scan to receive with that barcode opens the same part.",
+    ],
+    tips: [
+      "Part number already works if you print labels with that code — linking is for manufacturer UPCs that differ.",
+      "One barcode can only belong to one part; remove it first if you linked the wrong item.",
     ],
   },
   {
