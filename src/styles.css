@@ -5518,6 +5518,16 @@ tr.row-low td {
   background: color-mix(in srgb, #3b82f6 20%, var(--surface)) !important;
 }
 
+.warranty-status-return_to_vendor {
+  background: color-mix(in srgb, #a855f7 20%, var(--surface)) !important;
+  color: #e9d5ff !important;
+}
+
+.warranty-status-delivered {
+  background: color-mix(in srgb, #06b6d4 20%, var(--surface)) !important;
+  color: #a5f3fc !important;
+}
+
 .warranty-status-dropped_off {
   background: color-mix(in srgb, #eab308 18%, var(--surface)) !important;
 }

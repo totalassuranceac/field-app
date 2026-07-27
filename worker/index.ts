@@ -869,7 +869,7 @@ api.get("/dashboard", async (c) => {
   try {
     const w = await c.env.DB.prepare(
       `SELECT COUNT(*) as c FROM warranty_claims
-       WHERE status IN ('dropped_off','claim_submitted')`
+       WHERE status IN ('dropped_off','claim_submitted','return_to_vendor','delivered')`
     ).first<{ c: number }>();
     openWarranties = w?.c ?? 0;
   } catch {
@@ -3808,14 +3808,14 @@ api.get("/warranties", async (c) => {
        LEFT JOIN users du ON du.id = w.dropped_off_by_user_id
        LEFT JOIN users pu ON pu.id = w.processed_by_user_id`;
     const binds: unknown[] = [];
+    const OPEN_WARRANTY = `('dropped_off','claim_submitted','return_to_vendor','delivered')`;
     if (status === "open") {
-      sql += ` WHERE w.status IN ('dropped_off','claim_submitted')`;
+      sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
     } else if (status === "decided" || status === "closed") {
       sql += ` WHERE w.status IN ('approved','rejected')`;
     } else if (status) {
-      // Map legacy query params
-      const mapped =
-        status === "processed" ? "approved" : status === "return_to_vendor" || status === "cancelled" ? "rejected" : status;
+      // Map legacy query params only
+      const mapped = status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
       sql += ` WHERE w.status = ?`;
       binds.push(mapped);
     }
@@ -3823,18 +3823,25 @@ api.get("/warranties", async (c) => {
       CASE w.status
         WHEN 'dropped_off' THEN 0
         WHEN 'claim_submitted' THEN 1
-        WHEN 'approved' THEN 2
-        WHEN 'rejected' THEN 3
-        ELSE 4
+        WHEN 'return_to_vendor' THEN 2
+        WHEN 'delivered' THEN 3
+        WHEN 'approved' THEN 4
+        WHEN 'rejected' THEN 5
+        ELSE 6
       END,
       w.dropped_off_at ASC
       LIMIT 200`;
     const rows = await c.env.DB.prepare(sql)
       .bind(...binds)
       .all();
+    const isOpenW = (s: string) =>
+      s === "dropped_off" ||
+      s === "claim_submitted" ||
+      s === "return_to_vendor" ||
+      s === "delivered";
     const list = (rows.results || []).map((r: Record<string, unknown>) => {
       const days = warrantyDaysOpen(String(r.dropped_off_at), r.processed_at ? String(r.processed_at) : null);
-      const open = r.status === "dropped_off" || r.status === "claim_submitted";
+      const open = isOpenW(String(r.status));
       return {
         ...r,
         days_open: days,
@@ -3842,9 +3849,7 @@ api.get("/warranties", async (c) => {
         urgent: open && days >= 14,
       };
     });
-    const openCount = list.filter(
-      (r: { status: string }) => r.status === "dropped_off" || r.status === "claim_submitted"
-    ).length;
+    const openCount = list.filter((r: { status: string }) => isOpenW(String(r.status))).length;
     return c.json({ warranties: list, open_count: openCount });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -4182,11 +4187,18 @@ api.patch("/warranties/:id", async (c) => {
 
   let newStatus = before.status;
   if (body.status && canProcess) {
-    // Normalize legacy client values
+    // Normalize legacy client values only (return_to_vendor is a real open status)
     let next = body.status;
     if (next === "processed") next = "approved";
-    if (next === "return_to_vendor" || next === "cancelled") next = "rejected";
-    const allowed = ["dropped_off", "claim_submitted", "approved", "rejected"];
+    if (next === "cancelled") next = "rejected";
+    const allowed = [
+      "dropped_off",
+      "claim_submitted",
+      "return_to_vendor",
+      "delivered",
+      "approved",
+      "rejected",
+    ];
     if (!allowed.includes(next)) return c.json({ error: "Invalid status" }, 400);
     newStatus = next;
     sets.push("status = ?");
@@ -4194,6 +4206,10 @@ api.patch("/warranties/:id", async (c) => {
     if (next === "claim_submitted") {
       sets.push("claim_submitted_at = COALESCE(claim_submitted_at, datetime('now'))");
     }
+    if (next === "return_to_vendor") {
+      sets.push("needs_vendor_return = 1");
+    }
+    // Credit decision closes the claim — only then set processed_at
     if (next === "approved" || next === "rejected") {
       sets.push("processed_at = datetime('now')");
       sets.push("processed_by_user_id = ?");

@@ -12,8 +12,19 @@ import {
   type OcrHints,
 } from "../nameplateOcr";
 
-/** Flow: Dropped off → Claim submitted → Approved | Rejected */
-type WStatus = "dropped_off" | "claim_submitted" | "approved" | "rejected";
+/**
+ * Flow:
+ * Dropped off → Claim submitted → (optional) Return to vendor → Delivered
+ * → Approved | Rejected (credit decision closes the log)
+ * Open until approved/rejected only.
+ */
+type WStatus =
+  | "dropped_off"
+  | "claim_submitted"
+  | "return_to_vendor"
+  | "delivered"
+  | "approved"
+  | "rejected";
 
 interface Warranty {
   id: number;
@@ -43,26 +54,40 @@ interface Warranty {
 const STATUS_LABEL: Record<string, string> = {
   dropped_off: "Dropped off",
   claim_submitted: "Claim submitted",
+  return_to_vendor: "Return to vendor",
+  delivered: "Delivered",
   approved: "Approved",
   rejected: "Rejected",
-  // legacy (mapped server-side)
+  // legacy
   processed: "Approved",
-  return_to_vendor: "Rejected",
   cancelled: "Rejected",
 };
 
+const OPEN_STATUSES: WStatus[] = [
+  "dropped_off",
+  "claim_submitted",
+  "return_to_vendor",
+  "delivered",
+];
+
 function normalizeStatus(s: string): WStatus {
   if (s === "processed") return "approved";
-  if (s === "return_to_vendor" || s === "cancelled") return "rejected";
-  if (s === "dropped_off" || s === "claim_submitted" || s === "approved" || s === "rejected") {
+  if (s === "cancelled") return "rejected";
+  if (
+    s === "dropped_off" ||
+    s === "claim_submitted" ||
+    s === "return_to_vendor" ||
+    s === "delivered" ||
+    s === "approved" ||
+    s === "rejected"
+  ) {
     return s;
   }
   return "dropped_off";
 }
 
 function isOpenStatus(s: string): boolean {
-  const n = normalizeStatus(s);
-  return n === "dropped_off" || n === "claim_submitted";
+  return OPEN_STATUSES.includes(normalizeStatus(s));
 }
 
 /** Shrink phone photos for D1 blob storage (~900KB). */
@@ -634,22 +659,46 @@ export function WarrantiesPage() {
                       Claim submitted
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="btn secondary"
-                    disabled={busy}
-                    onClick={() => void setStatus(w.id, "approved")}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className="btn secondary"
-                    disabled={busy}
-                    onClick={() => void setStatus(w.id, "rejected")}
-                  >
-                    Reject
-                  </button>
+                  {(st === "dropped_off" || st === "claim_submitted") && (
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      disabled={busy}
+                      onClick={() => void setStatus(w.id, "return_to_vendor")}
+                    >
+                      Return to vendor
+                    </button>
+                  )}
+                  {st === "return_to_vendor" && (
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      disabled={busy}
+                      onClick={() => void setStatus(w.id, "delivered")}
+                    >
+                      Delivered
+                    </button>
+                  )}
+                  {(st === "claim_submitted" || st === "delivered") && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={busy}
+                        onClick={() => void setStatus(w.id, "approved")}
+                      >
+                        Approved
+                      </button>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={busy}
+                        onClick={() => void setStatus(w.id, "rejected")}
+                      >
+                        Rejected
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </LogItem>
