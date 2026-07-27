@@ -29,6 +29,7 @@ import { catalogEntry } from "./issueCatalog";
 import {
   ensureOilChangeScheduled,
   markNotificationRead,
+  notifyOpsActionItems,
   notifyUsers,
   notifyWeeklyChecksDue,
   usersByRoles,
@@ -3204,11 +3205,16 @@ api.patch("/service/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
 // ——— In-app notifications ———
 api.get("/notifications", async (c) => {
   const user = c.get("user");
-  // Refresh weekly-check reminders when anyone loads their inbox (light touch)
+  // Light-touch: weekly checks + aging warranties / pickups / equipment
   try {
     await notifyWeeklyChecksDue(c.env.DB);
   } catch {
-    // table may not exist until migration
+    /* optional */
+  }
+  try {
+    await notifyOpsActionItems(c.env.DB);
+  } catch {
+    /* optional */
   }
   // Exclude legacy team-chat alerts (messaging UI removed)
   const rows = await c.env.DB.prepare(
@@ -3811,6 +3817,9 @@ api.get("/warranties", async (c) => {
     const OPEN_WARRANTY = `('dropped_off','claim_submitted','return_to_vendor','delivered')`;
     if (status === "open") {
       sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
+    } else if (status === "vendor" || status === "vendor_waiting" || status === "waiting_vendor") {
+      // Waiting on vendor return / credit — still open
+      sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
     } else if (status === "decided" || status === "closed") {
       sql += ` WHERE w.status IN ('approved','rejected')`;
     } else if (status) {
@@ -3818,6 +3827,17 @@ api.get("/warranties", async (c) => {
       const mapped = status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
       sql += ` WHERE w.status = ?`;
       binds.push(mapped);
+    }
+    const q = (c.req.query("q") || "").trim().toLowerCase();
+    if (q) {
+      sql += ` AND (
+        lower(w.log_number) LIKE ? OR lower(w.part_name) LIKE ? OR lower(COALESCE(w.part_code,'')) LIKE ?
+        OR lower(COALESCE(w.model_number,'')) LIKE ? OR lower(COALESCE(w.serial_number,'')) LIKE ?
+        OR lower(COALESCE(w.customer_name,'')) LIKE ? OR lower(COALESCE(w.vendor_name,'')) LIKE ?
+        OR lower(COALESCE(w.rma_number,'')) LIKE ? OR lower(COALESCE(w.tracking_number,'')) LIKE ?
+      )`;
+      const like = `%${q}%`;
+      binds.push(like, like, like, like, like, like, like, like, like);
     }
     sql += ` ORDER BY
       CASE w.status
@@ -4150,6 +4170,9 @@ api.patch("/warranties/:id", async (c) => {
     needs_vendor_return?: boolean;
     vendor_name?: string;
     claim_submitted?: boolean;
+    rma_number?: string | null;
+    credit_amount?: number | string | null;
+    tracking_number?: string | null;
   }>();
   const before = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`)
     .bind(id)
@@ -4184,6 +4207,25 @@ api.patch("/warranties/:id", async (c) => {
     sets.push("needs_vendor_return = ?");
     vals.push(body.needs_vendor_return ? 1 : 0);
   }
+  // Vendor return / credit details (optional columns — ignore if migration not applied)
+  if (body.rma_number !== undefined && canProcess) {
+    sets.push("rma_number = ?");
+    vals.push(body.rma_number?.toString().trim() || null);
+  }
+  if (body.tracking_number !== undefined && canProcess) {
+    sets.push("tracking_number = ?");
+    vals.push(body.tracking_number?.toString().trim() || null);
+  }
+  if (body.credit_amount !== undefined && canProcess) {
+    const raw = body.credit_amount;
+    const n =
+      raw === "" || raw == null ? null : Number(raw);
+    if (n != null && !Number.isFinite(n)) {
+      return c.json({ error: "Credit amount must be a number" }, 400);
+    }
+    sets.push("credit_amount = ?");
+    vals.push(n);
+  }
 
   let newStatus = before.status;
   if (body.status && canProcess) {
@@ -4208,6 +4250,8 @@ api.patch("/warranties/:id", async (c) => {
     }
     if (next === "return_to_vendor") {
       sets.push("needs_vendor_return = 1");
+      sets.push("shipped_by_user_id = COALESCE(shipped_by_user_id, ?)");
+      vals.push(user.id);
     }
     // Credit decision closes the claim — only then set processed_at
     if (next === "approved" || next === "rejected") {
@@ -4223,9 +4267,30 @@ api.patch("/warranties/:id", async (c) => {
 
   if (sets.length <= 1) return c.json({ error: "Nothing to update" }, 400);
   vals.push(id);
-  await c.env.DB.prepare(`UPDATE warranty_claims SET ${sets.join(", ")} WHERE id = ?`)
-    .bind(...vals)
-    .run();
+  try {
+    await c.env.DB.prepare(`UPDATE warranty_claims SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...vals)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Retry without vendor-credit columns if migration 041 not applied
+    if (/no such column|rma_number|credit_amount|tracking|shipped_by/i.test(msg)) {
+      const safeSets = sets.filter(
+        (s) =>
+          !/rma_number|credit_amount|tracking_number|shipped_by_user_id/.test(s)
+      );
+      const safeVals = vals.slice(0, -1);
+      // rebuild vals without vendor fields is hard — simpler fall back message
+      return c.json(
+        {
+          error:
+            "Run migration 041_warranty_vendor_credit.sql for RMA / credit / tracking fields, or update status only.",
+        },
+        400
+      );
+    }
+    throw e;
+  }
 
   if (newStatus === "approved" && before.dropped_off_by_user_id) {
     await notifyUsers(

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { CollapsibleSection, LogItem, LogList } from "../components/CollapsibleLog";
-import { PhotoCapture } from "../components/PhotoCapture";
+import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
 import {
   applyOcrLearning,
   clearOcrHintsCache,
@@ -742,6 +742,7 @@ export function FuelPage() {
                     ? "Reading receipt…"
                     : "Take photo with the camera, or choose from gallery. Whole receipt in frame if you can."
                 }
+                tip={PHOTO_TIPS.receipt}
                 previewUrl={preview}
                 disabled={scanning}
                 onPick={(f) => void handleReceipt(f)}

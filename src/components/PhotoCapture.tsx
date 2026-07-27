@@ -4,11 +4,21 @@ import { useRef } from "react";
  * Mobile-friendly photo picker with explicit actions.
  * compact: small secondary control for inline use (model/serial, drop-off).
  */
+/** Short tips that improve OCR / warehouse photo quality */
+export const PHOTO_TIPS = {
+  receipt:
+    "Fill the frame · flat lighting · no glare on shiny paper · hold still until it snaps.",
+  nameplate:
+    "Fill the frame with M/N and S/N · avoid glare on metal · hold square to the plate.",
+  dropoff: "Show the shelf or spot clearly so warehouse can find the box.",
+} as const;
+
 export function PhotoCapture({
   onPick,
   required,
   label = "Photo",
   hint,
+  tip,
   previewUrl,
   onClear,
   disabled,
@@ -18,6 +28,8 @@ export function PhotoCapture({
   required?: boolean;
   label?: string;
   hint?: string;
+  /** OCR / quality tip under the control */
+  tip?: string;
   previewUrl?: string | null;
   onClear?: () => void;
   disabled?: boolean;
@@ -103,6 +115,7 @@ export function PhotoCapture({
         {hint && !previewUrl ? (
           <span className="muted photo-capture-hint-compact">{hint}</span>
         ) : null}
+        {tip ? <p className="muted photo-capture-tip">{tip}</p> : null}
       </div>
     );
   }
@@ -115,6 +128,7 @@ export function PhotoCapture({
           {required ? " *" : ""}
         </strong>
         {hint ? <p className="muted photo-capture-hint">{hint}</p> : null}
+        {tip ? <p className="muted photo-capture-tip">{tip}</p> : null}
       </div>
       <div className="photo-capture-btns">
         <button

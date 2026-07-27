@@ -108,6 +108,7 @@ export function AdminPage() {
   const [busyUser, setBusyUser] = useState(false);
   const [busyEmp, setBusyEmp] = useState(false);
   const [justAddedId, setJustAddedId] = useState<number | null>(null);
+  const [userSearch, setUserSearch] = useState("");
 
   /** Edit login (username / resend invite) — survives lost one-time banner */
   const [loginEdit, setLoginEdit] = useState<AdminUser | null>(null);
@@ -1563,6 +1564,16 @@ export function AdminPage() {
             </form>
             )}
             <div className="admin-users-list" ref={usersTableRef}>
+              <label className="admin-user-search no-print">
+                <span className="muted">Search logins</span>
+                <input
+                  type="search"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder="Name, @username, email, role…"
+                  aria-label="Search users"
+                />
+              </label>
               {/* Wide screens: compact table — email sits under login with room to read */}
               <div className="table-wrap admin-users-table admin-users-wide">
                 <table>
@@ -1587,7 +1598,19 @@ export function AdminPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map((u) => (
+                    {users
+                      .filter((u) => {
+                        const q = userSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        return (
+                          u.display_name.toLowerCase().includes(q) ||
+                          (u.username || "").toLowerCase().includes(q) ||
+                          (u.email || "").toLowerCase().includes(q) ||
+                          u.role.toLowerCase().includes(q) ||
+                          (u.phone || "").includes(q)
+                        );
+                      })
+                      .map((u) => (
                       <tr
                         key={u.id}
                         className={u.id === justAddedId ? "row-just-added" : undefined}

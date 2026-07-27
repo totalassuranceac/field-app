@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api, OfflineQueuedError } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
-import { PhotoCapture } from "../components/PhotoCapture";
+import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
 import {
   loadOcrHints,
   ocrNameplateImage,
@@ -46,6 +46,9 @@ interface Warranty {
   processed_by_name?: string | null;
   dropoff_photo_key?: string | null;
   nameplate_photo_key?: string | null;
+  rma_number?: string | null;
+  credit_amount?: number | null;
+  tracking_number?: string | null;
   days_open: number;
   overdue?: boolean;
   urgent?: boolean;
@@ -135,10 +138,15 @@ export function WarrantiesPage() {
     user?.role === "mechanic";
 
   const [list, setList] = useState<Warranty[]>([]);
-  const [filter, setFilter] = useState<"open" | "all" | "decided">("open");
+  const [filter, setFilter] = useState<"open" | "all" | "vendor" | "decided">("open");
+  const [searchQ, setSearchQ] = useState("");
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Per-claim vendor credit form draft */
+  const [vendorDraft, setVendorDraft] = useState<
+    Record<number, { rma: string; tracking: string; credit: string }>
+  >({});
 
   const [partName, setPartName] = useState("");
   const [partCode, setPartCode] = useState("");
@@ -160,17 +168,22 @@ export function WarrantiesPage() {
   const [writeOnBox, setWriteOnBox] = useState<string | null>(null);
 
   async function load() {
-    const status =
-      filter === "open" ? "open" : filter === "decided" ? "decided" : "";
-    const d = await api<{ warranties: Warranty[] }>(
-      `/warranties${status ? `?status=${status}` : ""}`
-    );
+    const params = new URLSearchParams();
+    if (filter === "open") params.set("status", "open");
+    else if (filter === "decided") params.set("status", "decided");
+    else if (filter === "vendor") params.set("status", "vendor");
+    if (searchQ.trim()) params.set("q", searchQ.trim());
+    const qs = params.toString();
+    const d = await api<{ warranties: Warranty[] }>(`/warranties${qs ? `?${qs}` : ""}`);
     setList(d.warranties || []);
   }
 
   useEffect(() => {
-    load().catch((e) => setError(e.message));
-  }, [filter]);
+    const t = window.setTimeout(() => {
+      load().catch((e) => setError(e.message));
+    }, searchQ.trim() ? 200 : 0);
+    return () => window.clearTimeout(t);
+  }, [filter, searchQ]);
 
   useEffect(() => {
     void warmOcrEngine();
@@ -339,13 +352,40 @@ export function WarrantiesPage() {
     }
   }
 
-  async function setStatus(id: number, status: WStatus) {
+  function draftFor(w: Warranty) {
+    return (
+      vendorDraft[w.id] || {
+        rma: w.rma_number || "",
+        tracking: w.tracking_number || "",
+        credit: w.credit_amount != null ? String(w.credit_amount) : "",
+      }
+    );
+  }
+
+  async function setStatus(id: number, status: WStatus, extra?: Record<string, unknown>) {
     setBusy(true);
     setError("");
     try {
+      const draft = vendorDraft[id];
+      const body: Record<string, unknown> = { status, ...extra };
+      if (draft) {
+        if (draft.rma.trim()) body.rma_number = draft.rma.trim();
+        if (draft.tracking.trim()) body.tracking_number = draft.tracking.trim();
+        if (draft.credit.trim() !== "") body.credit_amount = Number(draft.credit);
+      }
+      // On return_to_vendor always send current draft tracking/rma if any
+      if (status === "return_to_vendor" || status === "delivered" || status === "approved") {
+        const w = list.find((x) => x.id === id);
+        const d = w ? draftFor(w) : draft;
+        if (d?.rma.trim()) body.rma_number = d.rma.trim();
+        if (d?.tracking.trim()) body.tracking_number = d.tracking.trim();
+        if (d?.credit.trim() !== "" && d?.credit != null) {
+          body.credit_amount = Number(d.credit);
+        }
+      }
       await api(`/warranties/${id}`, {
         method: "PATCH",
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(body),
       });
       setOk(`Updated → ${STATUS_LABEL[status] || status}`);
       await load();
@@ -355,6 +395,28 @@ export function WarrantiesPage() {
       } else {
         setError(err instanceof Error ? err.message : "Update failed");
       }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveVendorDetails(w: Warranty) {
+    const d = draftFor(w);
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          rma_number: d.rma.trim() || null,
+          tracking_number: d.tracking.trim() || null,
+          credit_amount: d.credit.trim() === "" ? null : Number(d.credit),
+        }),
+      });
+      setOk(`Saved vendor details for ${w.log_number}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save vendor details");
     } finally {
       setBusy(false);
     }
@@ -462,6 +524,7 @@ export function WarrantiesPage() {
                     ? "Reading…"
                     : "Photo data plate to auto-fill model & serial"
                 }
+                tip={PHOTO_TIPS.nameplate}
                 previewUrl={nameplatePreview}
                 onPick={(f) => onNameplatePick(f)}
                 onClear={() => onNameplatePick(null)}
@@ -522,6 +585,7 @@ export function WarrantiesPage() {
               compact
               required
               label="Location"
+              tip={PHOTO_TIPS.dropoff}
               previewUrl={photoPreview}
               onPick={(f) => onPhotoPick(f)}
               onClear={() => onPhotoPick(null)}
@@ -547,6 +611,7 @@ export function WarrantiesPage() {
         {(
           [
             ["open", "Open"],
+            ["vendor", "Waiting on vendor"],
             ["all", "All"],
             ["decided", "Approved / rejected"],
           ] as const
@@ -560,6 +625,13 @@ export function WarrantiesPage() {
             {label}
           </button>
         ))}
+        <input
+          className="warranty-search"
+          value={searchQ}
+          onChange={(e) => setSearchQ(e.target.value)}
+          placeholder="Search log #, part, model, RMA…"
+          aria-label="Search warranties"
+        />
       </div>
 
       <LogList className="warranty-list" empty="No warranties in this filter.">
@@ -651,6 +723,68 @@ export function WarrantiesPage() {
                   : ""}
                 {w.processed_by_name ? ` by ${w.processed_by_name}` : ""}
               </div>
+              {canProcess &&
+                (st === "return_to_vendor" || st === "delivered" || st === "claim_submitted") && (
+                  <div className="warranty-vendor-fields">
+                    <label>
+                      RMA #
+                      <input
+                        value={draftFor(w).rma}
+                        onChange={(e) =>
+                          setVendorDraft((p) => ({
+                            ...p,
+                            [w.id]: { ...draftFor(w), rma: e.target.value },
+                          }))
+                        }
+                        placeholder="Vendor RMA"
+                      />
+                    </label>
+                    <label>
+                      Tracking #
+                      <input
+                        value={draftFor(w).tracking}
+                        onChange={(e) =>
+                          setVendorDraft((p) => ({
+                            ...p,
+                            [w.id]: { ...draftFor(w), tracking: e.target.value },
+                          }))
+                        }
+                        placeholder="Shipment tracking"
+                      />
+                    </label>
+                    <label>
+                      Credit $
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={draftFor(w).credit}
+                        onChange={(e) =>
+                          setVendorDraft((p) => ({
+                            ...p,
+                            [w.id]: { ...draftFor(w), credit: e.target.value },
+                          }))
+                        }
+                        placeholder="0.00"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="btn ghost btn-sm"
+                      disabled={busy}
+                      onClick={() => void saveVendorDetails(w)}
+                    >
+                      Save details
+                    </button>
+                  </div>
+                )}
+              {(w.rma_number || w.tracking_number || w.credit_amount != null) && (
+                <div className="muted" style={{ fontSize: "0.82rem" }}>
+                  {w.rma_number ? `RMA ${w.rma_number}` : ""}
+                  {w.tracking_number ? ` · Track ${w.tracking_number}` : ""}
+                  {w.credit_amount != null ? ` · Credit $${Number(w.credit_amount).toFixed(2)}` : ""}
+                </div>
+              )}
               {canProcess && isOpenStatus(st) && (
                 <div className="log-item-actions warranty-actions">
                   {st === "dropped_off" && (
@@ -683,7 +817,7 @@ export function WarrantiesPage() {
                       Delivered
                     </button>
                   )}
-                  {/* Credit outcome closes the claim — available after claim or vendor return */}
+                  {/* Credit outcome closes the claim — after claim or vendor return */}
                   {(st === "claim_submitted" ||
                     st === "return_to_vendor" ||
                     st === "delivered") && (

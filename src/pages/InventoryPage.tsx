@@ -13,6 +13,7 @@ import { partImageSrc } from "../partImage";
 import { PickupPanel } from "../components/PickupPanel";
 import { VendorRunPanel } from "../components/VendorRunPanel";
 import { LogItem, LogList } from "../components/CollapsibleLog";
+import { BarcodeScanButton } from "../components/BarcodeScan";
 
 type Tab =
   | "stock"
@@ -1954,6 +1955,38 @@ export function InventoryPage() {
           {!selectedPart ? (
             <div className="card no-print inv-browse-card">
               <div className="inv-search-bar">
+                {canManage ? (
+                  <BarcodeScanButton
+                    label="Scan to receive"
+                    disabled={searchBusy}
+                    onCode={(code) => {
+                      void (async () => {
+                        setError("");
+                        setOk("");
+                        try {
+                          const res = await api<{ parts: PartRow[] }>(
+                            `/inventory/parts/lookup?code=${encodeURIComponent(code)}`
+                          );
+                          const hit = (res.parts || [])[0];
+                          if (!hit) {
+                            setError(`No part found for “${code}”. Type the code or add it to catalog.`);
+                            setQ(code);
+                            return;
+                          }
+                          setQ(hit.code || code);
+                          await openPart(hit);
+                          setAdjustDelta("1");
+                          setOk(
+                            `Scanned ${hit.code || hit.name} — set qty below and tap + Receive.`
+                          );
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Lookup failed");
+                          setQ(code);
+                        }
+                      })();
+                    }}
+                  />
+                ) : null}
                 <input
                   type="search"
                   value={q}

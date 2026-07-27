@@ -62,17 +62,19 @@ export function OfflineBanner() {
       <div className="offline-banner-text">
         {!online ? (
           <>
-            <strong>No signal</strong> — keep working. Saves are stored on this
-            phone and will send when you reconnect.
-            {pending > 0 ? ` (${pending} waiting)` : ""}
+            <strong>Saved offline</strong> — no signal right now. Keep working;
+            fuel, drop-offs, and other saves stay on this phone and send
+            automatically when you’re back on Wi‑Fi or cell data.
+            {pending > 0 ? ` (${pending} waiting to send)` : ""}
           </>
         ) : pending > 0 ? (
           <>
             <strong>
-              {pending} change{pending === 1 ? "" : "s"} waiting to send
+              {pending} change{pending === 1 ? "" : "s"} saved on this phone
             </strong>{" "}
-            — made in a weak/no-service area. Will auto-send when the connection
-            is solid.
+            — not on the server yet (weak or no service when you saved). Will
+            auto-send when the connection is solid. Tap Retry if you’re online
+            and it’s stuck.
           </>
         ) : (
           msg

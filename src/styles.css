@@ -3445,6 +3445,18 @@ tr.row-dup td {
   max-width: 100%;
 }
 
+.admin-user-search {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.65rem;
+  max-width: 22rem;
+}
+
+.admin-user-search input {
+  width: 100%;
+}
+
 .admin-login-edit {
   margin-bottom: 1rem;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
@@ -6601,6 +6613,87 @@ tr.row-low td {
   gap: 0.35rem;
   margin-bottom: 0.65rem;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.warranty-search {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+  max-width: 16rem;
+  margin-left: auto;
+}
+
+.warranty-vendor-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  gap: 0.4rem 0.55rem;
+  margin: 0.45rem 0 0.35rem;
+  align-items: end;
+}
+
+.warranty-vendor-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.warranty-vendor-fields input {
+  font-weight: 500;
+  font-size: 0.88rem;
+}
+
+.photo-capture-tip {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.home-check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.home-check-list li a {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  padding: 0.55rem 0.7rem;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  text-decoration: none;
+  color: inherit;
+}
+
+.home-check-list li.is-done a {
+  opacity: 0.72;
+}
+
+.home-check-list li.is-todo a {
+  border-color: color-mix(in srgb, #eab308 40%, var(--border));
+}
+
+.home-check-list strong {
+  display: block;
+  font-size: 0.92rem;
+}
+
+.home-check-list .muted {
+  font-size: 0.78rem;
+}
+
+.home-check-mark {
+  font-size: 1.1rem;
+  line-height: 1.2;
+  flex-shrink: 0;
+  width: 1.25rem;
+  text-align: center;
 }
 
 .warranty-list.log-list {

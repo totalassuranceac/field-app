@@ -118,6 +118,144 @@ export async function notifyWeeklyChecksDue(db: D1Database): Promise<number> {
   return created;
 }
 
+/**
+ * Ops action alerts (idempotent — one unread per entity):
+ * - Warranties open 7+ / 14+ days → warehouse + admin
+ * - Open part pickups → warehouse
+ * - Equipment needing attention → warehouse + admin
+ */
+export async function notifyOpsActionItems(db: D1Database): Promise<number> {
+  let created = 0;
+  const whAdmin = await usersByRoles(db, ["warehouse", "admin"]);
+  if (!whAdmin.length) return 0;
+
+  // Aging open warranties
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT id, log_number, part_name, status, dropped_off_at,
+           CAST((julianday('now') - julianday(dropped_off_at)) AS INTEGER) as days_open
+         FROM warranty_claims
+         WHERE status IN ('dropped_off','claim_submitted','return_to_vendor','delivered')
+           AND dropped_off_at <= datetime('now', '-7 days')
+         ORDER BY dropped_off_at ASC
+         LIMIT 40`
+      )
+      .all<{
+        id: number;
+        log_number: string;
+        part_name: string;
+        status: string;
+        days_open: number;
+      }>();
+    for (const w of rows.results || []) {
+      const days = Number(w.days_open) || 0;
+      const urgent = days >= 14;
+      const kind = urgent ? "warranty_urgent" : "warranty_aging";
+      const existing = await db
+        .prepare(
+          `SELECT id FROM notifications
+           WHERE kind = ? AND entity_id = ? AND read_at IS NULL
+           LIMIT 1`
+        )
+        .bind(kind, String(w.id))
+        .first();
+      if (existing) continue;
+      await notifyUsers(
+        db,
+        whAdmin,
+        kind,
+        urgent
+          ? `Warranty ${w.log_number} urgent (${days}d)`
+          : `Warranty ${w.log_number} aging (${days}d)`,
+        `${w.part_name} · ${w.status.replace(/_/g, " ")} — still open.`,
+        { type: "warranty", id: w.id }
+      );
+      created += whAdmin.length;
+    }
+  } catch {
+    /* table optional */
+  }
+
+  // Open part pickups waiting
+  try {
+    const pickups = await db
+      .prepare(
+        `SELECT id, request_number, status FROM part_pickups
+         WHERE status IN ('open','ready','partial')
+         ORDER BY created_at ASC LIMIT 30`
+      )
+      .all<{ id: number; request_number: string; status: string }>();
+    for (const p of pickups.results || []) {
+      const existing = await db
+        .prepare(
+          `SELECT id FROM notifications
+           WHERE kind = 'pickup_waiting' AND entity_id = ? AND read_at IS NULL
+           LIMIT 1`
+        )
+        .bind(String(p.id))
+        .first();
+      if (existing) continue;
+      await notifyUsers(
+        db,
+        whAdmin,
+        "pickup_waiting",
+        `Part pickup ${p.request_number}`,
+        `Status: ${p.status} — needs warehouse attention.`,
+        { type: "pickup", id: p.id }
+      );
+      created += whAdmin.length;
+    }
+  } catch {
+    /* optional */
+  }
+
+  // Equipment / assets needing attention
+  try {
+    const assets = await db
+      .prepare(
+        `SELECT id, name, asset_tag, condition, status FROM company_assets
+         WHERE active = 1 AND (
+           condition IN ('damaged','poor','out_of_service')
+           OR status IN ('repair','missing')
+         )
+         LIMIT 25`
+      )
+      .all<{
+        id: number;
+        name: string;
+        asset_tag: string | null;
+        condition: string;
+        status: string;
+      }>();
+    for (const a of assets.results || []) {
+      const existing = await db
+        .prepare(
+          `SELECT id FROM notifications
+           WHERE kind = 'asset_attention' AND entity_id = ? AND read_at IS NULL
+           LIMIT 1`
+        )
+        .bind(String(a.id))
+        .first();
+      if (existing) continue;
+      const tag = a.asset_tag ? `${a.asset_tag} · ` : "";
+      await notifyUsers(
+        db,
+        whAdmin,
+        "asset_attention",
+        `Equipment attention: ${tag}${a.name}`,
+        `${a.condition.replace(/_/g, " ")} · ${a.status}`,
+        { type: "asset", id: a.id }
+      );
+      created += whAdmin.length;
+    }
+  } catch {
+    /* optional */
+  }
+
+  return created;
+}
+
 export async function markNotificationRead(
   db: D1Database,
   user: PublicUser,

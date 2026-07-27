@@ -504,6 +504,72 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Ask an admin when something needs to be changed for real.",
     ],
   },
+
+  // ——— Who can do what ———
+  {
+    id: "roles-who-can",
+    title: "Who can do what (by role)",
+    summary: "Quick map so nobody hunts for a button they can’t use.",
+    roles: ["everyone", "admin", "office", "warehouse", "driver", "mechanic"],
+    path: "/howto",
+    steps: [
+      "Field: fuel, weekly checks, warranty drop-off, part pickup request, request repair, truck gear, parts receipts.",
+      "Warehouse: inventory stock, scan-to-receive, part pickup handoff, bottles, warranties process, truck stock counts.",
+      "Mechanic: shop repairs, oil/service, yard walk, fleet flags, vehicles, weekly check board.",
+      "Office: live map, scheduled repairs, people (employees), inventory overview, warranties, reports.",
+      "Admin: everything + invite links, role simulator, audit, settings.",
+      "Viewer: same screens as admin, cannot save or submit.",
+    ],
+    tips: [
+      "Menus are grouped Fleet · Warehouse · Shop · Company for every role — empty groups hide.",
+      "Admin can use View as to preview another role’s menus without changing their real login.",
+    ],
+  },
+  {
+    id: "inv-scan-receive",
+    title: "Scan barcode to receive stock",
+    summary: "Warehouse: camera scan opens the part, then + Receive.",
+    roles: ["warehouse", "admin"],
+    path: "/inventory",
+    steps: [
+      "Open Inventory → Stock.",
+      "Tap Scan to receive (camera).",
+      "Point at the part barcode or QR — the app looks up the part code.",
+      "Confirm location, set quantity, tap + Receive.",
+      "If the code isn’t in the catalog, type it or add the part first.",
+    ],
+    tips: [
+      "Works best in Chrome on Android with a clear barcode; iPhones may open the camera photo fallback.",
+      "USB/Bluetooth wedge scanners that type into the search box also work.",
+    ],
+  },
+  {
+    id: "warranty-vendor-credit",
+    title: "Warranty return to vendor & credit",
+    summary: "Return to vendor stays open until Approved or Rejected.",
+    roles: ["warehouse", "admin", "office", "mechanic"],
+    path: "/warranties",
+    steps: [
+      "Open warranties stay on Open until credit is decided.",
+      "Mark Return to vendor when the part ships back (optional RMA + tracking).",
+      "Use Waiting on vendor filter to see only those claims.",
+      "When credit arrives: enter Credit $ if known, then Approved or Rejected.",
+      "Only Approved / Rejected remove it from the open list.",
+    ],
+  },
+  {
+    id: "offline-saves",
+    title: "Working with weak or no signal",
+    summary: "Saves stay on the phone until they can send.",
+    roles: ["everyone", "driver"],
+    path: "/",
+    steps: [
+      "If you see “Saved offline” or “waiting to send”, your work is on this phone — not lost.",
+      "Keep using the app; fuel, drop-offs, and other queued saves will send when signal returns.",
+      "When online again, the yellow banner shows how many are waiting; tap Retry if stuck.",
+      "Don’t clear browser data for the app until the queue is clear.",
+    ],
+  },
 ];
 
 /** Guides visible for a selected filter (everyone + role). */

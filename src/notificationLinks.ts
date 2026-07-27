@@ -26,6 +26,10 @@ export function notificationLink(n: {
 
   // Explicit kinds
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
+  if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
+    return "/warranties";
+  if (kind === "pickup_waiting" || kind.includes("pickup")) return "/part-pickup";
+  if (kind === "asset_attention" || kind.includes("asset")) return "/assets";
   if (kind.startsWith("handbook") || entity === "handbook" || text.includes("handbook")) {
     return "/handbook";
   }

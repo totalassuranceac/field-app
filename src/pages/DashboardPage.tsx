@@ -833,31 +833,98 @@ export function DashboardPage() {
         }
       />
 
-      {/* Personal field reminders */}
-      {isDriver && (myWeekly.length > 0 || myRepairs.length > 0) && (
-        <section className="home-section" aria-label="For you">
+      {/* Field daily checklist — always visible for techs */}
+      {isDriver && (
+        <section className="home-section home-checklist" aria-label="Today’s checklist">
           <div className="home-section-head">
-            <h2>For you</h2>
+            <h2>Today’s checklist</h2>
           </div>
-          <div className="home-pills">
-            {myWeekly.map((v) => (
-              <Link key={`w-${v.id}`} className="home-pill warn" to="/inspections">
-                <strong>Check unit {v.unit_number}</strong>
-                <span>{v.last_check_date ? `Last ${v.last_check_date}` : "Never checked"}</span>
-              </Link>
-            ))}
-            {myRepairs.map((r) => (
-              <Link key={`r-${r.id}`} className="home-pill alert" to="/issues">
-                <strong>
-                  {r.unit_number} · {r.status}
-                </strong>
+          <ul className="home-check-list">
+            <li className={myWeekly.length ? "is-todo" : "is-done"}>
+              <Link to="/inspections">
+                <span className="home-check-mark" aria-hidden>
+                  {myWeekly.length ? "○" : "✓"}
+                </span>
                 <span>
-                  {r.title}
-                  {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
+                  <strong>Weekly vehicle check</strong>
+                  <span className="muted">
+                    {myWeekly.length
+                      ? myWeekly.map((v) => `Unit ${v.unit_number}`).join(" · ")
+                      : "Done for your units"}
+                  </span>
                 </span>
               </Link>
-            ))}
-          </div>
+            </li>
+            <li className={myRepairs.length ? "is-todo" : "is-done"}>
+              <Link to="/issues">
+                <span className="home-check-mark" aria-hidden>
+                  {myRepairs.length ? "○" : "✓"}
+                </span>
+                <span>
+                  <strong>Open repairs on your units</strong>
+                  <span className="muted">
+                    {myRepairs.length
+                      ? `${myRepairs.length} open`
+                      : "None waiting on you"}
+                  </span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/fuel">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Log fuel when you fill up</strong>
+                  <span className="muted">Photo receipt · odometer</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/warranties">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Warranty drop-off</strong>
+                  <span className="muted">Photo shelf · write log # on box</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/part-pickup">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Part pickup</strong>
+                  <span className="muted">When warehouse has your parts ready</span>
+                </span>
+              </Link>
+            </li>
+          </ul>
+          {(myWeekly.length > 0 || myRepairs.length > 0) && (
+            <div className="home-pills" style={{ marginTop: "0.65rem" }}>
+              {myWeekly.map((v) => (
+                <Link key={`w-${v.id}`} className="home-pill warn" to="/inspections">
+                  <strong>Check unit {v.unit_number}</strong>
+                  <span>{v.last_check_date ? `Last ${v.last_check_date}` : "Never checked"}</span>
+                </Link>
+              ))}
+              {myRepairs.map((r) => (
+                <Link key={`r-${r.id}`} className="home-pill alert" to="/issues">
+                  <strong>
+                    {r.unit_number} · {r.status}
+                  </strong>
+                  <span>
+                    {r.title}
+                    {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
