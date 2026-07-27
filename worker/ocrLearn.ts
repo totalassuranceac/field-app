@@ -32,8 +32,17 @@ export type OcrHints = {
 
 export function storeKeyFrom(store: string | null | undefined, rawText?: string | null): string {
   const s = (store || "").toLowerCase();
-  // Equipment nameplates (warranty model/serial OCR)
-  if (s === "nameplate" || s.startsWith("nameplate")) return "nameplate";
+  // Equipment nameplates (warranty model/serial OCR) — brand sub-keys when text known
+  if (s === "nameplate" || s.startsWith("nameplate")) {
+    const raw = (rawText || "").toUpperCase();
+    if (s.startsWith("nameplate_") && s.length > 10) return s.slice(0, 48);
+    if (/\bLENNOX\b/.test(raw) || /DALLAS\s*,?\s*TEXAS/.test(raw)) return "nameplate_lennox";
+    if (/\bCARRIER\b/.test(raw)) return "nameplate_carrier";
+    if (/\bTRANE\b/.test(raw)) return "nameplate_trane";
+    if (/\bGOODMAN\b/.test(raw)) return "nameplate_goodman";
+    if (/\bRHEEM\b|\bRUUD\b/.test(raw)) return "nameplate_rheem";
+    return "nameplate";
+  }
   // Explicit parts-purchase vendor keys (parts_johnstone, etc.)
   if (s.startsWith("parts_")) return s.slice(0, 48);
   if (/stripe/.test(s) || /\b2221\b/.test(s) || /\b2213\b/.test(s) || /\b2215\b/.test(s)) {
@@ -358,17 +367,30 @@ export async function recordOcrFeedback(
         await bumpMemory(db, storeKey, "store_number", "sub", ocrS, correct);
       }
       // Nameplate model / serial — learn labels and known values
+      // Lennox condensers: model on M/N line, serial on S/N line immediately below
       if (field === "model_number") {
         await bumpMemory(db, "nameplate", field, "line_label", "MODEL", "1");
         await bumpMemory(db, "nameplate", field, "line_label", "M/N", "1");
+        await bumpMemory(db, storeKey, field, "line_label", "M/N", "1");
         await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
         await bumpMemory(db, "nameplate", field, "sub", ocrS, correct);
+        if (storeKey === "nameplate_lennox" || /lennox/i.test(rawText || "")) {
+          await bumpMemory(db, "nameplate_lennox", field, "line_label", "M/N", "1");
+          await bumpMemory(db, "nameplate_lennox", field, "pattern", "layout:mn_line", "1");
+          await bumpMemory(db, "nameplate_lennox", field, "value_in_text", correct, "1");
+        }
       }
       if (field === "serial_number") {
         await bumpMemory(db, "nameplate", field, "line_label", "SERIAL", "1");
         await bumpMemory(db, "nameplate", field, "line_label", "S/N", "1");
+        await bumpMemory(db, storeKey, field, "line_label", "S/N", "1");
         await bumpMemory(db, storeKey, field, "value_in_text", correct, "1");
         await bumpMemory(db, "nameplate", field, "sub", ocrS, correct);
+        if (storeKey === "nameplate_lennox" || /lennox/i.test(rawText || "")) {
+          await bumpMemory(db, "nameplate_lennox", field, "line_label", "S/N", "1");
+          await bumpMemory(db, "nameplate_lennox", field, "pattern", "layout:sn_below_mn", "1");
+          await bumpMemory(db, "nameplate_lennox", field, "value_in_text", correct, "1");
+        }
       }
       if (field === "fuel_time" && (storeKey.startsWith("murphy") || /murphy/i.test(rawText || ""))) {
         await bumpMemory(db, storeKey, field, "pattern", "date_time_same_line", "1");

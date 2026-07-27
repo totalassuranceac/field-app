@@ -289,6 +289,10 @@ export function WarrantiesPage() {
         fd.append("nameplate", np, np.name || "nameplate.jpg");
       }
       if (lastNameplateOcr) {
+        // Brand-specific learning key (e.g. nameplate_lennox for M/N + S/N layout)
+        const plateKey = lastNameplateOcr.manufacturer
+          ? `nameplate_${lastNameplateOcr.manufacturer}`
+          : "nameplate";
         fd.append(
           "ocr_feedback",
           JSON.stringify({
@@ -296,12 +300,12 @@ export function WarrantiesPage() {
             ocr: {
               model_number: lastNameplateOcr.model_number,
               serial_number: lastNameplateOcr.serial_number,
-              store_number: "nameplate",
+              store_number: plateKey,
             },
             final: {
               model_number: model.trim(),
               serial_number: serial.trim(),
-              store_number: "nameplate",
+              store_number: plateKey,
             },
           })
         );
