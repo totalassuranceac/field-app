@@ -82,6 +82,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [showForm, setShowForm] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [expandedTicket, setExpandedTicket] = useState<Record<number, boolean>>({});
+  /** Full easy-read run sheet for drivers (will it fit in the truck?) */
+  const [showRunSheet, setShowRunSheet] = useState(false);
+  const [runSheetFocus, setRunSheetFocus] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -144,6 +147,76 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
   function scrollToList() {
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  /** Flat vendor → open lines for a glanceable pickup sheet */
+  const runSheet = useMemo(() => {
+    return groups
+      .filter((g) => g.waiting > 0)
+      .map((g) => {
+        const lines: Array<{
+          key: string;
+          qty: number;
+          code: string;
+          name: string;
+          po: string | null;
+          needed: string | null;
+          status: string;
+        }> = [];
+        for (const t of g.tickets) {
+          for (const l of t.lines || []) {
+            if (!["pending", "not_ready", "partial"].includes(l.status)) continue;
+            const code = (l.part_code || "").trim();
+            const name = (l.part_name || "").trim();
+            lines.push({
+              key: `${t.id}-${l.id}`,
+              qty: Number(l.qty_requested) || 1,
+              code: code || "—",
+              name: name || (code ? "" : "Part # not filled in yet"),
+              po: t.purchase_order,
+              needed: t.needed_for_date,
+              status: l.status,
+            });
+          }
+          // Ticket with no lines yet but still waiting
+          if (!(t.lines || []).length && (t.status === "open" || t.status === "partial")) {
+            const n = t.expected_parts || t.qty_unknown ? "?" : 1;
+            lines.push({
+              key: `t-${t.id}`,
+              qty: typeof n === "number" ? n : 1,
+              code: "—",
+              name: t.qty_unknown
+                ? "Parts TBD (count unknown)"
+                : `${t.expected_parts || "?"} part(s) — numbers not entered yet`,
+              po: t.purchase_order,
+              needed: t.needed_for_date,
+              status: "pending",
+            });
+          }
+        }
+        const pieceCount = lines.reduce(
+          (s, l) => s + (typeof l.qty === "number" && Number.isFinite(l.qty) ? l.qty : 0),
+          0
+        );
+        return {
+          vendor_name: g.vendor_name,
+          waiting: g.waiting,
+          lines,
+          pieceCount,
+        };
+      })
+      .filter((g) => g.lines.length > 0 || g.waiting > 0);
+  }, [groups]);
+
+  const runSheetTotalPieces = useMemo(
+    () => runSheet.reduce((s, g) => s + g.pieceCount, 0),
+    [runSheet]
+  );
+
+  function openRunSheet(vendor?: string) {
+    setFilter("open");
+    setRunSheetFocus(vendor || null);
+    setShowRunSheet(true);
   }
 
   function openWaitingList() {
@@ -293,10 +366,27 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
-      {/* Vendor chips */}
+      {/* Stops needed — tap for full easy-read company parts list */}
       {groups.some((g) => g.waiting > 0) && (
         <div className="vendor-run-summary card" aria-label="Vendors with open pickups">
-          <div className="vendor-run-summary-label">Stops needed</div>
+          <button
+            type="button"
+            className="vendor-run-summary-open"
+            onClick={() => openRunSheet()}
+          >
+            <div className="vendor-run-summary-label">
+              Stops needed
+              <span className="vendor-run-summary-cta">Tap for full parts list →</span>
+            </div>
+            <p className="muted vendor-run-summary-sub">
+              {runSheet.length} vendor{runSheet.length === 1 ? "" : "s"}
+              {runSheetTotalPieces > 0
+                ? ` · ~${runSheetTotalPieces} piece${runSheetTotalPieces === 1 ? "" : "s"}`
+                : ""}
+              {" "}
+              — see sizes / counts before you leave
+            </p>
+          </button>
           <div className="vendor-run-chips" role="list">
             {groups
               .filter((g) => g.waiting > 0)
@@ -304,17 +394,125 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                 <button
                   key={g.vendor_name}
                   type="button"
-                  className={`vendor-run-chip${expanded[g.vendor_name] ? " is-open" : ""}`}
-                  onClick={() => {
-                    setExpanded((p) => ({ ...p, [g.vendor_name]: true }));
-                    setFilter("open");
-                    window.setTimeout(scrollToList, 40);
-                  }}
+                  className={`vendor-run-chip${
+                    runSheetFocus === g.vendor_name || expanded[g.vendor_name] ? " is-open" : ""
+                  }`}
+                  onClick={() => openRunSheet(g.vendor_name)}
                 >
                   <span className="vendor-run-chip-name">{g.vendor_name}</span>
                   <span className="vendor-run-chip-n">{g.waiting}</span>
                 </button>
               ))}
+          </div>
+        </div>
+      )}
+
+      {showRunSheet && (
+        <div
+          className="vendor-run-sheet-overlay no-print"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Pickup run sheet"
+        >
+          <div className="vendor-run-sheet card">
+            <div className="vendor-run-sheet-head">
+              <div>
+                <h2 className="vendor-run-sheet-title">Pickup run sheet</h2>
+                <p className="muted vendor-run-sheet-sub">
+                  Every open stop · part counts first so you know if it fits the truck
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                onClick={() => {
+                  setShowRunSheet(false);
+                  setRunSheetFocus(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            {!runSheet.length ? (
+              <p className="muted">Nothing waiting right now.</p>
+            ) : (
+              <div className="vendor-run-sheet-body">
+                {runSheet.map((g) => {
+                  const focus = !runSheetFocus || runSheetFocus === g.vendor_name;
+                  if (!focus && runSheetFocus) return null;
+                  return (
+                    <section key={g.vendor_name} className="vendor-run-sheet-vendor">
+                      <header className="vendor-run-sheet-vendor-head">
+                        <h3>{g.vendor_name}</h3>
+                        <span className="vendor-run-sheet-tally">
+                          {g.lines.length} line{g.lines.length === 1 ? "" : "s"}
+                          {g.pieceCount > 0 ? ` · ${g.pieceCount} pcs` : ""}
+                        </span>
+                      </header>
+                      <ul className="vendor-run-sheet-parts">
+                        {g.lines.map((l) => (
+                          <li key={l.key} className="vendor-run-sheet-part">
+                            <span className="vendor-run-sheet-qty">{l.qty}×</span>
+                            <span className="vendor-run-sheet-detail">
+                              <strong className="vendor-run-sheet-name">
+                                {l.name || "Part"}
+                              </strong>
+                              {l.code && l.code !== "—" ? (
+                                <span className="vendor-run-sheet-code">{l.code}</span>
+                              ) : null}
+                              {(l.po || l.needed) && (
+                                <span className="muted vendor-run-sheet-meta">
+                                  {l.po ? l.po : ""}
+                                  {l.po && l.needed ? " · " : ""}
+                                  {l.needed ? `need ${l.needed}` : ""}
+                                </span>
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  );
+                })}
+                {runSheetFocus && (
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm"
+                    style={{ marginTop: "0.5rem" }}
+                    onClick={() => setRunSheetFocus(null)}
+                  >
+                    Show all vendors
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="vendor-run-sheet-foot">
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => {
+                  setShowRunSheet(false);
+                  if (runSheetFocus) {
+                    setExpanded((p) => ({ ...p, [runSheetFocus]: true }));
+                  }
+                  window.setTimeout(scrollToList, 40);
+                }}
+              >
+                Open full tickets
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setShowRunSheet(false);
+                  setRunSheetFocus(null);
+                }}
+              >
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}

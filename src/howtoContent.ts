@@ -360,7 +360,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Open Part pickup from the menu (or Inventory → Vendor / part-ready list).",
       "Log vendor name, part, qty, needed-for date (usually tomorrow), and job address if known.",
       "Anyone can log it — office after a vendor call, or a tech if the vendor called them.",
-      "Warehouse opens the same list grouped by vendor and checks off each line when picked up.",
+      "Tap Stops needed (or a vendor chip) for the Pickup run sheet — big qty × part list by company so you can see if it fits the truck.",
+      "Warehouse uses full tickets to mark each line picked / not ready / partial.",
       "Marking picked receives catalog parts into warehouse stock when linked to the catalog.",
     ],
     tips: [
