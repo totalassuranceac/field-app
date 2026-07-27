@@ -158,6 +158,38 @@ export function AssetsPage() {
   );
   const allLocs = useMemo(() => matrix, [matrix]);
 
+  /** Equipment grouped by location for collapsible list */
+  const equipmentByLocation = useMemo(() => {
+    const map = new Map<
+      string,
+      { key: string; label: string; items: Asset[]; needs: number }
+    >();
+    for (const a of assets) {
+      const key =
+        a.location_id != null
+          ? `loc-${a.location_id}`
+          : a.unit_number
+            ? `unit-${a.unit_number}`
+            : a.location_name
+              ? `name-${a.location_name}`
+              : "unassigned";
+      const label = locLabel(a.unit_number, a.location_name);
+      const g = map.get(key) || { key, label, items: [], needs: 0 };
+      g.items.push(a);
+      if (
+        a.condition === "damaged" ||
+        a.condition === "poor" ||
+        a.condition === "out_of_service" ||
+        a.status === "repair" ||
+        a.status === "missing"
+      ) {
+        g.needs += 1;
+      }
+      map.set(key, g);
+    }
+    return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [assets]);
+
   const loadBottles = useCallback(async () => {
     const [sum, ev, users] = await Promise.all([
       api<{ types: BottleType[]; matrix: MatrixRow[] }>("/assets/bottles/summary"),
@@ -765,44 +797,75 @@ export function AssetsPage() {
           </div>
 
           <div className="asset-equip-layout">
-            <ul className="asset-list">
-              {assets.map((a) => (
-                <li key={a.id}>
-                  <button
-                    type="button"
-                    className={`card asset-card cond-${conditionClass(a.condition)}${
-                      selected?.id === a.id ? " selected" : ""
-                    }`}
-                    onClick={() => void openDetail(a)}
-                  >
-                    <div className="asset-card-top">
-                      <strong>
-                        {a.asset_tag ? `${a.asset_tag} · ` : ""}
-                        {a.name}
-                      </strong>
-                      <span className={`asset-cond-badge ${conditionClass(a.condition)}`}>
-                        {a.condition.replace("_", " ")}
-                      </span>
-                    </div>
-                    <div className="muted" style={{ fontSize: "0.82rem" }}>
-                      {a.category}
-                      {a.subcategory ? ` · ${a.subcategory}` : ""} ·{" "}
-                      {locLabel(a.unit_number, a.location_name)}
-                      {a.issued_at
-                        ? ` · issued ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
-                        : ""}
-                    </div>
-                  </button>
-                </li>
-              ))}
-              {!assets.length && (
-                <li className="muted empty">
+            <div className="asset-loc-list">
+              {!assets.length ? (
+                <p className="muted empty" style={{ margin: 0 }}>
                   {isField
                     ? "No company equipment assigned to your truck yet."
                     : "No equipment yet — use Add equipment for ladders, dollies, tools."}
-                </li>
+                </p>
+              ) : (
+                equipmentByLocation.map((group) => (
+                  <details
+                    key={group.key}
+                    className="bottle-loc-details asset-loc-details"
+                    open={
+                      isField ||
+                      group.items.some((a) => a.id === selected?.id) ||
+                      (needsOnly && group.needs > 0)
+                        ? true
+                        : undefined
+                    }
+                  >
+                    <summary className="bottle-loc-summary">
+                      <span className="bottle-loc-chevron" aria-hidden />
+                      <strong className="bottle-loc-name">{group.label}</strong>
+                      <span className="bottle-loc-peek muted">
+                        <span className="bottle-loc-total">{group.items.length}</span>
+                        {group.needs > 0 ? (
+                          <span className="asset-loc-needs">
+                            {group.needs} need
+                            {group.needs === 1 ? "s" : ""} attention
+                          </span>
+                        ) : null}
+                      </span>
+                    </summary>
+                    <ul className="asset-list asset-list-in-loc">
+                      {group.items.map((a) => (
+                        <li key={a.id}>
+                          <button
+                            type="button"
+                            className={`card asset-card cond-${conditionClass(a.condition)}${
+                              selected?.id === a.id ? " selected" : ""
+                            }`}
+                            onClick={() => void openDetail(a)}
+                          >
+                            <div className="asset-card-top">
+                              <strong>
+                                {a.asset_tag ? `${a.asset_tag} · ` : ""}
+                                {a.name}
+                              </strong>
+                              <span
+                                className={`asset-cond-badge ${conditionClass(a.condition)}`}
+                              >
+                                {a.condition.replace("_", " ")}
+                              </span>
+                            </div>
+                            <div className="muted" style={{ fontSize: "0.82rem" }}>
+                              {a.category}
+                              {a.subcategory ? ` · ${a.subcategory}` : ""}
+                              {a.issued_at
+                                ? ` · issued ${String(a.issued_at).replace("T", " ").slice(0, 10)}`
+                                : ""}
+                            </div>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ))
               )}
-            </ul>
+            </div>
 
             {selected && (
               <div className="card asset-detail">

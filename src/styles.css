@@ -5222,6 +5222,33 @@ tr.row-low td {
   font-weight: 600;
 }
 
+.asset-loc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.asset-loc-details {
+  background: var(--surface);
+}
+
+.asset-loc-details .asset-list-in-loc {
+  list-style: none;
+  margin: 0;
+  padding: 0.35rem 0.35rem 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.asset-loc-needs {
+  color: #fca5a5;
+  font-weight: 650;
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
+}
+
 .asset-equip-layout {
   display: grid;
   grid-template-columns: 1fr;

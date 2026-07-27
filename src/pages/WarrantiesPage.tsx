@@ -14,9 +14,9 @@ import {
 
 /**
  * Flow:
- * Dropped off → Claim submitted → (optional) Return to vendor → Delivered
- * → Approved | Rejected (credit decision closes the log)
- * Open until approved/rejected only.
+ * Dropped off → Claim submitted → (optional) Return to vendor [→ Delivered]
+ * → Approved | Rejected (credit decision only — closes the log)
+ * Return to vendor is an OPEN status, never the same as rejected.
  */
 type WStatus =
   | "dropped_off"
@@ -683,7 +683,10 @@ export function WarrantiesPage() {
                       Delivered
                     </button>
                   )}
-                  {(st === "claim_submitted" || st === "delivered") && (
+                  {/* Credit outcome closes the claim — available after claim or vendor return */}
+                  {(st === "claim_submitted" ||
+                    st === "return_to_vendor" ||
+                    st === "delivered") && (
                     <>
                       <button
                         type="button"
