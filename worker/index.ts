@@ -2777,6 +2777,9 @@ api.get("/issues", async (c) => {
   const binds: unknown[] = [];
   if (report === "schedule") {
     sql += " AND i.status IN ('open','scheduled','in_progress')";
+  } else if (report === "needs_schedule") {
+    // New tech requests waiting for shop to book a day
+    sql += " AND i.status = 'open'";
   } else if (status) {
     sql += " AND i.status = ?";
     binds.push(status);
@@ -2787,9 +2790,18 @@ api.get("/issues", async (c) => {
     sql += sc.clause;
     binds.push(...sc.binds);
   }
-  sql += " ORDER BY CASE i.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, i.created_at DESC";
+  // Unscheduled open first, then emergencies, then severity, newest
+  sql += ` ORDER BY
+    CASE WHEN i.status = 'open' THEN 0 WHEN i.status = 'scheduled' THEN 1 WHEN i.status = 'in_progress' THEN 2 ELSE 3 END,
+    CASE WHEN IFNULL(i.is_emergency,0) = 1 THEN 0 ELSE 1 END,
+    CASE i.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+    i.created_at DESC`;
   const rows = await c.env.DB.prepare(sql).bind(...binds).all();
-  return c.json({ issues: rows.results });
+  const issues = rows.results || [];
+  const needsSchedule = issues.filter(
+    (r) => String((r as { status?: string }).status || "") === "open"
+  ).length;
+  return c.json({ issues, needs_schedule: needsSchedule });
 });
 
 api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
@@ -2914,20 +2926,26 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
   // In-app first (fast) — mechanics / office / admin always get a notification row
   const notifyRoles = ["mechanic", "admin", "office"] as string[];
   const techs = await usersByRoles(c.env.DB, notifyRoles);
+  const unitNoEarly = unit?.unit_number || "?";
+  const detailLine = (body.description || "").trim().slice(0, 160);
+  const headline =
+    detailLine && (body.issue_category === "other" || !cat?.label)
+      ? detailLine
+      : title;
   const alertBody =
-    body.description ||
+    detailLine ||
     (isEmergency
-      ? "Driver reported an emergency (e.g. flat). Open Notifications / Repairs now."
-      : "New driver repair request — open Repairs in the app.");
+      ? "Driver reported an emergency. Open Repairs in the app to schedule."
+      : "Needs scheduling on the shop board — open Repairs in Field App.");
   await notifyUsers(
     c.env.DB,
     techs,
     isEmergency ? "flat_emergency" : "repair_request",
     isEmergency
-      ? `EMERGENCY · Unit ${unit?.unit_number || "?"} · ${title}`
-      : `Repair request · Unit ${unit?.unit_number || "?"} · ${title}`,
+      ? `EMERGENCY · Unit ${unitNoEarly} · ${headline}`
+      : `Needs schedule · Unit ${unitNoEarly} · ${headline}`,
     alertBody,
-    { type: "vehicle_issue", id }
+    { type: "issue", id }
   );
 
   await writeAudit(

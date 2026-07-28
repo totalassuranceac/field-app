@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
@@ -10,6 +11,22 @@ import {
   type ClientPushPayload,
 } from "../ntfyClient";
 import type { Vehicle } from "./VehiclesPage";
+
+/** What shop should read first — description for free-text "other" reports */
+function issueHeadline(i: {
+  title: string;
+  description: string | null;
+  issue_category: string | null;
+}): string {
+  const desc = (i.description || "").trim();
+  if (desc && (i.issue_category === "other" || /other/i.test(i.title))) {
+    return desc.length > 100 ? `${desc.slice(0, 100)}…` : desc;
+  }
+  if (desc && desc.length > 8 && desc.toLowerCase() !== i.title.toLowerCase()) {
+    return `${i.title} — ${desc.length > 60 ? `${desc.slice(0, 60)}…` : desc}`;
+  }
+  return i.title;
+}
 
 interface Issue {
   id: number;
@@ -40,14 +57,18 @@ interface CommonRow {
 
 export function IssuesPage() {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isDriver = user?.role === "driver";
   const isOffice = user?.role === "office";
-  /** Full shop tools: mechanic/admin — not office (they only need the schedule view) */
-  const isMechanic = can(user, "manageIssues") && !isOffice;
+  /** Shop tools: mechanic / admin (and office can schedule now) */
+  const canShop = can(user, "manageIssues");
+  const isMechanic = canShop && !isOffice;
   const [issues, setIssues] = useState<Issue[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [common, setCommon] = useState<CommonRow[]>([]);
-  const [filter, setFilter] = useState("active");
+  const [filter, setFilter] = useState(
+    searchParams.get("tab") === "needs" ? "open" : "active"
+  );
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [showNew, setShowNew] = useState(false);
@@ -92,14 +113,22 @@ export function IssuesPage() {
   const submitLock = useRef(false);
 
   async function load() {
-    const q = filter === "active" ? "?report=schedule" : filter === "all" ? "" : `?status=${filter}`;
+    // Deep-link always loads the shop board so the target ticket is present
+    const deepId = searchParams.get("id");
+    const q = deepId
+      ? "?report=schedule"
+      : filter === "active"
+        ? "?report=schedule"
+        : filter === "all"
+          ? ""
+          : `?status=${filter}`;
     const [iss, vehs] = await Promise.all([
-      api<{ issues: Issue[] }>(`/issues${q}`),
+      api<{ issues: Issue[]; needs_schedule?: number }>(`/issues${q}`),
       api<{ vehicles: Vehicle[] }>("/vehicles?filter=active"),
     ]);
     setIssues(iss.issues);
     setVehicles(vehs.vehicles);
-    if (isMechanic) {
+    if (canShop) {
       try {
         const c = await api<{ common: CommonRow[] }>("/issues/common?days=90");
         setCommon(c.common || []);
@@ -140,6 +169,14 @@ export function IssuesPage() {
     }
   }
 
+  const needsSchedule = useMemo(
+    () => issues.filter((i) => i.status === "open"),
+    [issues]
+  );
+  const onBoard = useMemo(
+    () => issues.filter((i) => i.status === "scheduled" || i.status === "in_progress"),
+    [issues]
+  );
   async function sendShopText(e: FormEvent) {
     e.preventDefault();
     if (!smsMsg.trim() || !smsTo) return;
@@ -276,6 +313,21 @@ export function IssuesPage() {
     setOilInterval("5000");
   }
 
+  // Deep-link from in-app notification: /issues?id=28 → schedule that ticket
+  useEffect(() => {
+    const raw = searchParams.get("id");
+    if (!raw || !issues.length || !canShop) return;
+    const id = Number(raw);
+    if (!Number.isFinite(id)) return;
+    const hit = issues.find((i) => i.id === id);
+    if (!hit) return;
+    openManage(hit);
+    const next = new URLSearchParams(searchParams);
+    next.delete("id");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open once when list loads
+  }, [issues, canShop]);
+
   async function saveManage(e: FormEvent) {
     e.preventDefault();
     if (!manage) return;
@@ -309,6 +361,67 @@ export function IssuesPage() {
     }
   }
 
+  function renderIssueCard(i: Issue, opts?: { forceOpen?: boolean; scheduleCta?: boolean }) {
+    const when = i.scheduled_date || i.created_at?.slice(0, 10) || "—";
+    const shopNote = i.mechanic_diagnosis || i.work_performed || "";
+    const head = issueHeadline(i);
+    const tone = i.is_emergency
+      ? "urgent"
+      : i.status === "open"
+        ? "warn"
+        : i.severity === "critical" || i.severity === "high"
+          ? "bad"
+          : i.status === "completed"
+            ? "done"
+            : undefined;
+    return (
+      <LogItem
+        key={i.id}
+        tone={tone}
+        defaultOpen={opts?.forceOpen || !!i.is_emergency || i.status === "open"}
+        summary={
+          <>
+            <strong>Unit {i.unit_number}</strong>
+            {!!i.is_emergency && <span className="log-item-badge">Emergency</span>}
+            {i.status === "open" && (
+              <span className="log-item-badge log-item-badge-needs">Needs schedule</span>
+            )}
+            <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
+            <span className="log-item-meta">{head}</span>
+            <span className="log-item-meta">{when}</span>
+          </>
+        }
+      >
+        {i.issue_category && i.issue_category !== "other" && (
+          <div className="muted">{driverIssueLabel(i.issue_category)}</div>
+        )}
+        {i.description && (
+          <div className="issue-desc-block">
+            <strong>Tech said: </strong>
+            {i.description}
+          </div>
+        )}
+        {!isDriver && shopNote && (
+          <div>
+            <span className="muted">Shop notes: </span>
+            {shopNote}
+          </div>
+        )}
+        <div className="muted">
+          By {i.reporter_name} · {i.severity}
+          {i.created_at ? ` · reported ${String(i.created_at).replace("T", " ").slice(0, 16)}` : ""}
+        </div>
+        {canShop && (
+          <div className="log-item-actions">
+            <button className="btn no-print" type="button" onClick={() => openManage(i)}>
+              {i.status === "open" || opts?.scheduleCta ? "Schedule / shop work" : "Shop work"}
+            </button>
+          </div>
+        )}
+      </LogItem>
+    );
+  }
+
   return (
     <div>
       <div className="page-header">
@@ -316,16 +429,12 @@ export function IssuesPage() {
           <h1>
             {isDriver
               ? "Request a repair"
-              : isOffice
-                ? "Scheduled repairs"
-                : "Repairs & shop board"}
+              : "Repairs & shop board"}
           </h1>
           <p>
             {isDriver
               ? "Tell us what’s wrong — pick from the list. Flat tires go out as emergency."
-              : isOffice
-                ? "What’s open or booked for the shop — units that may be down."
-                : "Triage driver requests, document real diagnosis, schedule & complete work."}
+              : "New tech requests show under Needs scheduling. Book a date so the unit is on the shop board — all inside this app (no ntfy required)."}
           </p>
         </div>
         <div className="toolbar no-print">
@@ -334,7 +443,7 @@ export function IssuesPage() {
               {isDriver ? "New request" : "Report issue"}
             </button>
           )}
-          {isMechanic && (
+          {canShop && (
             <button className="btn secondary" onClick={() => window.print()}>
               Print work list
             </button>
@@ -345,7 +454,23 @@ export function IssuesPage() {
       {ok && <div className="success" style={{ marginBottom: "1rem" }}>{ok}</div>}
       {error && <div className="error" style={{ marginBottom: "1rem" }}>{error}</div>}
 
-      {isMechanic && oilDue.length > 0 && (
+      {canShop && needsSchedule.length > 0 && filter === "active" && (
+        <div className="card issue-needs-card no-print" style={{ marginBottom: "1rem" }}>
+          <h2 style={{ marginTop: 0 }}>
+            Needs scheduling
+            <span className="issue-needs-count">{needsSchedule.length}</span>
+          </h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
+            Tech reported these — not booked yet. Tap <strong>Schedule / shop work</strong> to set a
+            day.
+          </p>
+          <LogList className="shop-board log-list" empty="None waiting.">
+            {needsSchedule.map((i) => renderIssueCard(i, { forceOpen: true, scheduleCta: true }))}
+          </LogList>
+        </div>
+      )}
+
+      {canShop && oilDue.length > 0 && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>Oil changes due (by mileage)</h2>
           <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
@@ -369,7 +494,7 @@ export function IssuesPage() {
         </div>
       )}
 
-      {isMechanic && common.length > 0 && (
+      {canShop && common.length > 0 && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>Common problems (90 days)</h2>
           <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
@@ -391,14 +516,6 @@ export function IssuesPage() {
         </div>
       )}
 
-      {isMechanic && filter === "active" && (
-        <div className="info-banner" style={{ marginBottom: "1rem" }}>
-          <strong>Scheduled / in progress</strong> marks the unit out of service and starts downtime.
-          Complete work to clear downtime. Use diagnosis + work performed for real shop tracking —
-          drivers only pick a simple issue type.
-        </div>
-      )}
-
       <div className="filters no-print">
         {(isDriver
           ? [
@@ -406,21 +523,14 @@ export function IssuesPage() {
               ["completed", "Done"],
               ["all", "All"],
             ]
-          : isOffice
-            ? [
-                ["active", "On the board"],
-                ["scheduled", "Scheduled"],
-                ["in_progress", "In progress"],
-                ["completed", "Completed"],
-              ]
-            : [
-                ["active", "Needs work"],
-                ["open", "Open"],
-                ["scheduled", "Scheduled"],
-                ["in_progress", "In progress"],
-                ["completed", "Completed"],
-                ["all", "All"],
-              ]
+          : [
+              ["active", "Shop board"],
+              ["open", `Needs schedule${needsSchedule.length ? ` (${needsSchedule.length})` : ""}`],
+              ["scheduled", "Scheduled"],
+              ["in_progress", "In progress"],
+              ["completed", "Completed"],
+              ["all", "All"],
+            ]
         ).map(([k, label]) => (
           <button
             key={k}
@@ -433,60 +543,30 @@ export function IssuesPage() {
         ))}
       </div>
 
-      <LogList className="shop-board log-list" empty="No issues in this view.">
-        {issues.map((i) => {
-          const when = i.scheduled_date || i.created_at?.slice(0, 10) || "—";
-          const shopNote = i.mechanic_diagnosis || i.work_performed || "";
-          const tone = i.is_emergency
-            ? "urgent"
-            : i.severity === "critical" || i.severity === "high"
-              ? "bad"
-              : i.status === "completed"
-                ? "done"
-                : undefined;
-          return (
-            <LogItem
-              key={i.id}
-              tone={tone}
-              defaultOpen={!!i.is_emergency}
-              summary={
-                <>
-                  <strong>Unit {i.unit_number}</strong>
-                  {!!i.is_emergency && <span className="log-item-badge">Emergency</span>}
-                  <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
-                  <span className="log-item-meta">{i.title}</span>
-                  <span className="log-item-meta">{when}</span>
-                </>
-              }
-            >
-              {i.issue_category && (
-                <div className="muted">{driverIssueLabel(i.issue_category)}</div>
-              )}
-              {i.description && <div>{i.description}</div>}
-              {!isDriver && shopNote && (
-                <div>
-                  <span className="muted">Shop notes: </span>
-                  {shopNote}
-                </div>
-              )}
-              <div className="muted">
-                By {i.reporter_name} · {i.severity}
-              </div>
-              {isMechanic && (
-                <div className="log-item-actions">
-                  <button
-                    className="btn no-print"
-                    type="button"
-                    onClick={() => openManage(i)}
-                  >
-                    Shop work
-                  </button>
-                </div>
-              )}
-            </LogItem>
-          );
-        })}
-      </LogList>
+      {canShop && filter === "active" ? (
+        <>
+          {onBoard.length > 0 && (
+            <div className="card" style={{ marginBottom: "1rem" }}>
+              <h2 style={{ marginTop: 0 }}>Scheduled / in progress</h2>
+              <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
+                Booked work — completing clears downtime when applicable.
+              </p>
+              <LogList className="shop-board log-list" empty="None booked.">
+                {onBoard.map((i) => renderIssueCard(i))}
+              </LogList>
+            </div>
+          )}
+          {!needsSchedule.length && !onBoard.length && (
+            <div className="muted empty">No open or scheduled repairs right now.</div>
+          )}
+        </>
+      ) : (
+        <LogList className="shop-board log-list" empty="No issues in this view.">
+          {(filter === "open" ? needsSchedule : filter === "active" ? issues : issues).map((i) =>
+            renderIssueCard(i, { forceOpen: i.status === "open", scheduleCta: i.status === "open" })
+          )}
+        </LogList>
+      )}
 
       {showNew && (
         <div

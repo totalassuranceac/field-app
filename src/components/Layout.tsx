@@ -187,6 +187,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [unread, setUnread] = useState(0);
   /** Parts waiting at vendors — warehouse glance counter (shows 0 when clear) */
   const [vendorWaiting, setVendorWaiting] = useState(0);
+  /** Open tech repair requests waiting for shop to schedule */
+  const [openRepairsCount, setOpenRepairsCount] = useState(0);
   /** Open collapsible nav section (same Command Center style for every role) */
   const [openCat, setOpenCat] = useState<string>(() => pathCategory(location.pathname));
   const sidebarClass = open ? "sidebar open" : "sidebar";
@@ -201,6 +203,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const readOnly = isViewer(user);
   const showVendorCounter =
     isWarehouse || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
+  const showRepairBadge =
+    isMechanic || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
 
   useEffect(() => {
     let cancelled = false;
@@ -222,6 +226,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
           /* migration optional */
         }
       }
+      if (showRepairBadge) {
+        try {
+          const ir = await api<{ issues?: unknown[]; needs_schedule?: number }>(
+            "/issues?report=needs_schedule"
+          );
+          if (!cancelled) {
+            setOpenRepairsCount(
+              typeof ir.needs_schedule === "number"
+                ? ir.needs_schedule
+                : (ir.issues || []).length
+            );
+          }
+        } catch {
+          /* optional */
+        }
+      }
     }
     // Defer badge poll so first paint is not blocked by extra API calls
     const start = window.setTimeout(() => void poll(), 400);
@@ -234,7 +254,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       window.clearInterval(id);
       window.removeEventListener("vendor-runs-changed", onVendorChange);
     };
-  }, [user?.id, showVendorCounter]);
+  }, [user?.id, showVendorCounter, showRepairBadge]);
 
   useEffect(() => {
     document.title = "Total Assurance";
@@ -360,9 +380,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const shopNav: NavItem[] = [
     {
       to: "/issues",
-      label: isOffice
-        ? "Scheduled repairs"
-        : can(user, "manageIssues") || adminShell
+      label:
+        can(user, "manageIssues") || adminShell
           ? "Repairs & shop"
           : can(user, "reportIssues")
             ? "Request repair"
@@ -372,6 +391,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
         can(user, "reportIssues") ||
         can(user, "manageIssues") ||
         user?.role === "viewer",
+      ...(openRepairsCount != null && can(user, "manageIssues")
+        ? {
+            badge: openRepairsCount,
+            badgeAlways: false,
+            badgeLabel:
+              openRepairsCount > 0
+                ? `${openRepairsCount} need scheduling`
+                : "No open repair requests",
+          }
+        : {}),
     },
     {
       to: "/service",

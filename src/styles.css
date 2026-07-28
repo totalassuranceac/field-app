@@ -5387,6 +5387,39 @@ tr.row-low td {
   background: color-mix(in srgb, #3b82f6 6%, var(--surface));
 }
 
+.issue-needs-card {
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, var(--line));
+  background: color-mix(in srgb, #f59e0b 8%, var(--surface));
+}
+
+.issue-needs-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  margin-left: 0.45rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 850;
+  background: #ea580c;
+  color: #fff;
+  vertical-align: middle;
+}
+
+.log-item-badge-needs {
+  background: color-mix(in srgb, #f59e0b 25%, transparent) !important;
+  color: #fbbf24 !important;
+  border-color: color-mix(in srgb, #f59e0b 50%, var(--line)) !important;
+}
+
+.issue-desc-block {
+  margin: 0.25rem 0;
+  line-height: 1.35;
+  font-size: 0.95rem;
+}
+
 .asset-equip-layout {
   display: grid;
   grid-template-columns: 1fr;

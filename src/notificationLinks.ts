@@ -50,9 +50,14 @@ export function notificationLink(n: {
     kind === "oil_change_due" ||
     kind.includes("repair") ||
     kind.includes("issue") ||
-    entity === "issue"
+    entity === "issue" ||
+    entity === "vehicle_issue"
   ) {
-    return "/issues";
+    // Deep-link to that ticket so shop can schedule without hunting
+    if (n.entity_id != null && String(n.entity_id).trim() !== "") {
+      return `/issues?id=${encodeURIComponent(String(n.entity_id))}`;
+    }
+    return "/issues?tab=needs";
   }
   if (
     kind === "vendor_run" ||
