@@ -15,6 +15,8 @@ export const DRIVER_ISSUE_OPTIONS = [
   { value: "noise", label: "Unusual noise / vibration", severity: "medium", emergency: false },
   { value: "glass", label: "Glass / mirror damage", severity: "medium", emergency: false },
   { value: "body", label: "Body damage / accident", severity: "high", emergency: false },
+  { value: "dash_cam", label: "Dash cam missing / not working", severity: "medium", emergency: false },
+  { value: "gps", label: "GPS tracker missing / not working", severity: "medium", emergency: false },
   { value: "other", label: "Other (describe)", severity: "medium", emergency: false },
 ] as const;
 

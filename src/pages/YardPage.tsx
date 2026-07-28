@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { isPersonalVehicleUnit, type Vehicle } from "./VehiclesPage";
@@ -53,6 +54,8 @@ export function YardPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [form, setForm] = useState({
     registration_expires: "",
@@ -64,6 +67,9 @@ export function YardPage() {
     insurance_card: "",
     notes: "",
   });
+  /** When cam/GPS is bad, offer to push a shop ticket */
+  const [shopCam, setShopCam] = useState(false);
+  const [shopGps, setShopGps] = useState(false);
 
   async function load(f: Filter = filter) {
     const q = f === "all" ? "" : `?filter=${f}`;
@@ -112,6 +118,12 @@ export function YardPage() {
 
   function openVehicle(v: Vehicle) {
     setSelected(v);
+    setOk("");
+    setError("");
+    const camBad = v.dash_cam_status === "not_working" || v.dash_cam_status === "missing";
+    const gpsBad = v.gps_status === "not_working" || v.gps_status === "missing";
+    setShopCam(camBad);
+    setShopGps(gpsBad);
     setForm({
       registration_expires: v.registration_expires || "",
       insurance_expires: v.insurance_expires || "",
@@ -134,9 +146,85 @@ export function YardPage() {
     });
   }
 
+  const camNeedsShop =
+    form.dash_cam_status === "not_working" || form.dash_cam_status === "missing";
+  const gpsNeedsShop = form.gps_status === "not_working" || form.gps_status === "missing";
+
+  async function createShopTicket(
+    vehicleId: number,
+    unit: string,
+    kind: "dash_cam" | "gps",
+    statusLabel: string,
+    extra?: string
+  ): Promise<"created" | "exists" | "error"> {
+    try {
+      const open = await api<{ issues: Array<{ vehicle_id: number; issue_category: string | null; status: string }> }>(
+        "/issues?report=needs_schedule"
+      ).catch(() => ({ issues: [] as Array<{ vehicle_id: number; issue_category: string | null; status: string }> }));
+      const already = (open.issues || []).some(
+        (i) =>
+          i.vehicle_id === vehicleId &&
+          i.issue_category === kind &&
+          (i.status === "open" || i.status === "scheduled" || i.status === "in_progress")
+      );
+      // Also check full board in case already scheduled
+      if (!already) {
+        const board = await api<{
+          issues: Array<{ vehicle_id: number; issue_category: string | null; status: string }>;
+        }>("/issues?report=schedule").catch(() => ({ issues: [] as Array<{ vehicle_id: number; issue_category: string | null; status: string }> }));
+        if (
+          (board.issues || []).some(
+            (i) =>
+              i.vehicle_id === vehicleId &&
+              i.issue_category === kind &&
+              ["open", "scheduled", "in_progress"].includes(i.status)
+          )
+        ) {
+          return "exists";
+        }
+      } else {
+        return "exists";
+      }
+
+      const title =
+        kind === "dash_cam"
+          ? `Dash cam ${statusLabel.replace(/_/g, " ")}`
+          : `GPS tracker ${statusLabel.replace(/_/g, " ")}`;
+      const description = [
+        `Found on yard walk · Unit ${unit}`,
+        kind === "dash_cam"
+          ? `Dash cam status: ${statusLabel.replace(/_/g, " ")}`
+          : `GPS status: ${statusLabel.replace(/_/g, " ")}`,
+        form.cam_type && kind === "dash_cam" ? `Cam type: ${form.cam_type}` : "",
+        form.gps_tracker && kind === "gps" ? `GPS system: ${form.gps_tracker}` : "",
+        extra?.trim() || "",
+        form.notes?.trim() ? `Yard notes: ${form.notes.trim()}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await api("/issues", {
+        method: "POST",
+        body: JSON.stringify({
+          vehicle_id: vehicleId,
+          issue_category: kind,
+          title,
+          description,
+          severity: "medium",
+        }),
+      });
+      return "created";
+    } catch {
+      return "error";
+    }
+  }
+
   async function save(e: FormEvent) {
     e.preventDefault();
     if (!selected || !can(user, "manageVehicles")) return;
+    setBusy(true);
+    setError("");
+    setOk("");
     const canCompliance = can(user, "manageVehicleCompliance");
     const personal = isPersonalVehicleUnit(selected.unit_number);
     const payload: Record<string, unknown> = {
@@ -161,10 +249,44 @@ export function YardPage() {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
+
+      const shopNotes: string[] = [];
+      if (can(user, "reportIssues")) {
+        if (shopCam && camNeedsShop) {
+          const r = await createShopTicket(
+            selected.id,
+            selected.unit_number,
+            "dash_cam",
+            form.dash_cam_status
+          );
+          if (r === "created") shopNotes.push("dash cam → shop board");
+          else if (r === "exists") shopNotes.push("dash cam already on shop board");
+          else shopNotes.push("dash cam ticket failed");
+        }
+        if (shopGps && gpsNeedsShop) {
+          const r = await createShopTicket(
+            selected.id,
+            selected.unit_number,
+            "gps",
+            form.gps_status
+          );
+          if (r === "created") shopNotes.push("GPS → shop board");
+          else if (r === "exists") shopNotes.push("GPS already on shop board");
+          else shopNotes.push("GPS ticket failed");
+        }
+      }
+
+      setOk(
+        shopNotes.length
+          ? `Saved. ${shopNotes.join(" · ")}.`
+          : "Yard update saved."
+      );
       setSelected(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed");
+    } finally {
+      setBusy(false);
     }
   }
 
