@@ -62,6 +62,22 @@ function statusLabel(s: string): string {
   return LINE_STATUSES.find((x) => x.value === s)?.label || s;
 }
 
+/** Required reason when dropping a part from the pickup list. */
+function askNotNeededReason(label: string): string | null {
+  let draft = "";
+  for (;;) {
+    const raw = window.prompt(
+      `Why is this not needed?\n\n${label}\n\nRequired — e.g. job cancelled, wrong part, ordered by mistake`,
+      draft
+    );
+    if (raw === null) return null;
+    const reason = raw.trim();
+    if (reason.length >= 3) return reason;
+    window.alert("Please type a short reason (at least a few words).");
+    draft = raw;
+  }
+}
+
 /**
  * Part pickup tickets: vendor + PO + how many parts → blank lines for part #s.
  * Warehouse marks each line picked / not ready / partial.
@@ -566,17 +582,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                 className="btn secondary btn-sm pp-not-needed-btn vendor-run-sheet-drop"
                                 disabled={busy}
                                 onClick={() => {
-                                  const reason = window.prompt(
-                                    `Mark as not needed?\n\n${l.qty}× ${l.name || "Part"}\n\nDrops it off the pickup list.\nOptional reason:`,
-                                    ""
+                                  const reason = askNotNeededReason(
+                                    `${l.qty}× ${l.name || "Part"}`
                                   );
-                                  if (reason === null) return;
-                                  void resolveLine(
-                                    l.lineId!,
-                                    "cancelled",
-                                    null,
-                                    reason.trim() || "Not needed"
-                                  );
+                                  if (!reason) return;
+                                  void resolveLine(l.lineId!, "cancelled", null, reason);
                                 }}
                               >
                                 Not needed
@@ -796,7 +806,6 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                       setExpandedTicket((p) => ({ ...p, [t.id]: !p[t.id] }))
                     }
                     onResolve={resolveLine}
-                    onCancelOpen={() => void cancelOpenLinesOnTicket(t)}
                     onSaveDetails={async (drafts) => {
                       setBusy(true);
                       setError("");
@@ -842,7 +851,6 @@ function TicketCard({
   expanded,
   onToggle,
   onResolve,
-  onCancelOpen,
   onSaveDetails,
   onAddLine,
 }: {
@@ -858,7 +866,6 @@ function TicketCard({
     qtyReceived?: number | null,
     notes?: string
   ) => Promise<void>;
-  onCancelOpen: () => void;
   onSaveDetails: (
     drafts: Record<number, { code: string; name: string; qty: string }>
   ) => Promise<void>;
@@ -917,20 +924,19 @@ function TicketCard({
 
       {expanded && (
         <div className="pp-ticket-body">
-          {canNotNeeded && openCount > 0 && (
-            <p className="pp-not-needed-hint">
-              Part no longer needed? Use the red-tinted <strong>Not needed</strong> button on that
-              line (or all open parts below).
-            </p>
-          )}
           {t.notes ? <p className="muted pp-ticket-notes">{t.notes}</p> : null}
 
           {!t.lines.length && (
-            <p className="muted">
+            <p className="muted pp-empty-lines">
               No part lines yet.
-              {canResolve || true ? (
-                <button type="button" className="btn ghost btn-sm" disabled={busy} onClick={() => void onAddLine()}>
-                  Add a part line
+              {canResolve ? (
+                <button
+                  type="button"
+                  className="btn ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => void onAddLine()}
+                >
+                  Add line
                 </button>
               ) : null}
             </p>
@@ -940,15 +946,25 @@ function TicketCard({
             {t.lines.map((line) => {
               const d = drafts[line.id] || { code: "", name: "", qty: "1" };
               const needsDetail = !line.part_code && !line.part_name;
+              const locked = line.status === "picked" || line.status === "cancelled";
               return (
                 <li key={line.id} className={`pp-line st-${line.status}`}>
-                  <div className="pp-line-num">#{line.line_no}</div>
+                  <div className="pp-line-top">
+                    <span className="pp-line-num">#{line.line_no}</span>
+                    <span className={`pp-status-pill st-${line.status}`}>
+                      {statusLabel(line.status)}
+                      {line.qty_received != null ? ` · ${line.qty_received}` : ""}
+                    </span>
+                  </div>
+                  {line.status === "cancelled" && line.notes ? (
+                    <p className="pp-cancel-reason muted">Why: {line.notes}</p>
+                  ) : null}
                   <div className="pp-line-fields">
                     <input
                       className="pp-code"
                       placeholder="Part #"
                       value={d.code}
-                      disabled={line.status === "picked" || line.status === "cancelled"}
+                      disabled={locked}
                       onChange={(e) =>
                         setDrafts((prev) => ({
                           ...prev,
@@ -958,9 +974,9 @@ function TicketCard({
                     />
                     <input
                       className="pp-name"
-                      placeholder={needsDetail ? "Part description" : "Description"}
+                      placeholder={needsDetail ? "Description" : "Description"}
                       value={d.name}
-                      disabled={line.status === "picked" || line.status === "cancelled"}
+                      disabled={locked}
                       onChange={(e) =>
                         setDrafts((prev) => ({
                           ...prev,
@@ -973,9 +989,10 @@ function TicketCard({
                       type="number"
                       min={0}
                       step="any"
-                      title="Qty requested"
+                      title="Qty"
+                      aria-label="Qty"
                       value={d.qty}
-                      disabled={line.status === "picked" || line.status === "cancelled"}
+                      disabled={locked}
                       onChange={(e) =>
                         setDrafts((prev) => ({
                           ...prev,
@@ -984,13 +1001,7 @@ function TicketCard({
                       }
                     />
                   </div>
-                  <div className="pp-line-status">
-                    <span className={`pp-status-pill st-${line.status}`}>
-                      {statusLabel(line.status)}
-                      {line.qty_received != null ? ` · got ${line.qty_received}` : ""}
-                    </span>
-                  </div>
-                  {line.status !== "picked" && line.status !== "cancelled" && (
+                  {!locked && (
                     <div className="pp-line-actions">
                       {canResolve && (
                         <>
@@ -1000,7 +1011,7 @@ function TicketCard({
                             disabled={busy}
                             onClick={() => void onResolve(line.id, "picked")}
                           >
-                            Picked up
+                            Picked
                           </button>
                           <button
                             type="button"
@@ -1015,7 +1026,7 @@ function TicketCard({
                               type="number"
                               min={0}
                               step="any"
-                              placeholder="Got #"
+                              placeholder="Got"
                               className="pp-partial-qty"
                               value={partialQty[line.id] || ""}
                               onChange={(e) =>
@@ -1040,23 +1051,15 @@ function TicketCard({
                           type="button"
                           className="btn secondary btn-sm pp-not-needed-btn"
                           disabled={busy}
-                          title="Order cancelled, wrong part, or job no longer needs this"
+                          title="Drop this part — you’ll type why"
                           onClick={() => {
                             const label =
                               (drafts[line.id]?.name || line.part_name || "").trim() ||
                               (drafts[line.id]?.code || line.part_code || "").trim() ||
                               `Line #${line.line_no}`;
-                            const reason = window.prompt(
-                              `Mark as not needed?\n\n${label}\n\nThis drops it off the pickup list.\nOptional reason:`,
-                              ""
-                            );
-                            if (reason === null) return;
-                            void onResolve(
-                              line.id,
-                              "cancelled",
-                              null,
-                              reason.trim() || "Not needed"
-                            );
+                            const reason = askNotNeededReason(label);
+                            if (!reason) return;
+                            void onResolve(line.id, "cancelled", null, reason);
                           }}
                         >
                           Not needed
@@ -1069,38 +1072,26 @@ function TicketCard({
             })}
           </ul>
 
-          <div className="pp-ticket-actions">
-            {canResolve && (
-              <>
-                <button
-                  type="button"
-                  className="btn secondary btn-sm"
-                  disabled={busy}
-                  onClick={() => void onSaveDetails(drafts)}
-                >
-                  Save part details
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost btn-sm"
-                  disabled={busy}
-                  onClick={() => void onAddLine()}
-                >
-                  + Part line
-                </button>
-              </>
-            )}
-            {canNotNeeded && openCount > 0 && (
+          {canResolve && (
+            <div className="pp-ticket-actions">
               <button
                 type="button"
-                className="btn ghost btn-sm pp-not-needed-btn"
+                className="btn secondary btn-sm"
                 disabled={busy}
-                onClick={onCancelOpen}
+                onClick={() => void onSaveDetails(drafts)}
               >
-                Not needed — all open parts
+                Save details
               </button>
-            )}
-          </div>
+              <button
+                type="button"
+                className="btn ghost btn-sm"
+                disabled={busy}
+                onClick={() => void onAddLine()}
+              >
+                + Line
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

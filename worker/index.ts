@@ -8557,6 +8557,14 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     );
   }
 
+  const notesIn = body.notes != null ? String(body.notes).trim() : "";
+  if (status === "cancelled" && notesIn.length < 3) {
+    return c.json(
+      { error: "Explain why this part is not needed (job cancelled, wrong part, etc.)" },
+      400
+    );
+  }
+
   try {
     const line = await c.env.DB.prepare(
       `SELECT l.*, t.vendor_name, t.purchase_order, t.logged_by_user_id
@@ -8606,7 +8614,7 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       .bind(
         status,
         qtyRecv,
-        body.notes != null ? String(body.notes).trim() || null : null,
+        notesIn || null,
         status,
         status,
         user.id,

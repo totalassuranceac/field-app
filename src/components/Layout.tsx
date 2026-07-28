@@ -287,12 +287,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     },
     {
       to: "/fuel",
-      label: isDriver ? "Log fuel" : "Fuel log",
-      show:
-        adminShell ||
-        can(user, "logFuel") ||
-        isMechanic ||
-        (isOffice && can(user, "viewReports")),
+      label: can(user, "logFuel") ? "Log fuel" : "Fuel log",
+      show: adminShell || can(user, "logFuel") || can(user, "viewReports"),
     },
     {
       to: "/inspections",

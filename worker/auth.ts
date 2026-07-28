@@ -137,9 +137,10 @@ export const ROLE_PERMS = {
   manageUsers: ["admin"] as Role[],
   manageEmployees: ["admin", "office"] as Role[],
   manageVehicles: ["admin", "office", "mechanic"] as Role[],
-  logFuel: ["admin", "office", "driver"] as Role[],
+  /** Any staff can log a fuel receipt photo (warehouse / shop included). */
+  logFuel: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
   editAnyFuel: ["admin", "office"] as Role[],
-  viewFuel: ["admin", "office", "driver", "mechanic", "viewer"] as Role[],
+  viewFuel: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"] as Role[],
   /** Company-card parts receipts (invoice / packing slip photos) */
   logPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
   viewPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"] as Role[],

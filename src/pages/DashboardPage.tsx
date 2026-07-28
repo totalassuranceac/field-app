@@ -704,16 +704,17 @@ export function DashboardPage() {
           hint: "Scan · custody · truck",
           primary: true,
         },
+        { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Receipt photo · any unit" },
         { to: "/assets", icon: "🧪", title: "Bottles & gear", hint: "Swap gas · ladders" },
         { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card photos" },
         { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
         { to: "/inventory", icon: "📊", title: "Stock levels", hint: "Stage · order" },
-
       ];
     }
     if (isMechanic) {
       return [
         { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs & schedule", primary: true },
+        { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Receipt photo · odometer" },
         { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card purchases" },
         { to: "/yard", icon: "📋", title: "Yard walk", hint: "Stickers · cams · GPS" },
         { to: "/vehicles", icon: "🚐", title: "Vehicles", hint: "Fleet registry" },
