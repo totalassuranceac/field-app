@@ -5534,29 +5534,197 @@ tr.row-low td {
 }
 
 @media print {
+  /* Screen UI off; only the work-order package prints */
+  .page-header,
+  .filters,
+  .success,
+  .error,
+  .inv-flash {
+    display: none !important;
+  }
+
   .shop-print-worklist {
     display: block !important;
+    color: #000 !important;
+    background: #fff !important;
   }
 
-  .shop-unit-card {
+  .shop-print-page {
+    break-after: page;
+    page-break-after: always;
+    padding: 0.15in 0.2in;
+    box-sizing: border-box;
+    min-height: 0;
+  }
+
+  .shop-print-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  /* One vehicle = one sheet */
+  .shop-print-unit-page {
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-bottom: 0.75rem;
-    border: 1px solid #333;
   }
 
-  .shop-unit-card[open] .shop-unit-issues,
-  .shop-unit-issues {
-    display: flex !important;
+  .shop-print-header h1 {
+    margin: 0 0 0.2rem;
+    font-size: 1.35rem;
+    color: #000;
   }
 
-  .shop-unit-summary {
-    cursor: default;
+  .shop-print-header p {
+    margin: 0.15rem 0;
+    font-size: 0.85rem;
+    color: #222;
   }
 
-  .shop-unit-issue {
-    border-color: #999;
-    background: transparent;
+  .shop-print-cover-note {
+    font-style: italic;
+    margin-bottom: 0.65rem !important;
+  }
+
+  .shop-print-index-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  .shop-print-index-table th,
+  .shop-print-index-table td {
+    border: 1px solid #444;
+    padding: 0.28rem 0.35rem;
+    vertical-align: top;
+    text-align: left;
+  }
+
+  .shop-print-index-table th {
+    background: #eee;
+    font-weight: 800;
+  }
+
+  .shop-print-index-table .col-unit {
+    width: 3.5rem;
+    white-space: nowrap;
+  }
+
+  .shop-print-index-table .col-n {
+    width: 1.75rem;
+    text-align: center;
+  }
+
+  .shop-print-index-table .col-flags {
+    width: 6.5rem;
+    font-size: 0.75rem;
+  }
+
+  .shop-print-index-problems {
+    margin: 0;
+    padding-left: 1.1rem;
+  }
+
+  .shop-print-index-problems li {
+    margin: 0.1rem 0;
+    line-height: 1.25;
+  }
+
+  .shop-print-index-st {
+    color: #444;
+    font-weight: 500;
+  }
+
+  .shop-print-unit-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    border-bottom: 2px solid #000;
+    padding-bottom: 0.35rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .shop-print-unit-header h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: #000;
+  }
+
+  .shop-print-unit-header p {
+    margin: 0.15rem 0 0;
+    font-size: 0.9rem;
+  }
+
+  .shop-print-unit-meta {
+    text-align: right;
+    font-size: 0.78rem;
+    color: #333;
+  }
+
+  .shop-print-unit-issues {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .shop-print-unit-issue {
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 0.35rem 0.45rem;
+    margin-bottom: 0.4rem;
+    break-inside: avoid;
+  }
+
+  .shop-print-issue-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.4rem;
+    margin-bottom: 0.15rem;
+  }
+
+  .shop-print-issue-num {
+    font-weight: 800;
+    min-width: 1.25rem;
+  }
+
+  .shop-print-issue-title {
+    font-size: 0.95rem;
+    flex: 1 1 12rem;
+  }
+
+  .shop-print-issue-badges {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #333;
+  }
+
+  .shop-print-issue-line {
+    font-size: 0.8rem;
+    line-height: 1.3;
+    margin: 0.1rem 0;
+  }
+
+  .shop-print-checkline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    margin-top: 0.35rem;
+    font-size: 0.78rem;
+    border-top: 1px dashed #999;
+    padding-top: 0.25rem;
+  }
+
+  .shop-print-notes-line {
+    flex: 1 1 8rem;
+  }
+
+  .shop-print-unit-foot {
+    margin-top: 0.65rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid #000;
+    font-size: 0.8rem;
   }
 }
 

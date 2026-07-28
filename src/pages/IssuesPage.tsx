@@ -166,6 +166,8 @@ export function IssuesPage() {
   const [smsMsg, setSmsMsg] = useState("");
   const [smsBusy, setSmsBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  /** Open + scheduled + in progress — always available for print work order */
+  const [workList, setWorkList] = useState<Issue[]>([]);
   /** Sync lock — React state alone can miss double-taps before re-render */
   const submitLock = useRef(false);
 
@@ -179,13 +181,18 @@ export function IssuesPage() {
         : filter === "all"
           ? ""
           : `?status=${filter}`;
-    const [iss, vehs] = await Promise.all([
+    const useSchedule = q === "?report=schedule";
+    const [iss, vehs, board] = await Promise.all([
       api<{ issues: Issue[]; needs_schedule?: number }>(`/issues${q}`),
       api<{ vehicles: Vehicle[] }>("/vehicles?filter=active"),
+      canShop && !useSchedule
+        ? api<{ issues: Issue[] }>("/issues?report=schedule").catch(() => ({ issues: [] as Issue[] }))
+        : Promise.resolve(null as { issues: Issue[] } | null),
     ]);
     setIssues(iss.issues);
     setVehicles(vehs.vehicles);
     if (canShop) {
+      setWorkList(useSchedule ? iss.issues : board?.issues || []);
       try {
         const c = await api<{ common: CommonRow[] }>("/issues/common?days=90");
         setCommon(c.common || []);
@@ -241,13 +248,26 @@ export function IssuesPage() {
   );
   const boardByVehicle = useMemo(() => groupIssuesByVehicle(onBoard), [onBoard]);
   const allByVehicle = useMemo(() => groupIssuesByVehicle(issues), [issues]);
-  const activeByVehicle = useMemo(
-    () =>
-      groupIssuesByVehicle(
-        issues.filter((i) => ["open", "scheduled", "in_progress"].includes(i.status))
-      ),
-    [issues]
-  );
+  /** Print: units in numerical order (cover + one page each) */
+  const printByVehicle = useMemo(() => {
+    const groups = groupIssuesByVehicle(
+      workList.filter((i) => ["open", "scheduled", "in_progress"].includes(i.status))
+    );
+    return groups.sort((a, b) =>
+      a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true })
+    );
+  }, [workList]);
+
+  const printPrintedOn = useMemo(() => {
+    const d = new Date();
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }, [workList]);
   async function sendShopText(e: FormEvent) {
     e.preventDefault();
     if (!smsMsg.trim() || !smsTo) return;
@@ -542,17 +562,159 @@ export function IssuesPage() {
           )}
           {canShop && (
             <button className="btn secondary" onClick={() => window.print()}>
-              Print work list
+              Print work order
             </button>
           )}
         </div>
       </div>
 
+      {/*
+        Print package (hidden on screen):
+        1) Cover — all units numerical, all issues listed
+        2) One page per vehicle — every problem for that unit
+      */}
+      {canShop && (
+        <div className="print-only shop-print-worklist" aria-hidden>
+          <section className="shop-print-page shop-print-cover">
+            <header className="shop-print-header">
+              <h1>Shop work order</h1>
+              <p>
+                Printed {printPrintedOn}
+                {printByVehicle.length
+                  ? ` · ${printByVehicle.length} unit${printByVehicle.length === 1 ? "" : "s"} · ${
+                      workList.filter((i) =>
+                        ["open", "scheduled", "in_progress"].includes(i.status)
+                      ).length
+                    } problem${
+                      workList.filter((i) =>
+                        ["open", "scheduled", "in_progress"].includes(i.status)
+                      ).length === 1
+                        ? ""
+                        : "s"
+                    }`
+                  : " · no open work"}
+              </p>
+              <p className="shop-print-cover-note">
+                Page 1 — index (units in numerical order). Following pages — one unit each with all
+                issues for that vehicle.
+              </p>
+            </header>
+            {printByVehicle.length === 0 ? (
+              <p>No open or scheduled repairs.</p>
+            ) : (
+              <table className="shop-print-index-table">
+                <thead>
+                  <tr>
+                    <th className="col-unit">Unit</th>
+                    <th className="col-n">#</th>
+                    <th>Problems</th>
+                    <th className="col-flags">Flags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {printByVehicle.map((g) => (
+                    <tr key={g.vehicle_id}>
+                      <td className="col-unit">
+                        <strong>{g.unit_number}</strong>
+                      </td>
+                      <td className="col-n">{g.issues.length}</td>
+                      <td>
+                        <ol className="shop-print-index-problems">
+                          {g.issues.map((i) => (
+                            <li key={i.id}>
+                              {issueHeadline(i)}
+                              <span className="shop-print-index-st">
+                                {" "}
+                                ({i.status.replace(/_/g, " ")})
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </td>
+                      <td className="col-flags">
+                        {g.hasEmergency ? "EMERGENCY" : ""}
+                        {g.needsSchedule > 0
+                          ? `${g.hasEmergency ? " · " : ""}${g.needsSchedule} need schedule`
+                          : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          {printByVehicle.map((g) => (
+            <section key={g.vehicle_id} className="shop-print-page shop-print-unit-page">
+              <header className="shop-print-unit-header">
+                <div>
+                  <h1>Unit {g.unit_number}</h1>
+                  <p>
+                    {g.issues.length} problem{g.issues.length === 1 ? "" : "s"}
+                    {g.hasEmergency ? " · EMERGENCY" : ""}
+                    {g.needsSchedule > 0 ? ` · ${g.needsSchedule} need schedule` : ""}
+                  </p>
+                </div>
+                <div className="shop-print-unit-meta">
+                  <div>Work order</div>
+                  <div>{printPrintedOn}</div>
+                </div>
+              </header>
+              <ol className="shop-print-unit-issues">
+                {g.issues.map((i, idx) => (
+                  <li key={i.id} className="shop-print-unit-issue">
+                    <div className="shop-print-issue-top">
+                      <span className="shop-print-issue-num">{idx + 1}.</span>
+                      <strong className="shop-print-issue-title">{issueHeadline(i)}</strong>
+                      <span className="shop-print-issue-badges">
+                        {i.is_emergency ? "EMERGENCY · " : ""}
+                        {i.status.replace(/_/g, " ")}
+                        {i.scheduled_date ? ` · ${i.scheduled_date}` : ""}
+                      </span>
+                    </div>
+                    {i.issue_category && i.issue_category !== "other" && (
+                      <div className="shop-print-issue-line">
+                        Type: {driverIssueLabel(i.issue_category)}
+                      </div>
+                    )}
+                    {i.description && (
+                      <div className="shop-print-issue-line">
+                        <strong>Tech said:</strong> {i.description}
+                      </div>
+                    )}
+                    {(i.mechanic_diagnosis || i.work_performed) && (
+                      <div className="shop-print-issue-line">
+                        <strong>Shop:</strong>{" "}
+                        {[i.mechanic_diagnosis, i.work_performed].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    <div className="shop-print-issue-line muted">
+                      Reported by {i.reporter_name} · {i.severity}
+                      {i.created_at
+                        ? ` · ${String(i.created_at).replace("T", " ").slice(0, 16)}`
+                        : ""}
+                    </div>
+                    <div className="shop-print-checkline">
+                      <span>□ Done</span>
+                      <span>□ Parts needed</span>
+                      <span className="shop-print-notes-line">Notes: _______________</span>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+              <footer className="shop-print-unit-foot">
+                Mechanic: ________________ · Complete all items above for this unit before release.
+              </footer>
+            </section>
+          ))}
+        </div>
+      )}
+
       {ok && <div className="success" style={{ marginBottom: "1rem" }}>{ok}</div>}
       {error && <div className="error" style={{ marginBottom: "1rem" }}>{error}</div>}
 
       {canShop && needsByVehicle.length > 0 && filter === "active" && (
-        <div className="card issue-needs-card" style={{ marginBottom: "1rem" }}>
+        <div className="card issue-needs-card no-print" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>
             Needs scheduling
             <span className="issue-needs-count">{needsSchedule.length}</span>
@@ -570,7 +732,7 @@ export function IssuesPage() {
       )}
 
       {canShop && oilDue.length > 0 && (
-        <div className="card" style={{ marginBottom: "1rem" }}>
+        <div className="card no-print" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>Oil changes due (by mileage)</h2>
           <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
             Auto-tracked from the last oil change + interval. When fuel odometer hits the due
@@ -644,23 +806,6 @@ export function IssuesPage() {
 
       {canShop && filter === "active" ? (
         <>
-          {/* Print work list: full unit groups with every open + booked problem */}
-          <div className="print-only shop-print-worklist">
-            <h1>Shop work list</h1>
-            <p className="muted">
-              Problems grouped by unit — fix everything on the van in one stop.
-            </p>
-            {activeByVehicle.length === 0 ? (
-              <p className="muted">No open or scheduled repairs.</p>
-            ) : (
-              <div className="shop-unit-list">
-                {activeByVehicle.map((g) =>
-                  renderVehicleGroup(g, { defaultOpen: true })
-                )}
-              </div>
-            )}
-          </div>
-
           {boardByVehicle.length > 0 && (
             <div className="card no-print" style={{ marginBottom: "1rem" }}>
               <h2 style={{ marginTop: 0 }}>Scheduled / in progress</h2>
