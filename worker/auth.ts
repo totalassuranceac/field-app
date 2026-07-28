@@ -137,6 +137,8 @@ export const ROLE_PERMS = {
   manageUsers: ["admin"] as Role[],
   manageEmployees: ["admin", "office"] as Role[],
   manageVehicles: ["admin", "office", "mechanic"] as Role[],
+  /** Registration stickers + insurance dates (office/admin only — not field/shop techs). */
+  manageVehicleCompliance: ["admin", "office"] as Role[],
   /** Any staff can log a fuel receipt photo (warehouse / shop included). */
   logFuel: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
   editAnyFuel: ["admin", "office"] as Role[],

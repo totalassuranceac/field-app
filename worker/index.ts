@@ -1513,6 +1513,43 @@ api.get("/vehicles/:id/assignment-log", requireRoles(ROLE_PERMS.manageVehicles),
 });
 
 // Vehicles
+/** Personal units (P101, P-12…) carry their own insurance; company fleet shares one policy. */
+function isPersonalVehicleUnit(unit: string | null | undefined): boolean {
+  const u = String(unit || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  return /^P\d/.test(u);
+}
+
+async function getFleetInsuranceExpires(db: D1Database): Promise<string | null> {
+  const v = (await getSetting(db, "fleet_insurance_expires", "")).trim();
+  return v || null;
+}
+
+/** Write fleet plan date and stamp every non-personal vehicle row (for yard filters / reports). */
+async function syncFleetInsuranceToCompanyVehicles(
+  db: D1Database,
+  expires: string | null
+): Promise<number> {
+  await setSetting(db, "fleet_insurance_expires", expires || "");
+  const rows = await db
+    .prepare(`SELECT id, unit_number FROM vehicles WHERE status != 'retired'`)
+    .all<{ id: number; unit_number: string }>();
+  let n = 0;
+  for (const v of rows.results || []) {
+    if (isPersonalVehicleUnit(v.unit_number)) continue;
+    await db
+      .prepare(
+        `UPDATE vehicles SET insurance_expires = ?, updated_at = datetime('now') WHERE id = ?`
+      )
+      .bind(expires, v.id)
+      .run();
+    n += 1;
+  }
+  return n;
+}
+
 api.get("/vehicles", async (c) => {
   const filter = c.req.query("filter");
   /**
@@ -1522,12 +1559,13 @@ api.get("/vehicles", async (c) => {
   const scope = (c.req.query("scope") || "").toLowerCase();
   const fleetScope = scope === "fleet" || scope === "all" || c.req.query("for") === "fuel";
   const soonDays = Number(await getSetting(c.env.DB, "expiring_soon_days", "30"));
+  const fleetInsurance = await getFleetInsuranceExpires(c.env.DB);
   let sql = "SELECT * FROM vehicles WHERE 1=1";
   const binds: unknown[] = [];
 
   if (filter === "active") sql += " AND status = 'active'";
   if (filter === "expired") {
-    // Texas: registration sticker + insurance (no state inspection sticker)
+    // Texas: registration sticker + insurance (company rows keep fleet date synced)
     sql += ` AND status != 'retired' AND (
       (registration_expires IS NOT NULL AND registration_expires < date('now')) OR
       (insurance_expires IS NOT NULL AND insurance_expires < date('now'))
@@ -1612,8 +1650,17 @@ api.get("/vehicles", async (c) => {
     const driverName = String(row.assigned_driver || "");
     const emp = matchEmployee(driverName);
     const id = Number(row.id);
+    const unit = String(row.unit_number || "");
+    const personal = isPersonalVehicleUnit(unit);
+    // Company units: show fleet plan date (synced on company rows; overlay if setting set)
+    const insuranceExpires = personal
+      ? (row.insurance_expires as string | null) || null
+      : fleetInsurance || (row.insurance_expires as string | null) || null;
     return {
       ...row,
+      insurance_expires: insuranceExpires,
+      is_personal: personal,
+      insurance_is_fleet: !personal,
       driver_employee_id: emp?.id ?? null,
       driver_name: emp?.name ?? (driverName || null),
       /** Usual unit for the logged-in tech (default pick on fuel form) */
@@ -1637,8 +1684,34 @@ api.get("/vehicles", async (c) => {
     vehicles,
     expiring_soon_days: soonDays,
     default_vehicle_ids: homeVids,
+    fleet_insurance_expires: fleetInsurance,
     scope: fleetScope ? "fleet" : "assigned",
   });
+});
+
+/** Office sets one insurance expiration for all company (non-P) units. */
+api.put("/vehicles/fleet-insurance", requireRoles(ROLE_PERMS.manageVehicleCompliance), async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{ insurance_expires?: string | null }>();
+  const raw = body.insurance_expires != null ? String(body.insurance_expires).trim() : "";
+  const expires = raw || null;
+  if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+    return c.json({ error: "Use a date YYYY-MM-DD" }, 400);
+  }
+  try {
+    const updated = await syncFleetInsuranceToCompanyVehicles(c.env.DB, expires);
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "settings",
+      null,
+      `Fleet insurance expires → ${expires || "cleared"} (${updated} company units)`
+    );
+    return c.json({ ok: true, fleet_insurance_expires: expires, units_updated: updated });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Could not save" }, 500);
+  }
 });
 
 api.get("/vehicles/:id", async (c) => {
@@ -1693,7 +1766,9 @@ api.post("/vehicles", requireRoles(ROLE_PERMS.manageVehicles), async (c) => {
         body.gps_tracker || null,
         body.registration_expires || null,
         body.inspection_expires || null,
-        body.insurance_expires || null,
+        isPersonalVehicleUnit(unit)
+          ? body.insurance_expires || null
+          : (await getFleetInsuranceExpires(c.env.DB)) || body.insurance_expires || null,
         body.modifications || null,
         body.notes || null,
         body.gps_status || "n/a"
@@ -1717,10 +1792,51 @@ api.post("/vehicles", requireRoles(ROLE_PERMS.manageVehicles), async (c) => {
 });
 
 api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) => {
+  const user = c.get("user");
   const id = Number(c.req.param("id"));
-  const before = await c.env.DB.prepare("SELECT * FROM vehicles WHERE id = ?").bind(id).first();
+  const before = await c.env.DB.prepare("SELECT * FROM vehicles WHERE id = ?")
+    .bind(id)
+    .first<Record<string, unknown>>();
   if (!before) return c.json({ error: "Not found" }, 404);
   const body = await c.req.json<Record<string, unknown>>();
+  const canCompliance = roleAtLeast(user.role, ROLE_PERMS.manageVehicleCompliance);
+
+  // Shop/techs: cam/GPS only. Office/admin: registration + insurance.
+  if (!canCompliance) {
+    for (const f of ["registration_expires", "insurance_expires", "insurance_card"] as const) {
+      if (body[f] !== undefined) {
+        return c.json(
+          {
+            error:
+              "Only office can set registration and insurance dates. Shop updates cam / GPS.",
+          },
+          403
+        );
+      }
+    }
+  }
+
+  const unitForIns = String(
+    body.unit_number !== undefined ? body.unit_number : before.unit_number || ""
+  );
+  const personal = isPersonalVehicleUnit(unitForIns);
+  let fleetUpdated = false;
+
+  // Company units share one insurance plan — changing it updates the fleet setting + all company rows
+  if (!personal && body.insurance_expires !== undefined) {
+    const raw =
+      body.insurance_expires === "" || body.insurance_expires == null
+        ? null
+        : String(body.insurance_expires).trim();
+    const expires = raw || null;
+    if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+      return c.json({ error: "Insurance date must be YYYY-MM-DD" }, 400);
+    }
+    await syncFleetInsuranceToCompanyVehicles(c.env.DB, expires);
+    fleetUpdated = true;
+    delete body.insurance_expires;
+  }
+
   const fields = [
     "unit_number",
     "plate",
@@ -1748,16 +1864,19 @@ api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) =>
   const values: unknown[] = [];
   for (const f of fields) {
     if (body[f] !== undefined) {
+      if (f === "insurance_expires" && !personal) continue;
       sets.push(`${f} = ?`);
       values.push(body[f] === "" ? null : body[f]);
     }
   }
-  if (!sets.length) return c.json({ error: "No fields" }, 400);
-  sets.push("updated_at = datetime('now')");
-  values.push(id);
-  await c.env.DB.prepare(`UPDATE vehicles SET ${sets.join(", ")} WHERE id = ?`)
-    .bind(...values)
-    .run();
+  if (!sets.length && !fleetUpdated) return c.json({ error: "No fields" }, 400);
+  if (sets.length) {
+    sets.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE vehicles SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...values)
+      .run();
+  }
   const after = await c.env.DB.prepare("SELECT * FROM vehicles WHERE id = ?").bind(id).first<{
     id: number;
     unit_number: string;

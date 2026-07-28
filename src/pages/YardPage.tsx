@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
-import type { Vehicle } from "./VehiclesPage";
+import { isPersonalVehicleUnit, type Vehicle } from "./VehiclesPage";
 
 type Filter = "all" | "expired" | "expiring" | "equipment";
 
@@ -137,19 +137,29 @@ export function YardPage() {
   async function save(e: FormEvent) {
     e.preventDefault();
     if (!selected || !can(user, "manageVehicles")) return;
+    const canCompliance = can(user, "manageVehicleCompliance");
+    const personal = isPersonalVehicleUnit(selected.unit_number);
+    const payload: Record<string, unknown> = {
+      dash_cam_status: form.dash_cam_status,
+      cam_type: form.cam_type || null,
+      gps_status: form.gps_status,
+      gps_tracker: form.gps_tracker || null,
+      notes: form.notes,
+    };
+    if (canCompliance) {
+      payload.registration_expires = form.registration_expires || null;
+      payload.insurance_card = form.insurance_card || null;
+      if (personal) {
+        payload.insurance_expires = form.insurance_expires || null;
+      } else if (form.insurance_expires) {
+        // Updating insurance on a company unit from yard = fleet-wide plan
+        payload.insurance_expires = form.insurance_expires;
+      }
+    }
     try {
       await api(`/vehicles/${selected.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          registration_expires: form.registration_expires || null,
-          insurance_expires: form.insurance_expires || null,
-          insurance_card: form.insurance_card || null,
-          dash_cam_status: form.dash_cam_status,
-          cam_type: form.cam_type || null,
-          gps_status: form.gps_status,
-          gps_tracker: form.gps_tracker || null,
-          notes: form.notes,
-        }),
+        body: JSON.stringify(payload),
       });
       setSelected(null);
       await load();
@@ -302,34 +312,70 @@ export function YardPage() {
             </p>
             {can(user, "manageVehicles") ? (
               <form className="form" onSubmit={save}>
-                <label>
-                  Registration sticker expires
-                  <input
-                    type="date"
-                    value={form.registration_expires}
-                    onChange={(e) => setForm({ ...form, registration_expires: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Insurance expires
-                  <input
-                    type="date"
-                    value={form.insurance_expires}
-                    onChange={(e) => setForm({ ...form, insurance_expires: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Insurance card on vehicle
-                  <select
-                    value={form.insurance_card}
-                    onChange={(e) => setForm({ ...form, insurance_card: e.target.value })}
-                  >
-                    <option value="">—</option>
-                    <option value="Yes">Yes</option>
-                    <option value="No">No</option>
-                    <option value="N/A">N/A</option>
-                  </select>
-                </label>
+                {can(user, "manageVehicleCompliance") ? (
+                  <>
+                    <label>
+                      Registration sticker expires
+                      <input
+                        type="date"
+                        value={form.registration_expires}
+                        onChange={(e) =>
+                          setForm({ ...form, registration_expires: e.target.value })
+                        }
+                      />
+                    </label>
+                    {isPersonalVehicleUnit(selected.unit_number) ? (
+                      <label>
+                        Insurance expires (personal policy)
+                        <input
+                          type="date"
+                          value={form.insurance_expires}
+                          onChange={(e) =>
+                            setForm({ ...form, insurance_expires: e.target.value })
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <label>
+                        Company fleet insurance expires
+                        <input
+                          type="date"
+                          value={form.insurance_expires}
+                          onChange={(e) =>
+                            setForm({ ...form, insurance_expires: e.target.value })
+                          }
+                        />
+                        <span className="muted" style={{ fontSize: "0.78rem" }}>
+                          Shared plan for all company vans (not personal P-units).
+                        </span>
+                      </label>
+                    )}
+                    <label>
+                      Insurance card on vehicle
+                      <select
+                        value={form.insurance_card}
+                        onChange={(e) => setForm({ ...form, insurance_card: e.target.value })}
+                      >
+                        <option value="">—</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                        <option value="N/A">N/A</option>
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <div className="muted" style={{ fontSize: "0.88rem", marginBottom: "0.5rem" }}>
+                    <p style={{ margin: "0 0 0.25rem" }}>
+                      Reg: <strong>{selected.registration_expires || "—"}</strong>
+                      {" · "}
+                      Ins: <strong>{selected.insurance_expires || "—"}</strong>
+                      {isPersonalVehicleUnit(selected.unit_number)
+                        ? " (personal)"
+                        : " (fleet plan)"}
+                    </p>
+                    <p style={{ margin: 0 }}>Office sets registration / insurance dates.</p>
+                  </div>
+                )}
                 <label>
                   Dash cam status
                   <select

@@ -26,6 +26,18 @@ export interface Vehicle {
   gps_status: string | null;
   modifications: string | null;
   notes: string | null;
+  /** P101-style personal unit (own insurance) */
+  is_personal?: boolean;
+  insurance_is_fleet?: boolean;
+}
+
+/** Personal units (P101, P-12…) — own insurance; all others share company fleet plan. */
+export function isPersonalVehicleUnit(unit: string | null | undefined): boolean {
+  const u = String(unit || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  return /^P\d/.test(u);
 }
 
 interface EmployeeOpt {
@@ -111,10 +123,15 @@ export function VehiclesPage() {
   const [assignHelperId, setAssignHelperId] = useState("");
   const [assignNote, setAssignNote] = useState("");
   const [assignBusy, setAssignBusy] = useState(false);
+  const [fleetInsurance, setFleetInsurance] = useState("");
+  const [fleetBusy, setFleetBusy] = useState(false);
 
   async function load() {
-    const data = await api<{ vehicles: Vehicle[] }>("/vehicles");
+    const data = await api<{ vehicles: Vehicle[]; fleet_insurance_expires?: string | null }>(
+      "/vehicles"
+    );
     setVehicles(data.vehicles);
+    setFleetInsurance(data.fleet_insurance_expires || "");
   }
 
   useEffect(() => {
@@ -215,13 +232,25 @@ export function VehiclesPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    const payload = {
+    const personal = isPersonalVehicleUnit(form.unit_number);
+    const payload: Record<string, unknown> = {
       ...form,
       year: form.year ? Number(form.year) : null,
-      registration_expires: form.registration_expires || null,
-      insurance_expires: form.insurance_expires || null,
       gps_status: form.gps_status || "n/a",
     };
+    if (canCompliance) {
+      payload.registration_expires = form.registration_expires || null;
+      // Personal: per-unit insurance. Company: use fleet endpoint, not per-van field.
+      if (personal) {
+        payload.insurance_expires = form.insurance_expires || null;
+      } else {
+        delete payload.insurance_expires;
+      }
+    } else {
+      delete payload.registration_expires;
+      delete payload.insurance_expires;
+      delete payload.insurance_card;
+    }
     try {
       if (edit) {
         await api(`/vehicles/${edit.id}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -236,6 +265,36 @@ export function VehiclesPage() {
   }
 
   const canEdit = can(user, "manageVehicles");
+  const canCompliance = can(user, "manageVehicleCompliance");
+  const formIsPersonal = isPersonalVehicleUnit(form.unit_number || edit?.unit_number || "");
+
+  async function saveFleetInsurance(e: FormEvent) {
+    e.preventDefault();
+    if (!canCompliance) return;
+    setFleetBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const r = await api<{ fleet_insurance_expires?: string | null; units_updated?: number }>(
+        "/vehicles/fleet-insurance",
+        {
+          method: "PUT",
+          body: JSON.stringify({ insurance_expires: fleetInsurance || null }),
+        }
+      );
+      setFleetInsurance(r.fleet_insurance_expires || "");
+      setOk(
+        `Company fleet insurance saved${
+          r.units_updated != null ? ` · ${r.units_updated} company units updated` : ""
+        }. Personal (P…) units keep their own dates.`
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save fleet insurance");
+    } finally {
+      setFleetBusy(false);
+    }
+  }
 
   return (
     <div className="vehicles-page">
@@ -244,7 +303,9 @@ export function VehiclesPage() {
           <h1>Vehicles</h1>
           <p>
             Fleet registry and equipment. Use <strong>Assign</strong> when a tech moves to another
-            unit so live map and their app follow the right truck.
+            unit so live map and their app follow the right truck. Registration stickers are
+            per-unit (office). Insurance: one company plan for all non-P units; personal units
+            (P101…) keep their own policy.
           </p>
         </div>
         {canEdit && (
@@ -255,6 +316,36 @@ export function VehiclesPage() {
       </div>
       {error && <div className="error">{error}</div>}
       {ok && <div className="success">{ok}</div>}
+
+      {canCompliance && (
+        <form className="card fleet-insurance-card no-print" onSubmit={saveFleetInsurance}>
+          <h3 style={{ margin: "0 0 0.35rem", fontSize: "1rem" }}>Company fleet insurance</h3>
+          <p className="muted" style={{ margin: "0 0 0.55rem", fontSize: "0.85rem" }}>
+            One expiration for every company van (not personal P-units). Office only.
+          </p>
+          <div className="form row" style={{ alignItems: "flex-end" }}>
+            <label style={{ flex: "1 1 12rem" }}>
+              Insurance expires
+              <input
+                type="date"
+                value={fleetInsurance}
+                onChange={(e) => setFleetInsurance(e.target.value)}
+              />
+            </label>
+            <button className="btn" type="submit" disabled={fleetBusy}>
+              {fleetBusy ? "Saving…" : "Save fleet insurance"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!canCompliance && fleetInsurance && (
+        <div className="card muted" style={{ marginBottom: "0.75rem", fontSize: "0.9rem" }}>
+          Company fleet insurance expires: <strong>{fleetInsurance}</strong>
+          {" · "}
+          Personal units (P…) list their own policy below.
+        </div>
+      )}
 
       {/* Desktop / wide: compact table */}
       <div className="card vehicles-wide">
@@ -316,6 +407,11 @@ export function VehiclesPage() {
                     <td>{v.registration_expires || "—"}</td>
                     <td>
                       {v.insurance_expires || "—"}
+                      {v.is_personal || isPersonalVehicleUnit(v.unit_number) ? (
+                        <div className="muted vehicles-sub">personal policy</div>
+                      ) : (
+                        <div className="muted vehicles-sub">fleet plan</div>
+                      )}
                       {v.insurance_card && (
                         <div className="muted vehicles-sub">card: {v.insurance_card}</div>
                       )}
@@ -538,27 +634,39 @@ export function VehiclesPage() {
                     <option value="retired">retired</option>
                   </select>
                 </label>
-                <label>
-                  Insurance card on vehicle?
-                  <select
-                    value={form.insurance_card}
-                    onChange={(e) => setForm({ ...form, insurance_card: e.target.value })}
-                  >
-                    <option value="">—</option>
-                    <option value="Yes">Yes</option>
-                    <option value="No">No</option>
-                    <option value="N/A">N/A</option>
-                  </select>
-                </label>
-                <label>
-                  Insurance expires
-                  <input
-                    type="date"
-                    value={form.insurance_expires}
-                    onChange={(e) => setForm({ ...form, insurance_expires: e.target.value })}
-                    required={false}
-                  />
-                </label>
+                {canCompliance && (
+                  <label>
+                    Insurance card on vehicle?
+                    <select
+                      value={form.insurance_card}
+                      onChange={(e) => setForm({ ...form, insurance_card: e.target.value })}
+                    >
+                      <option value="">—</option>
+                      <option value="Yes">Yes</option>
+                      <option value="No">No</option>
+                      <option value="N/A">N/A</option>
+                    </select>
+                  </label>
+                )}
+                {canCompliance && formIsPersonal && (
+                  <label>
+                    Insurance expires (personal policy)
+                    <input
+                      type="date"
+                      value={form.insurance_expires}
+                      onChange={(e) => setForm({ ...form, insurance_expires: e.target.value })}
+                    />
+                  </label>
+                )}
+                {canCompliance && !formIsPersonal && (
+                  <label>
+                    Insurance expires (company fleet)
+                    <input type="date" value={fleetInsurance || form.insurance_expires} disabled />
+                    <span className="muted" style={{ fontSize: "0.78rem" }}>
+                      Set once under Company fleet insurance above — not per van.
+                    </span>
+                  </label>
+                )}
                 <label>
                   Dash cam status
                   <select
@@ -621,14 +729,24 @@ export function VehiclesPage() {
                       : "Policy: OneStep GPS units should use the third-party installed cam (no monthly fee) and show on the live map."}
                   </p>
                 )}
-                <label>
-                  Registration sticker expires
-                  <input
-                    type="date"
-                    value={form.registration_expires}
-                    onChange={(e) => setForm({ ...form, registration_expires: e.target.value })}
-                  />
-                </label>
+                {canCompliance ? (
+                  <label>
+                    Registration sticker expires
+                    <input
+                      type="date"
+                      value={form.registration_expires}
+                      onChange={(e) => setForm({ ...form, registration_expires: e.target.value })}
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    Registration sticker expires
+                    <input type="date" value={form.registration_expires} disabled />
+                    <span className="muted" style={{ fontSize: "0.78rem" }}>
+                      Office sets registration dates.
+                    </span>
+                  </label>
+                )}
               </div>
               <label>
                 Modifications

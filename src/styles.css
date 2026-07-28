@@ -5380,6 +5380,13 @@ tr.row-low td {
   margin-left: 0.25rem;
 }
 
+.fleet-insurance-card {
+  margin-bottom: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid color-mix(in srgb, #3b82f6 35%, var(--line));
+  background: color-mix(in srgb, #3b82f6 6%, var(--surface));
+}
+
 .asset-equip-layout {
   display: grid;
   grid-template-columns: 1fr;
