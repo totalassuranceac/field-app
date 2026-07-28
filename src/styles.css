@@ -10365,9 +10365,26 @@ svg {
 }
 
 .pp-not-needed-btn {
-  border-color: color-mix(in srgb, #f87171 45%, var(--line)) !important;
+  border-color: color-mix(in srgb, #f87171 55%, var(--line)) !important;
   color: #fecaca !important;
-  font-weight: 750;
+  font-weight: 800;
+  background: color-mix(in srgb, #ef4444 12%, var(--surface)) !important;
+}
+
+.pp-not-needed-hint {
+  margin: 0 0 0.55rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  background: color-mix(in srgb, #ef4444 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, #f87171 35%, var(--line));
+}
+
+.vendor-run-sheet-drop {
+  margin-top: 0.35rem;
+  align-self: flex-start;
+  min-height: 2.25rem;
 }
 
 .pp-partial {

@@ -160,6 +160,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       .map((g) => {
         const lines: Array<{
           key: string;
+          lineId: number | null;
+          ticketId: number;
           qty: number;
           code: string;
           name: string;
@@ -177,6 +179,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             const lineNote = (l.notes || "").trim();
             lines.push({
               key: `${t.id}-${l.id}`,
+              lineId: l.id,
+              ticketId: t.id,
               qty: Number(l.qty_requested) || 1,
               code: code || "—",
               name: name || (code ? code : "Part # not filled in yet"),
@@ -191,6 +195,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             const n = t.expected_parts || t.qty_unknown ? "?" : 1;
             lines.push({
               key: `t-${t.id}`,
+              lineId: null,
+              ticketId: t.id,
               qty: typeof n === "number" ? n : 1,
               code: "—",
               name: t.qty_unknown
@@ -414,8 +420,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           <div>
             <h2 style={{ margin: 0 }}>Part pickup</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
-              Log vendor + how many parts. Fill part numbers on each line. At the counter, mark
-              picked, not ready, or partial.
+              Log vendor + how many parts. Fill part numbers on each line. At the counter: Picked /
+              Not ready / Partial. Job cancelled or wrong part? Tap{" "}
+              <strong>Not needed</strong> on that line (also on the Stops needed sheet).
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -595,6 +602,28 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                   .filter(Boolean)
                                   .join(" · ")}
                               </span>
+                            )}
+                            {canNotNeeded && l.lineId != null && (
+                              <button
+                                type="button"
+                                className="btn secondary btn-sm pp-not-needed-btn vendor-run-sheet-drop"
+                                disabled={busy}
+                                onClick={() => {
+                                  const reason = window.prompt(
+                                    `Mark as not needed?\n\n${l.qty}× ${l.name || "Part"}\n\nDrops it off the pickup list.\nOptional reason:`,
+                                    ""
+                                  );
+                                  if (reason === null) return;
+                                  void resolveLine(
+                                    l.lineId!,
+                                    "cancelled",
+                                    null,
+                                    reason.trim() || "Not needed"
+                                  );
+                                }}
+                              >
+                                Not needed
+                              </button>
                             )}
                           </span>
                         </li>
@@ -931,6 +960,12 @@ function TicketCard({
 
       {expanded && (
         <div className="pp-ticket-body">
+          {canNotNeeded && openCount > 0 && (
+            <p className="pp-not-needed-hint">
+              Part no longer needed? Use the red-tinted <strong>Not needed</strong> button on that
+              line (or all open parts below).
+            </p>
+          )}
           {t.notes ? <p className="muted pp-ticket-notes">{t.notes}</p> : null}
 
           {!t.lines.length && (
