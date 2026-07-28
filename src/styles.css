@@ -5529,6 +5529,53 @@ tr.row-low td {
   margin-top: 0.15rem;
 }
 
+.shop-concerns-fieldset {
+  margin: 0 0 0.65rem;
+  padding: 0.55rem 0.65rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.shop-concerns-fieldset legend {
+  font-weight: 800;
+  font-size: 0.9rem;
+  padding: 0 0.25rem;
+}
+
+.shop-concerns-hint {
+  margin: 0 0 0.45rem;
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+.shop-concerns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr));
+  gap: 0.25rem 0.5rem;
+  max-height: 12rem;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 0.15rem;
+}
+
+.shop-concern-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  line-height: 1.25;
+  margin: 0 !important;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.shop-concern-check input {
+  margin-top: 0.15rem;
+  flex-shrink: 0;
+}
+
 .shop-print-worklist {
   display: none;
 }

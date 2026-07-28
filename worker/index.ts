@@ -3120,7 +3120,12 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   }
   const after = await c.env.DB.prepare("SELECT * FROM vehicle_issues WHERE id = ?").bind(id).first();
 
-  if (recordOil || body.mechanic_diagnosis === "Oil change") {
+  const diagnosisText = String(body.mechanic_diagnosis || before.mechanic_diagnosis || "");
+  if (
+    recordOil ||
+    diagnosisText === "Oil change" ||
+    diagnosisText.split(/\s*[·|]\s*/).includes("Oil change")
+  ) {
     const odo =
       body.oil_odometer != null && body.oil_odometer !== ""
         ? Number(body.oil_odometer)

@@ -27,25 +27,98 @@ export function driverIssueLabel(code: string | null | undefined): string {
   return DRIVER_ISSUE_OPTIONS.find((o) => o.value === code)?.label || code;
 }
 
-/** Mechanic diagnosis buckets (more specific). */
-export const MECHANIC_DIAGNOSIS = [
-  "Diagnose / road test",
-  "Flat repair / plug",
+/**
+ * Shop multi-select: vehicle issues / tech concerns (check all that apply).
+ * Stored on the ticket as a joined list for the work record.
+ */
+export const SHOP_CONCERN_OPTIONS = [
+  "Customer / tech concern (see notes)",
+  "Road test / verify complaint",
+  "Flat tire / plug",
   "Tire replacement",
   "Battery test / replace",
   "Starter / alternator",
+  "Won’t start / no crank",
+  "Overheating",
   "Oil change",
-  "Oil leak repair",
-  "Coolant system / radiator",
+  "Oil leak",
+  "Coolant leak / radiator",
   "Brake pads / rotors",
-  "Brake hydraulic",
-  "Transmission service / repair",
-  "A/C recharge / repair",
-  "Electrical diagnostics",
+  "Brake hydraulic / soft pedal",
+  "Transmission / shifting",
+  "Steering / alignment",
+  "Suspension",
+  "A/C not cooling",
+  "Heat not working",
+  "Electrical / wiring",
   "Sensor / computer",
   "Belts / hoses",
-  "Suspension / steering",
-  "Lights / wiring",
-  "Body / glass",
-  "Other (see work performed)",
+  "Lights / signals",
+  "Glass / mirror",
+  "Body damage",
+  "Dash cam",
+  "GPS tracker",
+  "Door / latch / window",
+  "Other (describe in problem found)",
 ] as const;
+
+/** @deprecated use SHOP_CONCERN_OPTIONS — kept for older imports */
+export const MECHANIC_DIAGNOSIS = SHOP_CONCERN_OPTIONS;
+
+const CONCERN_SEP = " · ";
+
+export function parseShopConcerns(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  // Prefer separator; fall back to single legacy value
+  if (raw.includes(CONCERN_SEP)) {
+    return raw
+      .split(CONCERN_SEP)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  if (raw.includes("|")) {
+    return raw
+      .split("|")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [raw.trim()];
+}
+
+export function joinShopConcerns(tags: string[]): string {
+  return tags
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .join(CONCERN_SEP);
+}
+
+/** Pack diagnostics + work into work_performed for storage without a new column. */
+export function packWorkPerformed(diagnostics: string, work: string): string | null {
+  const d = diagnostics.trim();
+  const w = work.trim();
+  if (!d && !w) return null;
+  if (d && w) return `Diagnostics / troubleshooting:\n${d}\n\nWork performed:\n${w}`;
+  if (d) return `Diagnostics / troubleshooting:\n${d}`;
+  return w;
+}
+
+export function unpackWorkPerformed(raw: string | null | undefined): {
+  diagnostics: string;
+  work: string;
+} {
+  const s = (raw || "").trim();
+  if (!s) return { diagnostics: "", work: "" };
+  const diagMark = /Diagnostics\s*\/\s*troubleshooting:\s*\n?/i;
+  const workMark = /\n\nWork performed:\s*\n?/i;
+  if (diagMark.test(s) && workMark.test(s)) {
+    const parts = s.split(workMark);
+    const diagPart = parts[0].replace(diagMark, "").trim();
+    const workPart = (parts[1] || "").trim();
+    return { diagnostics: diagPart, work: workPart };
+  }
+  if (diagMark.test(s) && !workMark.test(s)) {
+    return { diagnostics: s.replace(diagMark, "").trim(), work: "" };
+  }
+  // Legacy plain "work performed" text
+  return { diagnostics: "", work: s };
+}

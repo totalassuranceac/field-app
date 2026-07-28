@@ -3,7 +3,15 @@ import { useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
-import { DRIVER_ISSUE_OPTIONS, MECHANIC_DIAGNOSIS, driverIssueLabel } from "../issueCatalog";
+import {
+  DRIVER_ISSUE_OPTIONS,
+  SHOP_CONCERN_OPTIONS,
+  driverIssueLabel,
+  joinShopConcerns,
+  packWorkPerformed,
+  parseShopConcerns,
+  unpackWorkPerformed,
+} from "../issueCatalog";
 import {
   buildIssuePush,
   publishNtfyFromClient,
@@ -139,11 +147,13 @@ export function IssuesPage() {
   const [mStatus, setMStatus] = useState("scheduled");
   const [mDate, setMDate] = useState("");
   const [mNotes, setMNotes] = useState("");
-  const [mDiagnosis, setMDiagnosis] = useState("");
+  /** Multi-select vehicle / tech concerns */
+  const [mConcerns, setMConcerns] = useState<string[]>([]);
+  const [mProblemFound, setMProblemFound] = useState("");
+  const [mDiagnostics, setMDiagnostics] = useState("");
   const [mWork, setMWork] = useState("");
   const [mParts, setMParts] = useState("");
   const [mLabor, setMLabor] = useState("");
-  const [mCompletion, setMCompletion] = useState("");
   const [mSeverity, setMSeverity] = useState("medium");
   const [recordOil, setRecordOil] = useState(false);
   const [oilOdo, setOilOdo] = useState("");
