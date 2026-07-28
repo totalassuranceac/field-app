@@ -183,11 +183,81 @@ function normName(s: string): string {
 }
 
 /**
- * Vehicles a driver may see:
+ * Vehicles a driver is "home" on (their usual unit) — not partner vans.
+ * Used as the default pick for fuel / forms. Empty if none linked.
+ */
+export async function getDriverHomeVehicleIds(
+  db: D1Database,
+  user: PublicUser
+): Promise<number[]> {
+  if (user.role !== "driver") return [];
+
+  const myNames: string[] = [];
+  if (user.display_name?.trim()) myNames.push(normName(user.display_name));
+  if (user.username?.trim()) myNames.push(normName(user.username));
+
+  const myEmpIds = new Set<number>();
+  if (user.employee_id) {
+    myEmpIds.add(user.employee_id);
+    try {
+      const emp = await db
+        .prepare(`SELECT id, name FROM employees WHERE id = ? AND active = 1`)
+        .bind(user.employee_id)
+        .first<{ id: number; name: string }>();
+      if (emp?.name) myNames.push(normName(emp.name));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const idSet = new Set<number>();
+
+  // My explicit driver or helper seat on a unit
+  if (myEmpIds.size) {
+    try {
+      const ph = [...myEmpIds].map(() => "?").join(",");
+      const byEmp = await db
+        .prepare(
+          `SELECT id FROM vehicles WHERE status != 'retired' AND (
+             assigned_employee_id IN (${ph}) OR helper_employee_id IN (${ph})
+           )`
+        )
+        .bind(...myEmpIds, ...myEmpIds)
+        .all<{ id: number }>();
+      for (const r of byEmp.results || []) idSet.add(r.id);
+    } catch {
+      /* columns may be missing pre-036 */
+    }
+  }
+
+  // Legacy assigned_driver text match to *me only* (not rides-with partner)
+  if (myNames.length) {
+    const rows = await db
+      .prepare(
+        `SELECT id, assigned_driver FROM vehicles WHERE status != 'retired' AND assigned_driver IS NOT NULL`
+      )
+      .all<{ id: number; assigned_driver: string }>();
+
+    for (const v of rows.results || []) {
+      const ad = normName(v.assigned_driver || "");
+      if (!ad) continue;
+      const hit = myNames.some((n) => n && (ad === n || ad.includes(n) || n.includes(ad)));
+      if (hit) idSet.add(v.id);
+    }
+  }
+
+  return [...idSet];
+}
+
+/**
+ * Vehicles a driver may see on restricted screens (map unit, my gear, etc.):
  * - assigned_employee_id / helper_employee_id match
  * - rides-with partner is assigned to the unit
  * - name match on assigned_driver (legacy)
  * Returns null for non-drivers (no restriction).
+ *
+ * Fuel logging uses scope=fleet instead so helpers can pick another van
+ * when the usual driver is off.
  */
 export async function getDriverVehicleIds(
   db: D1Database,

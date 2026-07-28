@@ -6,6 +6,7 @@ import {
   createSession,
   destroySession,
   ensureBootstrapAdmin,
+  getDriverHomeVehicleIds,
   getDriverVehicleIds,
   getSessionToken,
   getUserFromSession,
@@ -1514,6 +1515,12 @@ api.get("/vehicles/:id/assignment-log", requireRoles(ROLE_PERMS.manageVehicles),
 // Vehicles
 api.get("/vehicles", async (c) => {
   const filter = c.req.query("filter");
+  /**
+   * scope=fleet — full active fleet for fuel / ride-along (helpers pick another van).
+   * Default: drivers only see home + usual-partner units.
+   */
+  const scope = (c.req.query("scope") || "").toLowerCase();
+  const fleetScope = scope === "fleet" || scope === "all" || c.req.query("for") === "fuel";
   const soonDays = Number(await getSetting(c.env.DB, "expiring_soon_days", "30"));
   let sql = "SELECT * FROM vehicles WHERE 1=1";
   const binds: unknown[] = [];
@@ -1547,12 +1554,16 @@ api.get("/vehicles", async (c) => {
       OR gps_status IN ('not_working','missing')
     )`;
   }
-  // Drivers only see their assigned unit(s)
-  const driverVids = await getDriverVehicleIds(c.env.DB, c.get("user"));
-  if (driverVids !== null) {
-    const sc = sqlInIds("id", driverVids);
-    sql += sc.clause;
-    binds.push(...sc.binds);
+  // Drivers: restricted list unless fuel/fleet scope (need other vans when covering)
+  const user = c.get("user");
+  const homeVids = user.role === "driver" ? await getDriverHomeVehicleIds(c.env.DB, user) : [];
+  if (!fleetScope) {
+    const driverVids = await getDriverVehicleIds(c.env.DB, user);
+    if (driverVids !== null) {
+      const sc = sqlInIds("id", driverVids);
+      sql += sc.clause;
+      binds.push(...sc.binds);
+    }
   }
 
   sql += " ORDER BY unit_number";
@@ -1595,18 +1606,39 @@ api.get("/vehicles", async (c) => {
     return hit || null;
   }
 
+  const homeSet = new Set(homeVids);
   const vehicles = (rows.results || []).map((v) => {
     const row = v as Record<string, unknown>;
     const driverName = String(row.assigned_driver || "");
     const emp = matchEmployee(driverName);
+    const id = Number(row.id);
     return {
       ...row,
       driver_employee_id: emp?.id ?? null,
       driver_name: emp?.name ?? (driverName || null),
+      /** Usual unit for the logged-in tech (default pick on fuel form) */
+      is_my_default: homeSet.has(id),
     };
   });
 
-  return c.json({ vehicles, expiring_soon_days: soonDays });
+  // Prefer usual unit(s) at the top when showing full fleet
+  if (fleetScope && homeSet.size) {
+    vehicles.sort((a, b) => {
+      const ad = a.is_my_default ? 0 : 1;
+      const bd = b.is_my_default ? 0 : 1;
+      if (ad !== bd) return ad - bd;
+      return String(a.unit_number || "").localeCompare(String(b.unit_number || ""), undefined, {
+        numeric: true,
+      });
+    });
+  }
+
+  return c.json({
+    vehicles,
+    expiring_soon_days: soonDays,
+    default_vehicle_ids: homeVids,
+    scope: fleetScope ? "fleet" : "assigned",
+  });
 });
 
 api.get("/vehicles/:id", async (c) => {
@@ -1790,12 +1822,19 @@ api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
     sql += " AND f.employee_id = ?";
     binds.push(Number(employeeId));
   }
-  const driverVids = await getDriverVehicleIds(c.env.DB, c.get("user"));
-  if (driverVids !== null) {
-    const sc = sqlInIds("f.vehicle_id", driverVids);
-    sql += sc.clause;
-    binds.push(...sc.binds);
+  // Drivers see fuel they logged / under their employee — any van (ride-alongs)
+  const fuelUser = c.get("user");
+  let driverMineClause = "";
+  if (fuelUser.role === "driver") {
+    if (fuelUser.employee_id) {
+      driverMineClause = " AND (f.employee_id = ? OR f.entered_by_user_id = ?)";
+      binds.push(fuelUser.employee_id, fuelUser.id);
+    } else {
+      driverMineClause = " AND f.entered_by_user_id = ?";
+      binds.push(fuelUser.id);
+    }
   }
+  sql += driverMineClause;
   sql += " ORDER BY f.fuel_date DESC, f.id DESC LIMIT 200";
   const rows = await c.env.DB.prepare(sql).bind(...binds).all();
 
@@ -1804,7 +1843,10 @@ api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
   if (to) totalBinds.push(to);
   if (vehicleId) totalBinds.push(Number(vehicleId));
   if (employeeId) totalBinds.push(Number(employeeId));
-  if (driverVids !== null) totalBinds.push(...driverVids);
+  if (fuelUser.role === "driver") {
+    if (fuelUser.employee_id) totalBinds.push(fuelUser.employee_id, fuelUser.id);
+    else totalBinds.push(fuelUser.id);
+  }
 
   const totals = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(gallons),0) as gallons, COALESCE(SUM(total_cost),0) as total_cost, COUNT(*) as count
@@ -1813,7 +1855,7 @@ api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
      ${to ? " AND f.fuel_date <= ?" : ""}
      ${vehicleId ? " AND f.vehicle_id = ?" : ""}
      ${employeeId ? " AND f.employee_id = ?" : ""}
-     ${driverVids !== null ? sqlInIds("f.vehicle_id", driverVids).clause : ""}`
+     ${driverMineClause}`
   )
     .bind(...totalBinds)
     .first();
@@ -1892,10 +1934,19 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
   }
   if (!employeeId) return c.json({ error: "employee_id required" }, 400);
 
-  const driverVids = await getDriverVehicleIds(c.env.DB, user);
-  if (!assertDriverVehicleAccess(driverVids, body.vehicle_id)) {
-    return c.json({ error: "You can only log fuel for your assigned vehicle" }, 403);
+  // Any active fleet unit is allowed — helpers ride other vans when primary is off
+  const vehicle = await c.env.DB.prepare(
+    `SELECT id, unit_number, status FROM vehicles WHERE id = ?`
+  )
+    .bind(body.vehicle_id)
+    .first<{ id: number; unit_number: string; status: string }>();
+  if (!vehicle) return c.json({ error: "Vehicle not found" }, 404);
+  if (vehicle.status === "retired") {
+    return c.json({ error: "That unit is retired — pick an active van" }, 400);
   }
+  const homeVids = user.role === "driver" ? await getDriverHomeVehicleIds(c.env.DB, user) : [];
+  const offUsualUnit =
+    user.role === "driver" && homeVids.length > 0 && !homeVids.includes(body.vehicle_id);
 
   const cardLast4 = body.card_last4?.replace(/\D/g, "").slice(-4) || null;
 
@@ -1914,6 +1965,10 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
   let stationNotes = body.station_notes?.trim() || "";
   if (cardMismatch) {
     const flag = `CARD MISMATCH: receipt/form ••${cardLast4} vs driver’s usual ••${expectedCard}`;
+    stationNotes = stationNotes ? `${stationNotes} | ${flag}` : flag;
+  }
+  if (offUsualUnit) {
+    const flag = `RIDE-ALONG / OTHER VAN: Unit ${vehicle.unit_number} (not tech’s usual unit)`;
     stationNotes = stationNotes ? `${stationNotes} | ${flag}` : flag;
   }
 

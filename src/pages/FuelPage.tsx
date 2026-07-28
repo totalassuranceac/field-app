@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
@@ -38,6 +38,8 @@ interface Vehicle {
   assigned_driver?: string | null;
   driver_employee_id?: number | null;
   driver_name?: string | null;
+  /** Server: this is the logged-in tech’s usual unit */
+  is_my_default?: boolean;
 }
 interface FuelEntry {
   id: number;
@@ -235,18 +237,44 @@ export function FuelPage() {
   }
 
   async function load() {
+    // scope=fleet: every active van so helpers can pick another unit when covering
     const [emps, vehs, fuel] = await Promise.all([
       api<{ employees: Employee[] }>("/employees"),
-      api<{ vehicles: Vehicle[] }>("/vehicles?filter=active"),
+      api<{
+        vehicles: Vehicle[];
+        default_vehicle_ids?: number[];
+      }>("/vehicles?filter=active&scope=fleet"),
       api<{ entries: FuelEntry[]; totals: { gallons: number; total_cost: number; count: number } }>(
         "/fuel"
       ),
     ]);
     setEmployees(emps.employees);
-    setVehicles(vehs.vehicles);
+    const list = vehs.vehicles || [];
+    setVehicles(list);
     setEntries(fuel.entries);
     setTotals(fuel.totals);
     if (user?.employee_id) setEmployeeId(String(user.employee_id));
+
+    // Default to usual unit (first is_my_default / default_vehicle_ids)
+    const defaults = new Set(
+      (vehs.default_vehicle_ids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    );
+    const preferred =
+      list.find((v) => v.is_my_default) ||
+      list.find((v) => defaults.has(v.id)) ||
+      null;
+    if (preferred) {
+      // Defer crew note until vehicles state is set — apply directly
+      setVehicleId(String(preferred.id));
+      const driverLabel = preferred.driver_name || preferred.assigned_driver;
+      if (preferred.is_my_default || defaults.has(preferred.id)) {
+        setCrewNote(
+          driverLabel
+            ? `Your usual unit ${preferred.unit_number}${driverLabel ? ` (${driverLabel})` : ""}. Change below if you rode with someone else today.`
+            : `Your usual unit ${preferred.unit_number}. Change below if you rode another van today.`
+        );
+      }
+    }
   }
 
   useEffect(() => {
@@ -254,6 +282,15 @@ export function FuelPage() {
     // Warm OCR while tech picks unit / waits — first photo is much faster
     void warmOcrEngine();
   }, []);
+
+  const usualVehicles = useMemo(
+    () => vehicles.filter((v) => v.is_my_default),
+    [vehicles]
+  );
+  const otherVehicles = useMemo(
+    () => vehicles.filter((v) => !v.is_my_default),
+    [vehicles]
+  );
 
   function applyVehicleCrew(id: string) {
     setVehicleId(id);
@@ -277,11 +314,19 @@ export function FuelPage() {
       }
     }
 
-    const driverLabel = v.driver_name || v.assigned_driver || "unknown driver";
-    if (v.assigned_driver || v.driver_name) {
-      setCrewNote(`Unit ${v.unit_number}: driver ${driverLabel}`);
+    const driverLabel = v.driver_name || v.assigned_driver || null;
+    if (v.is_my_default) {
+      setCrewNote(
+        driverLabel
+          ? `Usual unit ${v.unit_number} — ${driverLabel}`
+          : `Usual unit ${v.unit_number}`
+      );
+    } else if (driverLabel) {
+      setCrewNote(
+        `Other van today: Unit ${v.unit_number} (usually ${driverLabel}). OK if you rode with them.`
+      );
     } else {
-      setCrewNote(`Unit ${v.unit_number}: no driver on file — pick driver if needed.`);
+      setCrewNote(`Other van today: Unit ${v.unit_number}.`);
     }
   }
 
@@ -690,7 +735,7 @@ export function FuelPage() {
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2>New fuel stop</h2>
           <form className="form" onSubmit={onSubmit}>
-            {/* STEP 1 — unit */}
+            {/* STEP 1 — unit (usual first; full fleet so helpers can cover other vans) */}
             <label>
               1. Vehicle unit
               <select
@@ -699,17 +744,44 @@ export function FuelPage() {
                 required
               >
                 <option value="">Select unit…</option>
-                {vehicles.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.unit_number}
-                    {v.assigned_driver || v.driver_name
-                      ? ` — ${v.driver_name || v.assigned_driver}`
-                      : ""}
-                  </option>
-                ))}
+                {usualVehicles.length > 0 && (
+                  <optgroup label="Your usual unit">
+                    {usualVehicles.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.unit_number}
+                        {v.driver_name || v.assigned_driver
+                          ? ` — ${v.driver_name || v.assigned_driver}`
+                          : ""}
+                        {" (default)"}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup
+                  label={
+                    usualVehicles.length
+                      ? "Other vans (rode with someone else)"
+                      : "All active units"
+                  }
+                >
+                  {(usualVehicles.length ? otherVehicles : vehicles).map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.unit_number}
+                      {v.driver_name || v.assigned_driver
+                        ? ` — ${v.driver_name || v.assigned_driver}`
+                        : ""}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </label>
             {crewNote && <div className="info-banner">{crewNote}</div>}
+            {isDriver && (
+              <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
+                Default is your usual van. If you rode with another tech today, pick their unit
+                under <strong>Other vans</strong>.
+              </p>
+            )}
 
             {/* Driver hidden for typical tech flow when auto-filled; still available for office */}
             {(!isDriver || !user?.employee_id) && (

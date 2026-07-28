@@ -177,7 +177,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     path: "/fuel",
     steps: [
       "Open Log fuel (Fleet menu).",
-      "Pick your unit / truck if it is not already selected.",
+      "Your usual unit is selected by default. If you rode with someone else today, open Other vans and pick that unit.",
       "Take a photo of the full receipt (or pick one from gallery).",
       "Confirm gallons, total cost, last 4 of card, and odometer — fix anything the scan missed.",
       "Add a short note if the odometer looks wrong or the pump failed (optional).",
@@ -185,6 +185,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
     tips: [
       "Fill the frame · flat lighting · no glare on shiny paper · hold still.",
+      "Helpers can always log fuel on any active van — not only the tech they usually ride with.",
       "If you are offline, the log queues and sends when you have signal again.",
     ],
   },
