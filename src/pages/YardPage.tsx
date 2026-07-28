@@ -67,10 +67,6 @@ export function YardPage() {
     insurance_card: "",
     notes: "",
   });
-  /** When cam/GPS is bad, offer to push a shop ticket */
-  const [shopCam, setShopCam] = useState(false);
-  const [shopGps, setShopGps] = useState(false);
-
   async function load(f: Filter = filter) {
     const q = f === "all" ? "" : `?filter=${f}`;
     const data = await api<{ vehicles: Vehicle[]; expiring_soon_days: number }>(`/vehicles${q}`);
@@ -295,12 +291,17 @@ export function YardPage() {
       <div className="page-header yard-page-header">
         <div>
           <h1>Yard walk</h1>
-          <p>Reg · insurance · cam · GPS</p>
+          <p>
+            Reg · insurance · cam · GPS — if cam/GPS isn&apos;t working, send it to the{" "}
+            <Link to="/issues">shop board</Link> from the unit form.
+          </p>
         </div>
         <button className="btn secondary btn-sm no-print" onClick={() => window.print()}>
           Print
         </button>
       </div>
+      {ok && <div className="success inv-flash no-print">{ok}</div>}
+      {error && <div className="error inv-flash no-print">{error}</div>}
 
       <div className="filters yard-filters no-print">
         <label className="yard-search">
@@ -502,7 +503,15 @@ export function YardPage() {
                   Dash cam status
                   <select
                     value={form.dash_cam_status === "unknown" ? "n/a" : form.dash_cam_status}
-                    onChange={(e) => setForm({ ...form, dash_cam_status: e.target.value })}
+                    onChange={(e) => {
+                      const dash_cam_status = e.target.value;
+                      setForm({ ...form, dash_cam_status });
+                      if (dash_cam_status === "not_working" || dash_cam_status === "missing") {
+                        setShopCam(true);
+                      } else {
+                        setShopCam(false);
+                      }
+                    }}
                   >
                     <option value="working">Working</option>
                     <option value="not_working">Not working</option>
@@ -521,11 +530,35 @@ export function YardPage() {
                     <option value="Third-party">Third-party (no fee)</option>
                   </select>
                 </label>
+                {can(user, "reportIssues") && camNeedsShop && (
+                  <label className="yard-shop-check">
+                    <input
+                      type="checkbox"
+                      checked={shopCam}
+                      onChange={(e) => setShopCam(e.target.checked)}
+                    />
+                    <span>
+                      <strong>Add dash cam to shop board</strong>
+                      <span className="muted">
+                        {" "}
+                        — create a repair ticket so shop can schedule install / fix
+                      </span>
+                    </span>
+                  </label>
+                )}
                 <label>
                   GPS status
                   <select
                     value={form.gps_status === "unknown" ? "n/a" : form.gps_status}
-                    onChange={(e) => setForm({ ...form, gps_status: e.target.value })}
+                    onChange={(e) => {
+                      const gps_status = e.target.value;
+                      setForm({ ...form, gps_status });
+                      if (gps_status === "not_working" || gps_status === "missing") {
+                        setShopGps(true);
+                      } else {
+                        setShopGps(false);
+                      }
+                    }}
                   >
                     <option value="working">Working</option>
                     <option value="not_working">Not working</option>
@@ -552,6 +585,22 @@ export function YardPage() {
                     <option value="Verizon">Verizon</option>
                   </select>
                 </label>
+                {can(user, "reportIssues") && gpsNeedsShop && (
+                  <label className="yard-shop-check">
+                    <input
+                      type="checkbox"
+                      checked={shopGps}
+                      onChange={(e) => setShopGps(e.target.checked)}
+                    />
+                    <span>
+                      <strong>Add GPS to shop board</strong>
+                      <span className="muted">
+                        {" "}
+                        — create a repair ticket so shop can schedule install / fix
+                      </span>
+                    </span>
+                  </label>
+                )}
                 {(form.gps_tracker === "Verizon" || form.gps_tracker === "One Step") && (
                   <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
                     {form.gps_tracker === "Verizon"
@@ -564,8 +613,12 @@ export function YardPage() {
                   <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
                 </label>
                 <div className="toolbar">
-                  <button className="btn" type="submit">
-                    Save update
+                  <button className="btn" type="submit" disabled={busy}>
+                    {busy
+                      ? "Saving…"
+                      : shopCam || shopGps
+                        ? "Save & send to shop"
+                        : "Save update"}
                   </button>
                   <button className="btn secondary" type="button" onClick={() => setSelected(null)}>
                     Close
