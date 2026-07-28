@@ -1046,45 +1046,49 @@ export function IssuesPage() {
                 </label>
               </div>
               <div className="shop-concerns-block">
-                <div className="shop-concerns-label-row">
-                  <span className="shop-concerns-label">Vehicle / tech concerns</span>
-                  <span className="muted shop-concerns-hint">
-                    Tap all that apply
-                    {mConcerns.length > 0 ? ` · ${mConcerns.length} selected` : ""}
-                  </span>
-                </div>
-                {mConcerns.length > 0 && (
-                  <div className="shop-concerns-selected" aria-live="polite">
-                    {mConcerns.map((c) => (
-                      <button
-                        key={c}
-                        type="button"
-                        className="shop-concern-chip is-on"
-                        onClick={() => toggleConcern(c)}
-                        title="Remove"
-                      >
-                        {c} ×
-                      </button>
-                    ))}
-                  </div>
+                <label className="shop-concerns-label" htmlFor="shop-concerns-summary">
+                  Vehicle issues / tech concerns
+                </label>
+                <details className="shop-concerns-dropdown">
+                  <summary id="shop-concerns-summary" className="shop-concerns-summary">
+                    <span className="shop-concerns-summary-text">
+                      {mConcerns.length === 0
+                        ? "Select concerns…"
+                        : mConcerns.length === 1
+                          ? mConcerns[0]
+                          : `${mConcerns.length} selected`}
+                    </span>
+                    <span className="shop-concerns-summary-meta muted">
+                      {mConcerns.length > 0 ? "tap to edit" : "check all that apply"}
+                      <span className="shop-concerns-chevron" aria-hidden>
+                        ▾
+                      </span>
+                    </span>
+                  </summary>
+                  <ul className="shop-concerns-list" role="group" aria-label="Vehicle issues and concerns">
+                    {SHOP_CONCERN_OPTIONS.map((label) => {
+                      const on = mConcerns.includes(label);
+                      return (
+                        <li key={label}>
+                          <label className={`shop-concern-row${on ? " is-on" : ""}`}>
+                            <span className="shop-concern-row-label">{label}</span>
+                            <input
+                              type="checkbox"
+                              className="shop-concern-row-check"
+                              checked={on}
+                              onChange={() => toggleConcern(label)}
+                            />
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </details>
+                {mConcerns.length > 1 && (
+                  <p className="shop-concerns-picks muted" aria-live="polite">
+                    {mConcerns.join(" · ")}
+                  </p>
                 )}
-                <div className="shop-concerns-chips" role="group" aria-label="Concerns">
-                  {SHOP_CONCERN_OPTIONS.map((label) => {
-                    const on = mConcerns.includes(label);
-                    return (
-                      <button
-                        key={label}
-                        type="button"
-                        className={`shop-concern-chip${on ? " is-on" : ""}`}
-                        aria-pressed={on}
-                        onClick={() => toggleConcern(label)}
-                      >
-                        {on ? "✓ " : ""}
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
               </div>
               <label>
                 Problem found
