@@ -448,6 +448,15 @@ export function IssuesPage() {
     e.preventDefault();
     if (!manage) return;
     setError("");
+
+    if (mStatus === "scheduled" && !mDate.trim()) {
+      setError("Pick a scheduled date for the shop visit.");
+      return;
+    }
+    if (mStatus === "cancelled" && !mNotes.trim()) {
+      setError("Add a short reason for cancelling this job.");
+      return;
+    }
     if (mStatus === "completed") {
       if (!mConcerns.length && !mProblemFound.trim()) {
         setError("Check vehicle / tech concerns and/or enter problem found.");
@@ -458,38 +467,61 @@ export function IssuesPage() {
         return;
       }
     }
-    if (isOilChangeWork) {
+    // Oil mileage only when completing an oil change
+    const didOil = mStatus === "completed" && isOilChangeWork;
+    if (didOil) {
       if (!oilOdo.trim() || !Number.isFinite(Number(oilOdo)) || Number(oilOdo) < 0) {
         setError("Enter the odometer reading at this oil change.");
         return;
       }
     }
+
     try {
-      const didOil = isOilChangeWork;
       await api(`/issues/${manage.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           status: mStatus,
           scheduled_date: mDate || null,
           schedule_notes: mNotes || null,
-          completion_notes: mProblemFound.trim() || null,
-          mechanic_diagnosis: joinShopConcerns(mConcerns) || null,
-          work_performed: packWorkPerformed(mDiagnostics, mWork),
-          parts_used: mParts || null,
-          labor_hours: mLabor === "" ? null : Number(mLabor),
+          completion_notes:
+            mStatus === "completed" || mStatus === "in_progress"
+              ? mProblemFound.trim() || null
+              : manage.completion_notes || null,
+          mechanic_diagnosis:
+            mStatus === "completed" || mStatus === "in_progress"
+              ? joinShopConcerns(mConcerns) || null
+              : manage.mechanic_diagnosis || joinShopConcerns(mConcerns) || null,
+          work_performed:
+            mStatus === "completed" || mStatus === "in_progress"
+              ? packWorkPerformed(mDiagnostics, mWork)
+              : manage.work_performed || null,
+          parts_used:
+            mStatus === "completed" || mStatus === "in_progress"
+              ? mParts || null
+              : manage.parts_used || null,
+          labor_hours:
+            mStatus === "completed"
+              ? mLabor === ""
+                ? null
+                : Number(mLabor)
+              : manage.labor_hours,
           severity: mSeverity,
-          // Tracking starts only when Oil change is checked + odometer entered
           record_oil_change: didOil,
           oil_odometer: didOil ? Number(oilOdo) : null,
           oil_interval_miles: didOil ? Number(oilInterval) || 5000 : null,
         }),
       });
       setManage(null);
-      setOk(
-        didOil && oilOdo
-          ? `Saved. Oil tracking started/updated — next ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.`
-          : "Repair record saved."
-      );
+      const statusOk: Record<string, string> = {
+        open: "Saved — still open / waiting.",
+        scheduled: mDate ? `Scheduled for ${mDate}.` : "Marked scheduled.",
+        in_progress: "Marked in progress.",
+        completed: didOil && oilOdo
+          ? `Job complete. Oil tracking — next ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.`
+          : "Job marked complete.",
+        cancelled: "Job cancelled.",
+      };
+      setOk(statusOk[mStatus] || "Repair record saved.");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -1151,50 +1183,47 @@ export function IssuesPage() {
                   placeholder="When to bring the unit in, parts on order…"
                 />
               </label>
-              <div
-                className="card"
-                style={{ padding: "0.75rem", margin: 0, background: "var(--bg)" }}
-              >
-                <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                  <input
-                    type="checkbox"
-                    checked={recordOil}
-                    onChange={(e) => setRecordOil(e.target.checked)}
-                  />
-                  Record oil change (tracks next service by miles)
-                </label>
-                {recordOil && (
-                  <div className="form row" style={{ marginTop: "0.65rem" }}>
+              {isOilChangeWork && (
+                <div className="card shop-oil-block">
+                  <strong className="shop-oil-title">Oil change mileage</strong>
+                  <p className="muted shop-oil-hint">
+                    Tracking starts with this oil change (first time for the unit, or next interval).
+                    Enter the odometer now.
+                  </p>
+                  <div className="form row" style={{ marginTop: "0.45rem" }}>
                     <label>
-                      Odometer at oil change
+                      Odometer at oil change *
                       <input
                         type="number"
                         value={oilOdo}
                         onChange={(e) => setOilOdo(e.target.value)}
-                        required={recordOil}
+                        required
                         inputMode="decimal"
+                        min={0}
+                        placeholder="Miles on the truck now"
                       />
                     </label>
                     <label>
-                      Miles until next (adjust if needed)
+                      Miles until next
                       <input
                         type="number"
                         value={oilInterval}
                         onChange={(e) => setOilInterval(e.target.value)}
-                        required={recordOil}
+                        min={500}
+                        step={100}
                       />
                     </label>
                     {oilOdo && oilInterval && (
                       <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
-                        Next oil change auto-schedules around{" "}
+                        Next oil change around{" "}
                         <strong>
                           {(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi
                         </strong>
                       </p>
                     )}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
               <div className="toolbar">
                 <button className="btn" type="submit">
                   Save shop record
