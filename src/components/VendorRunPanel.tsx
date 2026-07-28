@@ -54,7 +54,7 @@ const LINE_STATUSES: { value: LineStatus; label: string }[] = [
   { value: "picked", label: "Picked up" },
   { value: "not_ready", label: "Not ready" },
   { value: "partial", label: "Partial" },
-  { value: "cancelled", label: "Cancelled" },
+  { value: "cancelled", label: "Not needed" },
   { value: "pending", label: "Still pending" },
 ];
 
@@ -68,8 +68,12 @@ function statusLabel(s: string): string {
  */
 export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
+  /** Counter actions: pick / not ready / partial */
   const canResolve =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
+  /** Drop a part that is no longer needed (field + warehouse) */
+  const canNotNeeded =
+    canResolve || user?.role === "driver" || user?.role === "mechanic";
 
   const [filter, setFilter] = useState<"open" | "all">("open");
   const [groups, setGroups] = useState<VendorGroup[]>([]);
@@ -330,6 +334,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   ) {
     setBusy(true);
     setError("");
+    setOk("");
     try {
       await api(`/inventory/part-pickups/lines/${lineId}/resolve`, {
         method: "POST",
@@ -344,15 +349,59 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         status === "picked"
           ? "Marked picked up."
           : status === "not_ready"
-            ? "Marked not ready."
+            ? "Marked not ready at vendor."
             : status === "partial"
               ? "Marked partial pickup."
-              : "Updated."
+              : status === "cancelled"
+                ? "Marked not needed — off the pickup list."
+                : "Updated."
       );
       await load();
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Mark every still-open line on a ticket as not needed */
+  async function cancelOpenLinesOnTicket(ticket: Ticket) {
+    const open = (ticket.lines || []).filter((l) =>
+      ["pending", "not_ready", "partial"].includes(l.status)
+    );
+    if (!open.length) {
+      setError("No open parts left on this ticket.");
+      return;
+    }
+    const reason = window.prompt(
+      `Mark ${open.length} open part${open.length === 1 ? "" : "s"} as not needed?\n\nOptional reason (job cancelled, wrong part, etc.):`,
+      ""
+    );
+    if (reason === null) return; // dismissed
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      for (const line of open) {
+        await api(`/inventory/part-pickups/lines/${line.id}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({
+            status: "cancelled",
+            notes: reason.trim() || "Not needed",
+            receive_stock: false,
+          }),
+        });
+      }
+      setOk(
+        open.length === 1
+          ? "Part marked not needed."
+          : `${open.length} parts marked not needed.`
+      );
+      await load();
+      window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update");
     } finally {
       setBusy(false);
     }
@@ -754,12 +803,14 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                     key={t.id}
                     ticket={t}
                     canResolve={canResolve}
+                    canNotNeeded={canNotNeeded}
                     busy={busy}
                     expanded={!!expandedTicket[t.id] || t.status === "open" || t.status === "partial"}
                     onToggle={() =>
                       setExpandedTicket((p) => ({ ...p, [t.id]: !p[t.id] }))
                     }
                     onResolve={resolveLine}
+                    onCancelOpen={() => void cancelOpenLinesOnTicket(t)}
                     onSaveDetails={async (drafts) => {
                       setBusy(true);
                       setError("");
@@ -800,15 +851,18 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 function TicketCard({
   ticket: t,
   canResolve,
+  canNotNeeded,
   busy,
   expanded,
   onToggle,
   onResolve,
+  onCancelOpen,
   onSaveDetails,
   onAddLine,
 }: {
   ticket: Ticket;
   canResolve: boolean;
+  canNotNeeded: boolean;
   busy: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -818,6 +872,7 @@ function TicketCard({
     qtyReceived?: number | null,
     notes?: string
   ) => Promise<void>;
+  onCancelOpen: () => void;
   onSaveDetails: (
     drafts: Record<number, { code: string; name: string; qty: string }>
   ) => Promise<void>;
@@ -943,55 +998,78 @@ function TicketCard({
                       {line.qty_received != null ? ` · got ${line.qty_received}` : ""}
                     </span>
                   </div>
-                  {canResolve && line.status !== "picked" && line.status !== "cancelled" && (
+                  {line.status !== "picked" && line.status !== "cancelled" && (
                     <div className="pp-line-actions">
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        disabled={busy}
-                        onClick={() => void onResolve(line.id, "picked")}
-                      >
-                        Picked up
-                      </button>
-                      <button
-                        type="button"
-                        className="btn ghost btn-sm"
-                        disabled={busy}
-                        onClick={() => void onResolve(line.id, "not_ready")}
-                      >
-                        Not ready
-                      </button>
-                      <span className="pp-partial">
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          placeholder="Got #"
-                          className="pp-partial-qty"
-                          value={partialQty[line.id] || ""}
-                          onChange={(e) =>
-                            setPartialQty((p) => ({ ...p, [line.id]: e.target.value }))
-                          }
-                        />
+                      {canResolve && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            onClick={() => void onResolve(line.id, "picked")}
+                          >
+                            Picked up
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost btn-sm"
+                            disabled={busy}
+                            onClick={() => void onResolve(line.id, "not_ready")}
+                          >
+                            Not ready
+                          </button>
+                          <span className="pp-partial">
+                            <input
+                              type="number"
+                              min={0}
+                              step="any"
+                              placeholder="Got #"
+                              className="pp-partial-qty"
+                              value={partialQty[line.id] || ""}
+                              onChange={(e) =>
+                                setPartialQty((p) => ({ ...p, [line.id]: e.target.value }))
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="btn ghost btn-sm"
+                              disabled={busy || !partialQty[line.id]}
+                              onClick={() =>
+                                void onResolve(line.id, "partial", Number(partialQty[line.id]))
+                              }
+                            >
+                              Partial
+                            </button>
+                          </span>
+                        </>
+                      )}
+                      {canNotNeeded && (
                         <button
                           type="button"
-                          className="btn ghost btn-sm"
-                          disabled={busy || !partialQty[line.id]}
-                          onClick={() =>
-                            void onResolve(line.id, "partial", Number(partialQty[line.id]))
-                          }
+                          className="btn secondary btn-sm pp-not-needed-btn"
+                          disabled={busy}
+                          title="Order cancelled, wrong part, or job no longer needs this"
+                          onClick={() => {
+                            const label =
+                              (drafts[line.id]?.name || line.part_name || "").trim() ||
+                              (drafts[line.id]?.code || line.part_code || "").trim() ||
+                              `Line #${line.line_no}`;
+                            const reason = window.prompt(
+                              `Mark as not needed?\n\n${label}\n\nThis drops it off the pickup list.\nOptional reason:`,
+                              ""
+                            );
+                            if (reason === null) return;
+                            void onResolve(
+                              line.id,
+                              "cancelled",
+                              null,
+                              reason.trim() || "Not needed"
+                            );
+                          }}
                         >
-                          Partial
+                          Not needed
                         </button>
-                      </span>
-                      <button
-                        type="button"
-                        className="btn ghost btn-sm"
-                        disabled={busy}
-                        onClick={() => void onResolve(line.id, "cancelled")}
-                      >
-                        Cancel
-                      </button>
+                      )}
                     </div>
                   )}
                 </li>
@@ -1000,17 +1078,36 @@ function TicketCard({
           </ul>
 
           <div className="pp-ticket-actions">
-            <button
-              type="button"
-              className="btn secondary btn-sm"
-              disabled={busy}
-              onClick={() => void onSaveDetails(drafts)}
-            >
-              Save part details
-            </button>
-            <button type="button" className="btn ghost btn-sm" disabled={busy} onClick={() => void onAddLine()}>
-              + Part line
-            </button>
+            {canResolve && (
+              <>
+                <button
+                  type="button"
+                  className="btn secondary btn-sm"
+                  disabled={busy}
+                  onClick={() => void onSaveDetails(drafts)}
+                >
+                  Save part details
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => void onAddLine()}
+                >
+                  + Part line
+                </button>
+              </>
+            )}
+            {canNotNeeded && openCount > 0 && (
+              <button
+                type="button"
+                className="btn ghost btn-sm pp-not-needed-btn"
+                disabled={busy}
+                onClick={onCancelOpen}
+              >
+                Not needed — all open parts
+              </button>
+            )}
           </div>
         </div>
       )}

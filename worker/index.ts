@@ -8185,9 +8185,15 @@ async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): 
     ["pending", "not_ready", "partial"].includes(l.status)
   ).length;
   const picked = list.filter((l) => l.status === "picked").length;
+  const allCancelled =
+    list.length > 0 && list.every((l) => l.status === "cancelled");
   let status = "open";
-  if (pending === 0) status = "done";
-  else if (picked > 0 || list.some((l) => l.status === "partial")) status = "partial";
+  if (pending === 0) {
+    // All closed — fully cancelled tickets vs finished pickups
+    status = allCancelled ? "cancelled" : "done";
+  } else if (picked > 0 || list.some((l) => l.status === "partial")) {
+    status = "partial";
+  }
   await db
     .prepare(
       `UPDATE part_pickup_tickets SET status = ?, updated_at = datetime('now') WHERE id = ?`
@@ -8516,11 +8522,16 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
  * Resolve a line at the counter:
  * status: picked | not_ready | partial | cancelled | pending
  * qty_received required for partial; optional for picked (defaults to requested)
+ *
+ * "cancelled" = no longer needed (order cancelled / wrong part / job killed).
+ * Warehouse/office/admin can set any status; field (driver/mechanic) can only mark not needed.
  */
 api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
   const user = c.get("user");
-  if (!["admin", "warehouse", "office"].includes(user.role)) {
-    return c.json({ error: "Only warehouse, office, or admin can update pickup status" }, 403);
+  const canCounter = ["admin", "warehouse", "office"].includes(user.role);
+  const canNotNeeded = canCounter || ["driver", "mechanic"].includes(user.role);
+  if (!canNotNeeded) {
+    return c.json({ error: "You cannot update pickup status" }, 403);
   }
   const lineId = Number(c.req.param("lineId"));
   const body = await c.req.json<{
@@ -8534,6 +8545,15 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     return c.json(
       { error: "Status must be picked, not_ready, partial, cancelled, or pending" },
       400
+    );
+  }
+  if (!canCounter && status !== "cancelled") {
+    return c.json(
+      {
+        error:
+          "Field can mark parts as Not needed only. Warehouse marks picked / not ready at the counter.",
+      },
+      403
     );
   }
 
@@ -8628,12 +8648,24 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
 
     if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
       const label = line.part_name || line.part_code || `Line ${lineId}`;
+      const statusLabel =
+        status === "cancelled"
+          ? "Not needed"
+          : status === "not_ready"
+            ? "Not ready"
+            : status === "picked"
+              ? "Picked up"
+              : status === "partial"
+                ? "Partial"
+                : status.replace("_", " ");
       await notifyUsers(
         c.env.DB,
         [line.logged_by_user_id],
         "vendor_run",
-        `${status.replace("_", " ")} · ${line.vendor_name}`,
-        `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""} — ${user.display_name}`,
+        `${statusLabel} · ${line.vendor_name}`,
+        `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
+          body.notes ? ` · ${String(body.notes).trim()}` : ""
+        } — ${user.display_name}`,
         { type: "part_pickup", id: line.ticket_id }
       );
     }

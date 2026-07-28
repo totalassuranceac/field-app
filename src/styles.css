@@ -10347,11 +10347,27 @@ svg {
   color: var(--muted);
 }
 
+.pp-status-pill.st-cancelled {
+  color: #f87171;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.pp-line.st-cancelled {
+  opacity: 0.72;
+}
+
 .pp-line-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
   align-items: center;
+}
+
+.pp-not-needed-btn {
+  border-color: color-mix(in srgb, #f87171 45%, var(--line)) !important;
+  color: #fecaca !important;
+  font-weight: 750;
 }
 
 .pp-partial {
