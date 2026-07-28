@@ -257,7 +257,7 @@ export function can(user: User | null, action: string): boolean {
     manageUsers: ["admin"],
     manageEmployees: ["admin", "office"],
     manageVehicles: ["admin", "office", "mechanic"],
-    manageVehicleCompliance: ["admin", "office"],
+    manageVehicleCompliance: ["admin", "office", "mechanic"],
     logFuel: ["admin", "office", "driver", "mechanic", "warehouse"],
     editFuel: ["admin", "office"],
     logPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse"],

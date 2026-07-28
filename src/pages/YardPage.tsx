@@ -373,7 +373,7 @@ export function YardPage() {
                         ? " (personal)"
                         : " (fleet plan)"}
                     </p>
-                    <p style={{ margin: 0 }}>Office sets registration / insurance dates.</p>
+                    <p style={{ margin: 0 }}>Office or shop set registration / insurance dates.</p>
                   </div>
                 )}
                 <label>

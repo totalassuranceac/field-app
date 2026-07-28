@@ -321,7 +321,7 @@ export function VehiclesPage() {
         <form className="card fleet-insurance-card no-print" onSubmit={saveFleetInsurance}>
           <h3 style={{ margin: "0 0 0.35rem", fontSize: "1rem" }}>Company fleet insurance</h3>
           <p className="muted" style={{ margin: "0 0 0.55rem", fontSize: "0.85rem" }}>
-            One expiration for every company van (not personal P-units). Office only.
+            One expiration for every company van (not personal P-units). Office or shop.
           </p>
           <div className="form row" style={{ alignItems: "flex-end" }}>
             <label style={{ flex: "1 1 12rem" }}>

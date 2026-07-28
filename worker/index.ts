@@ -1808,7 +1808,7 @@ api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) =>
         return c.json(
           {
             error:
-              "Only office can set registration and insurance dates. Shop updates cam / GPS.",
+              "Only office or shop can set registration and insurance dates.",
           },
           403
         );
