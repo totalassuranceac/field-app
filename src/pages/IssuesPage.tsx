@@ -155,7 +155,6 @@ export function IssuesPage() {
   const [mParts, setMParts] = useState("");
   const [mLabor, setMLabor] = useState("");
   const [mSeverity, setMSeverity] = useState("medium");
-  const [recordOil, setRecordOil] = useState(false);
   const [oilOdo, setOilOdo] = useState("");
   const [oilInterval, setOilInterval] = useState("5000");
   const [oilDue, setOilDue] = useState<
@@ -416,15 +415,12 @@ export function IssuesPage() {
     setMParts(issue.parts_used || "");
     setMLabor(issue.labor_hours != null ? String(issue.labor_hours) : "");
     setMSeverity(issue.severity);
-    setRecordOil(
-      issue.issue_category === "oil_change" ||
-        issue.title.toLowerCase().includes("oil change") ||
-        concerns.includes("Oil change")
-    );
     const veh = vehicles.find((v) => v.id === issue.vehicle_id);
     setOilOdo(veh?.current_odometer != null ? String(veh.current_odometer) : "");
     setOilInterval("5000");
   }
+
+  const isOilChangeWork = mConcerns.includes("Oil change");
 
   function toggleConcern(label: string) {
     setMConcerns((prev) => {
@@ -462,7 +458,14 @@ export function IssuesPage() {
         return;
       }
     }
+    if (isOilChangeWork) {
+      if (!oilOdo.trim() || !Number.isFinite(Number(oilOdo)) || Number(oilOdo) < 0) {
+        setError("Enter the odometer reading at this oil change.");
+        return;
+      }
+    }
     try {
+      const didOil = isOilChangeWork;
       await api(`/issues/${manage.id}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -475,15 +478,16 @@ export function IssuesPage() {
           parts_used: mParts || null,
           labor_hours: mLabor === "" ? null : Number(mLabor),
           severity: mSeverity,
-          record_oil_change: recordOil || mConcerns.includes("Oil change"),
-          oil_odometer: recordOil && oilOdo !== "" ? Number(oilOdo) : null,
-          oil_interval_miles: recordOil ? Number(oilInterval) || 5000 : null,
+          // Tracking starts only when Oil change is checked + odometer entered
+          record_oil_change: didOil,
+          oil_odometer: didOil ? Number(oilOdo) : null,
+          oil_interval_miles: didOil ? Number(oilInterval) || 5000 : null,
         }),
       });
       setManage(null);
       setOk(
-        recordOil && oilOdo
-          ? `Saved. Next oil change ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.`
+        didOil && oilOdo
+          ? `Saved. Oil tracking started/updated — next ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.`
           : "Repair record saved."
       );
       await load();

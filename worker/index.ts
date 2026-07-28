@@ -3248,11 +3248,12 @@ api.get("/service/due", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
        s.service_date as last_service_date, s.odometer as last_service_odometer,
        s.interval_miles, s.next_due_odometer, s.next_due_date,
        CASE
+         -- Only after first oil change is logged — no due flag until tracking starts
+         WHEN s.id IS NULL THEN 0
          WHEN s.next_due_odometer IS NOT NULL AND v.current_odometer IS NOT NULL
               AND v.current_odometer >= s.next_due_odometer THEN 1
          WHEN s.next_due_odometer IS NOT NULL AND v.current_odometer IS NOT NULL
               AND v.current_odometer >= s.next_due_odometer - 500 THEN 1
-         WHEN s.id IS NULL THEN 1
          ELSE 0
        END as due_soon
      FROM vehicles v
