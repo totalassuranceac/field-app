@@ -371,48 +371,6 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
-  /** Mark every still-open line on a ticket as not needed */
-  async function cancelOpenLinesOnTicket(ticket: Ticket) {
-    const open = (ticket.lines || []).filter((l) =>
-      ["pending", "not_ready", "partial"].includes(l.status)
-    );
-    if (!open.length) {
-      setError("No open parts left on this ticket.");
-      return;
-    }
-    const reason = window.prompt(
-      `Mark ${open.length} open part${open.length === 1 ? "" : "s"} as not needed?\n\nOptional reason (job cancelled, wrong part, etc.):`,
-      ""
-    );
-    if (reason === null) return; // dismissed
-    setBusy(true);
-    setError("");
-    setOk("");
-    try {
-      for (const line of open) {
-        await api(`/inventory/part-pickups/lines/${line.id}/resolve`, {
-          method: "POST",
-          body: JSON.stringify({
-            status: "cancelled",
-            notes: reason.trim() || "Not needed",
-            receive_stock: false,
-          }),
-        });
-      }
-      setOk(
-        open.length === 1
-          ? "Part marked not needed."
-          : `${open.length} parts marked not needed.`
-      );
-      await load();
-      window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className={`vendor-run-panel${compact ? " is-compact" : ""}`}>
       {!compact && (
@@ -420,9 +378,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           <div>
             <h2 style={{ margin: 0 }}>Part pickup</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
-              Log vendor + how many parts. Fill part numbers on each line. At the counter: Picked /
-              Not ready / Partial. Job cancelled or wrong part? Tap{" "}
-              <strong>Not needed</strong> on that line (also on the Stops needed sheet).
+              Log vendor parts. Counter: Picked / Not ready / Partial. Drop a line with{" "}
+              <strong>Not needed</strong>.
             </p>
           </div>
           <div className="vendor-run-toolbar">

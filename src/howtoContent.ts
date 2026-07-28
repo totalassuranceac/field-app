@@ -363,7 +363,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Anyone can log it — office after a vendor call, or a tech if the vendor called them.",
       "Tap Stops needed (or a vendor chip) for the Pickup run sheet — big qty × part list by company so you can see if it fits the truck.",
       "Warehouse uses full tickets to mark each line picked / not ready / partial.",
-      "If a part is cancelled or no longer needed: open the ticket → Not needed (optional reason). Field can do this too — drops it off the waiting list.",
+      "If a part is cancelled or no longer needed: open that line → Not needed (one part at a time). Field can do this too.",
       "Marking picked receives catalog parts into warehouse stock when linked to the catalog.",
     ],
     tips: [
