@@ -49,6 +49,63 @@ interface Issue {
   created_at: string;
 }
 
+/** All open problems for one unit — shop board + print work list */
+interface VehicleIssueGroup {
+  vehicle_id: number;
+  unit_number: string;
+  issues: Issue[];
+  needsSchedule: number;
+  hasEmergency: boolean;
+}
+
+const SEV_RANK: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function sortIssuesInGroup(a: Issue, b: Issue): number {
+  const st = (s: string) =>
+    s === "open" ? 0 : s === "scheduled" ? 1 : s === "in_progress" ? 2 : 3;
+  return (
+    st(a.status) - st(b.status) ||
+    (b.is_emergency ? 1 : 0) - (a.is_emergency ? 1 : 0) ||
+    (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9) ||
+    String(b.created_at).localeCompare(String(a.created_at))
+  );
+}
+
+function groupIssuesByVehicle(list: Issue[]): VehicleIssueGroup[] {
+  const map = new Map<number, VehicleIssueGroup>();
+  for (const i of list) {
+    let g = map.get(i.vehicle_id);
+    if (!g) {
+      g = {
+        vehicle_id: i.vehicle_id,
+        unit_number: i.unit_number,
+        issues: [],
+        needsSchedule: 0,
+        hasEmergency: false,
+      };
+      map.set(i.vehicle_id, g);
+    }
+    g.issues.push(i);
+    if (i.status === "open") g.needsSchedule += 1;
+    if (i.is_emergency) g.hasEmergency = true;
+  }
+  for (const g of map.values()) {
+    g.issues.sort(sortIssuesInGroup);
+  }
+  return [...map.values()].sort((a, b) => {
+    if (a.hasEmergency !== b.hasEmergency) return a.hasEmergency ? -1 : 1;
+    if ((a.needsSchedule > 0) !== (b.needsSchedule > 0)) {
+      return a.needsSchedule > 0 ? -1 : 1;
+    }
+    return a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
+  });
+}
+
 interface CommonRow {
   category: string;
   count: number;
@@ -175,6 +232,20 @@ export function IssuesPage() {
   );
   const onBoard = useMemo(
     () => issues.filter((i) => i.status === "scheduled" || i.status === "in_progress"),
+    [issues]
+  );
+  /** Shop views: every problem under its unit (no split vehicles on the list) */
+  const needsByVehicle = useMemo(
+    () => groupIssuesByVehicle(needsSchedule),
+    [needsSchedule]
+  );
+  const boardByVehicle = useMemo(() => groupIssuesByVehicle(onBoard), [onBoard]);
+  const allByVehicle = useMemo(() => groupIssuesByVehicle(issues), [issues]);
+  const activeByVehicle = useMemo(
+    () =>
+      groupIssuesByVehicle(
+        issues.filter((i) => ["open", "scheduled", "in_progress"].includes(i.status))
+      ),
     [issues]
   );
   async function sendShopText(e: FormEvent) {
@@ -361,39 +432,25 @@ export function IssuesPage() {
     }
   }
 
-  function renderIssueCard(i: Issue, opts?: { forceOpen?: boolean; scheduleCta?: boolean }) {
-    const when = i.scheduled_date || i.created_at?.slice(0, 10) || "—";
-    const shopNote = i.mechanic_diagnosis || i.work_performed || "";
+  function renderIssueRow(i: Issue, opts?: { scheduleCta?: boolean }) {
     const head = issueHeadline(i);
-    const tone = i.is_emergency
-      ? "urgent"
-      : i.status === "open"
-        ? "warn"
-        : i.severity === "critical" || i.severity === "high"
-          ? "bad"
-          : i.status === "completed"
-            ? "done"
-            : undefined;
+    const shopNote = i.mechanic_diagnosis || i.work_performed || "";
+    const when = i.scheduled_date || String(i.created_at || "").slice(0, 10) || "—";
     return (
-      <LogItem
+      <li
         key={i.id}
-        tone={tone}
-        defaultOpen={opts?.forceOpen || !!i.is_emergency || i.status === "open"}
-        summary={
-          <>
-            <strong>Unit {i.unit_number}</strong>
-            {!!i.is_emergency && <span className="log-item-badge">Emergency</span>}
-            {i.status === "open" && (
-              <span className="log-item-badge log-item-badge-needs">Needs schedule</span>
-            )}
-            <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
-            <span className="log-item-meta">{head}</span>
-            <span className="log-item-meta">{when}</span>
-          </>
-        }
+        className={`shop-unit-issue st-${i.status}${i.is_emergency ? " is-emergency" : ""}`}
       >
+        <div className="shop-unit-issue-head">
+          {!!i.is_emergency && <span className="log-item-badge">Emergency</span>}
+          {i.status === "open" && (
+            <span className="log-item-badge log-item-badge-needs">Needs schedule</span>
+          )}
+          <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
+          <span className="shop-unit-issue-title">{head}</span>
+        </div>
         {i.issue_category && i.issue_category !== "other" && (
-          <div className="muted">{driverIssueLabel(i.issue_category)}</div>
+          <div className="muted shop-unit-issue-meta">{driverIssueLabel(i.issue_category)}</div>
         )}
         {i.description && (
           <div className="issue-desc-block">
@@ -402,23 +459,63 @@ export function IssuesPage() {
           </div>
         )}
         {!isDriver && shopNote && (
-          <div>
-            <span className="muted">Shop notes: </span>
+          <div className="shop-unit-issue-meta">
+            <span className="muted">Shop: </span>
             {shopNote}
           </div>
         )}
-        <div className="muted">
-          By {i.reporter_name} · {i.severity}
-          {i.created_at ? ` · reported ${String(i.created_at).replace("T", " ").slice(0, 16)}` : ""}
+        <div className="muted shop-unit-issue-meta">
+          By {i.reporter_name} · {i.severity} · {when}
         </div>
         {canShop && (
-          <div className="log-item-actions">
-            <button className="btn no-print" type="button" onClick={() => openManage(i)}>
+          <div className="log-item-actions no-print">
+            <button className="btn btn-sm" type="button" onClick={() => openManage(i)}>
               {i.status === "open" || opts?.scheduleCta ? "Schedule / shop work" : "Shop work"}
             </button>
           </div>
         )}
-      </LogItem>
+      </li>
+    );
+  }
+
+  function renderVehicleGroup(
+    g: VehicleIssueGroup,
+    opts?: { defaultOpen?: boolean; scheduleCta?: boolean }
+  ) {
+    const open = opts?.defaultOpen ?? (g.needsSchedule > 0 || g.hasEmergency);
+    return (
+      <details
+        key={g.vehicle_id}
+        className={`shop-unit-card${g.hasEmergency ? " is-emergency" : ""}${
+          g.needsSchedule > 0 ? " needs-schedule" : ""
+        }`}
+        open={open || undefined}
+      >
+        <summary className="shop-unit-summary">
+          <span className="shop-unit-title">
+            <strong>Unit {g.unit_number}</strong>
+            <span className="shop-unit-count">
+              {g.issues.length} problem{g.issues.length === 1 ? "" : "s"}
+            </span>
+            {g.hasEmergency && <span className="log-item-badge">Emergency</span>}
+            {g.needsSchedule > 0 && (
+              <span className="log-item-badge log-item-badge-needs">
+                {g.needsSchedule} need schedule
+              </span>
+            )}
+          </span>
+          <span className="muted shop-unit-peek no-print">
+            {g.issues
+              .slice(0, 3)
+              .map((i) => issueHeadline(i))
+              .join(" · ")}
+            {g.issues.length > 3 ? "…" : ""}
+          </span>
+        </summary>
+        <ul className="shop-unit-issues">
+          {g.issues.map((i) => renderIssueRow(i, { scheduleCta: opts?.scheduleCta }))}
+        </ul>
+      </details>
     );
   }
 
@@ -454,19 +551,21 @@ export function IssuesPage() {
       {ok && <div className="success" style={{ marginBottom: "1rem" }}>{ok}</div>}
       {error && <div className="error" style={{ marginBottom: "1rem" }}>{error}</div>}
 
-      {canShop && needsSchedule.length > 0 && filter === "active" && (
-        <div className="card issue-needs-card no-print" style={{ marginBottom: "1rem" }}>
+      {canShop && needsByVehicle.length > 0 && filter === "active" && (
+        <div className="card issue-needs-card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>
             Needs scheduling
             <span className="issue-needs-count">{needsSchedule.length}</span>
           </h2>
-          <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
-            Tech reported these — not booked yet. Tap <strong>Schedule / shop work</strong> to set a
-            day.
+          <p className="muted no-print" style={{ marginTop: 0, fontSize: "0.88rem" }}>
+            Grouped by unit — every open problem on that van is listed together. Schedule each line
+            when you book the work.
           </p>
-          <LogList className="shop-board log-list" empty="None waiting.">
-            {needsSchedule.map((i) => renderIssueCard(i, { forceOpen: true, scheduleCta: true }))}
-          </LogList>
+          <div className="shop-unit-list">
+            {needsByVehicle.map((g) =>
+              renderVehicleGroup(g, { defaultOpen: true, scheduleCta: true })
+            )}
+          </div>
         </div>
       )}
 
@@ -545,27 +644,81 @@ export function IssuesPage() {
 
       {canShop && filter === "active" ? (
         <>
-          {onBoard.length > 0 && (
-            <div className="card" style={{ marginBottom: "1rem" }}>
+          {/* Print work list: full unit groups with every open + booked problem */}
+          <div className="print-only shop-print-worklist">
+            <h1>Shop work list</h1>
+            <p className="muted">
+              Problems grouped by unit — fix everything on the van in one stop.
+            </p>
+            {activeByVehicle.length === 0 ? (
+              <p className="muted">No open or scheduled repairs.</p>
+            ) : (
+              <div className="shop-unit-list">
+                {activeByVehicle.map((g) =>
+                  renderVehicleGroup(g, { defaultOpen: true })
+                )}
+              </div>
+            )}
+          </div>
+
+          {boardByVehicle.length > 0 && (
+            <div className="card no-print" style={{ marginBottom: "1rem" }}>
               <h2 style={{ marginTop: 0 }}>Scheduled / in progress</h2>
               <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-                Booked work — completing clears downtime when applicable.
+                Booked work by unit — all problems for a van stay together.
               </p>
-              <LogList className="shop-board log-list" empty="None booked.">
-                {onBoard.map((i) => renderIssueCard(i))}
-              </LogList>
+              <div className="shop-unit-list">
+                {boardByVehicle.map((g) => renderVehicleGroup(g))}
+              </div>
             </div>
           )}
           {!needsSchedule.length && !onBoard.length && (
-            <div className="muted empty">No open or scheduled repairs right now.</div>
+            <div className="muted empty no-print">No open or scheduled repairs right now.</div>
           )}
         </>
-      ) : (
+      ) : isDriver ? (
         <LogList className="shop-board log-list" empty="No issues in this view.">
-          {(filter === "open" ? needsSchedule : filter === "active" ? issues : issues).map((i) =>
-            renderIssueCard(i, { forceOpen: i.status === "open", scheduleCta: i.status === "open" })
-          )}
+          {issues.map((i) => (
+            <LogItem
+              key={i.id}
+              tone={i.is_emergency ? "urgent" : i.status === "open" ? "warn" : undefined}
+              defaultOpen={i.status === "open"}
+              summary={
+                <>
+                  <strong>Unit {i.unit_number}</strong>
+                  <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
+                  <span className="log-item-meta">{issueHeadline(i)}</span>
+                </>
+              }
+            >
+              {i.description && <div className="issue-desc-block">{i.description}</div>}
+              <div className="muted">
+                {i.severity}
+                {i.created_at
+                  ? ` · ${String(i.created_at).replace("T", " ").slice(0, 16)}`
+                  : ""}
+              </div>
+            </LogItem>
+          ))}
         </LogList>
+      ) : (
+        <div className="shop-unit-list">
+          {(() => {
+            const groups =
+              filter === "open"
+                ? needsByVehicle
+                : groupIssuesByVehicle(issues);
+            if (!groups.length) {
+              return <div className="muted empty">No issues in this view.</div>;
+            }
+            return groups.map((g) =>
+              renderVehicleGroup(g, {
+                defaultOpen: filter === "open" || g.needsSchedule > 0 || g.hasEmergency,
+                scheduleCta: filter === "open",
+              })
+            );
+          })()}
+        </div>
       )}
 
       {showNew && (
