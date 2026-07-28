@@ -400,18 +400,37 @@ export function IssuesPage() {
     setMStatus(issue.status === "open" ? "scheduled" : issue.status);
     setMDate(issue.scheduled_date || "");
     setMNotes(issue.schedule_notes || "");
-    setMDiagnosis(issue.mechanic_diagnosis || (issue.issue_category === "oil_change" ? "Oil change" : ""));
-    setMWork(issue.work_performed || "");
+    const concerns = parseShopConcerns(issue.mechanic_diagnosis);
+    if (
+      !concerns.length &&
+      (issue.issue_category === "oil_change" || issue.title.toLowerCase().includes("oil"))
+    ) {
+      setMConcerns(["Oil change"]);
+    } else {
+      setMConcerns(concerns);
+    }
+    setMProblemFound(issue.completion_notes || "");
+    const unpacked = unpackWorkPerformed(issue.work_performed);
+    setMDiagnostics(unpacked.diagnostics);
+    setMWork(unpacked.work);
     setMParts(issue.parts_used || "");
     setMLabor(issue.labor_hours != null ? String(issue.labor_hours) : "");
-    setMCompletion(issue.completion_notes || "");
     setMSeverity(issue.severity);
-    setRecordOil(issue.issue_category === "oil_change" || issue.title.toLowerCase().includes("oil change"));
-    const veh = vehicles.find((v) => v.id === issue.vehicle_id);
-    setOilOdo(
-      veh?.current_odometer != null ? String(veh.current_odometer) : ""
+    setRecordOil(
+      issue.issue_category === "oil_change" ||
+        issue.title.toLowerCase().includes("oil change") ||
+        concerns.includes("Oil change")
     );
+    const veh = vehicles.find((v) => v.id === issue.vehicle_id);
+    setOilOdo(veh?.current_odometer != null ? String(veh.current_odometer) : "");
     setOilInterval("5000");
+  }
+
+  function toggleConcern(label: string) {
+    setMConcerns((prev) => {
+      if (prev.includes(label)) return prev.filter((x) => x !== label);
+      return [...prev, label];
+    });
   }
 
   // Deep-link from in-app notification: /issues?id=28 → schedule that ticket
@@ -432,6 +451,17 @@ export function IssuesPage() {
   async function saveManage(e: FormEvent) {
     e.preventDefault();
     if (!manage) return;
+    setError("");
+    if (mStatus === "completed") {
+      if (!mConcerns.length && !mProblemFound.trim()) {
+        setError("Check vehicle / tech concerns and/or enter problem found.");
+        return;
+      }
+      if (!mWork.trim() && !mDiagnostics.trim()) {
+        setError("Enter diagnostics/troubleshooting and/or work performed.");
+        return;
+      }
+    }
     try {
       await api(`/issues/${manage.id}`, {
         method: "PATCH",
@@ -439,13 +469,13 @@ export function IssuesPage() {
           status: mStatus,
           scheduled_date: mDate || null,
           schedule_notes: mNotes || null,
-          completion_notes: mCompletion || null,
-          mechanic_diagnosis: mDiagnosis || null,
-          work_performed: mWork || null,
+          completion_notes: mProblemFound.trim() || null,
+          mechanic_diagnosis: joinShopConcerns(mConcerns) || null,
+          work_performed: packWorkPerformed(mDiagnostics, mWork),
           parts_used: mParts || null,
           labor_hours: mLabor === "" ? null : Number(mLabor),
           severity: mSeverity,
-          record_oil_change: recordOil,
+          record_oil_change: recordOil || mConcerns.includes("Oil change"),
           oil_odometer: recordOil && oilOdo !== "" ? Number(oilOdo) : null,
           oil_interval_miles: recordOil ? Number(oilInterval) || 5000 : null,
         }),
@@ -464,7 +494,7 @@ export function IssuesPage() {
 
   function renderIssueRow(i: Issue, opts?: { scheduleCta?: boolean }) {
     const head = issueHeadline(i);
-    const shopNote = i.mechanic_diagnosis || i.work_performed || "";
+    const shopNote = i.work_performed || "";
     const when = i.scheduled_date || String(i.created_at || "").slice(0, 10) || "—";
     return (
       <li
@@ -488,10 +518,22 @@ export function IssuesPage() {
             {i.description}
           </div>
         )}
+        {!isDriver && i.mechanic_diagnosis && (
+          <div className="shop-unit-issue-meta">
+            <span className="muted">Concerns: </span>
+            {i.mechanic_diagnosis}
+          </div>
+        )}
+        {!isDriver && i.completion_notes && (
+          <div className="shop-unit-issue-meta">
+            <span className="muted">Problem found: </span>
+            {i.completion_notes}
+          </div>
+        )}
         {!isDriver && shopNote && (
           <div className="shop-unit-issue-meta">
-            <span className="muted">Shop: </span>
-            {shopNote}
+            <span className="muted">Shop work: </span>
+            {shopNote.length > 160 ? `${shopNote.slice(0, 160)}…` : shopNote}
           </div>
         )}
         <div className="muted shop-unit-issue-meta">
@@ -1063,23 +1105,50 @@ export function IssuesPage() {
                   <input type="date" value={mDate} onChange={(e) => setMDate(e.target.value)} />
                 </label>
               </div>
-              <label>
-                Mechanic diagnosis (specific)
-                <select value={mDiagnosis} onChange={(e) => setMDiagnosis(e.target.value)}>
-                  <option value="">Select…</option>
-                  {MECHANIC_DIAGNOSIS.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
+              <fieldset className="shop-concerns-fieldset">
+                <legend>Vehicle issues / tech concerns</legend>
+                <p className="muted shop-concerns-hint">
+                  Check all that apply — customer or tech concerns and what you found.
+                </p>
+                <div className="shop-concerns-grid">
+                  {SHOP_CONCERN_OPTIONS.map((label) => (
+                    <label key={label} className="shop-concern-check">
+                      <input
+                        type="checkbox"
+                        checked={mConcerns.includes(label)}
+                        onChange={() => toggleConcern(label)}
+                      />
+                      <span>{label}</span>
+                    </label>
                   ))}
-                </select>
+                </div>
+              </fieldset>
+              <label>
+                Problem found
+                <textarea
+                  value={mProblemFound}
+                  onChange={(e) => setMProblemFound(e.target.value)}
+                  placeholder="What was actually wrong (e.g. float switch stuck, open wire, worn pads)…"
+                  rows={2}
+                  required={mStatus === "completed"}
+                />
+              </label>
+              <label>
+                Diagnostics / troubleshooting
+                <textarea
+                  value={mDiagnostics}
+                  onChange={(e) => setMDiagnostics(e.target.value)}
+                  placeholder="Tests run, readings, steps to isolate the fault…"
+                  rows={3}
+                />
               </label>
               <label>
                 Work performed
                 <textarea
                   value={mWork}
                   onChange={(e) => setMWork(e.target.value)}
-                  placeholder="What you actually fixed / tested"
+                  placeholder="What you fixed, replaced, or adjusted…"
+                  rows={3}
                   required={mStatus === "completed"}
                 />
               </label>
@@ -1105,11 +1174,11 @@ export function IssuesPage() {
               </div>
               <label>
                 Schedule notes
-                <textarea value={mNotes} onChange={(e) => setMNotes(e.target.value)} />
-              </label>
-              <label>
-                Completion notes
-                <textarea value={mCompletion} onChange={(e) => setMCompletion(e.target.value)} />
+                <textarea
+                  value={mNotes}
+                  onChange={(e) => setMNotes(e.target.value)}
+                  placeholder="When to bring the unit in, parts on order…"
+                />
               </label>
               <div
                 className="card"
