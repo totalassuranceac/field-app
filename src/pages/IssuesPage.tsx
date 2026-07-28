@@ -595,118 +595,119 @@ export function IssuesPage() {
                   : " · no open work"}
               </p>
               <p className="shop-print-cover-note">
-                Page 1 — index (units in numerical order). Following pages — one unit each with all
-                issues for that vehicle.
+                Units in numerical order. All problems for a van are listed under that unit (flow
+                continuous — no forced page break per vehicle).
               </p>
             </header>
             {printByVehicle.length === 0 ? (
               <p>No open or scheduled repairs.</p>
             ) : (
-              <table className="shop-print-index-table">
-                <thead>
-                  <tr>
-                    <th className="col-unit">Unit</th>
-                    <th className="col-n">#</th>
-                    <th>Problems</th>
-                    <th className="col-flags">Flags</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {printByVehicle.map((g) => (
-                    <tr key={g.vehicle_id}>
-                      <td className="col-unit">
-                        <strong>{g.unit_number}</strong>
-                      </td>
-                      <td className="col-n">{g.issues.length}</td>
-                      <td>
-                        <ol className="shop-print-index-problems">
-                          {g.issues.map((i) => (
-                            <li key={i.id}>
-                              {issueHeadline(i)}
-                              <span className="shop-print-index-st">
-                                {" "}
-                                ({i.status.replace(/_/g, " ")})
-                              </span>
-                            </li>
-                          ))}
-                        </ol>
-                      </td>
-                      <td className="col-flags">
-                        {g.hasEmergency ? "EMERGENCY" : ""}
-                        {g.needsSchedule > 0
-                          ? `${g.hasEmergency ? " · " : ""}${g.needsSchedule} need schedule`
-                          : ""}
-                      </td>
+              <>
+                <table className="shop-print-index-table">
+                  <thead>
+                    <tr>
+                      <th className="col-unit">Unit</th>
+                      <th className="col-n">#</th>
+                      <th>Problems</th>
+                      <th className="col-flags">Flags</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {printByVehicle.map((g) => (
+                      <tr key={g.vehicle_id}>
+                        <td className="col-unit">
+                          <strong>{g.unit_number}</strong>
+                        </td>
+                        <td className="col-n">{g.issues.length}</td>
+                        <td>
+                          <ol className="shop-print-index-problems">
+                            {g.issues.map((i) => (
+                              <li key={i.id}>
+                                {issueHeadline(i)}
+                                <span className="shop-print-index-st">
+                                  {" "}
+                                  ({i.status.replace(/_/g, " ")})
+                                </span>
+                              </li>
+                            ))}
+                          </ol>
+                        </td>
+                        <td className="col-flags">
+                          {g.hasEmergency ? "EMERGENCY" : ""}
+                          {g.needsSchedule > 0
+                            ? `${g.hasEmergency ? " · " : ""}${g.needsSchedule} need schedule`
+                            : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <h2 className="shop-print-detail-title">Work detail by unit</h2>
+                {printByVehicle.map((g) => (
+                  <section key={g.vehicle_id} className="shop-print-unit-block">
+                    <header className="shop-print-unit-header">
+                      <div>
+                        <h2>Unit {g.unit_number}</h2>
+                        <p>
+                          {g.issues.length} problem{g.issues.length === 1 ? "" : "s"}
+                          {g.hasEmergency ? " · EMERGENCY" : ""}
+                          {g.needsSchedule > 0 ? ` · ${g.needsSchedule} need schedule` : ""}
+                        </p>
+                      </div>
+                    </header>
+                    <ol className="shop-print-unit-issues">
+                      {g.issues.map((i, idx) => (
+                        <li key={i.id} className="shop-print-unit-issue">
+                          <div className="shop-print-issue-top">
+                            <span className="shop-print-issue-num">{idx + 1}.</span>
+                            <strong className="shop-print-issue-title">{issueHeadline(i)}</strong>
+                            <span className="shop-print-issue-badges">
+                              {i.is_emergency ? "EMERGENCY · " : ""}
+                              {i.status.replace(/_/g, " ")}
+                              {i.scheduled_date ? ` · ${i.scheduled_date}` : ""}
+                            </span>
+                          </div>
+                          {i.issue_category && i.issue_category !== "other" && (
+                            <div className="shop-print-issue-line">
+                              Type: {driverIssueLabel(i.issue_category)}
+                            </div>
+                          )}
+                          {i.description && (
+                            <div className="shop-print-issue-line">
+                              <strong>Tech said:</strong> {i.description}
+                            </div>
+                          )}
+                          {(i.mechanic_diagnosis || i.work_performed) && (
+                            <div className="shop-print-issue-line">
+                              <strong>Shop:</strong>{" "}
+                              {[i.mechanic_diagnosis, i.work_performed]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </div>
+                          )}
+                          <div className="shop-print-issue-line muted">
+                            Reported by {i.reporter_name} · {i.severity}
+                            {i.created_at
+                              ? ` · ${String(i.created_at).replace("T", " ").slice(0, 16)}`
+                              : ""}
+                          </div>
+                          <div className="shop-print-checkline">
+                            <span>□ Done</span>
+                            <span>□ Parts needed</span>
+                            <span className="shop-print-notes-line">Notes: _______________</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
+                ))}
+                <footer className="shop-print-unit-foot">
+                  Mechanic: ________________ · Date: ________ · Work complete for listed units.
+                </footer>
+              </>
             )}
           </section>
-
-          {printByVehicle.map((g) => (
-            <section key={g.vehicle_id} className="shop-print-page shop-print-unit-page">
-              <header className="shop-print-unit-header">
-                <div>
-                  <h1>Unit {g.unit_number}</h1>
-                  <p>
-                    {g.issues.length} problem{g.issues.length === 1 ? "" : "s"}
-                    {g.hasEmergency ? " · EMERGENCY" : ""}
-                    {g.needsSchedule > 0 ? ` · ${g.needsSchedule} need schedule` : ""}
-                  </p>
-                </div>
-                <div className="shop-print-unit-meta">
-                  <div>Work order</div>
-                  <div>{printPrintedOn}</div>
-                </div>
-              </header>
-              <ol className="shop-print-unit-issues">
-                {g.issues.map((i, idx) => (
-                  <li key={i.id} className="shop-print-unit-issue">
-                    <div className="shop-print-issue-top">
-                      <span className="shop-print-issue-num">{idx + 1}.</span>
-                      <strong className="shop-print-issue-title">{issueHeadline(i)}</strong>
-                      <span className="shop-print-issue-badges">
-                        {i.is_emergency ? "EMERGENCY · " : ""}
-                        {i.status.replace(/_/g, " ")}
-                        {i.scheduled_date ? ` · ${i.scheduled_date}` : ""}
-                      </span>
-                    </div>
-                    {i.issue_category && i.issue_category !== "other" && (
-                      <div className="shop-print-issue-line">
-                        Type: {driverIssueLabel(i.issue_category)}
-                      </div>
-                    )}
-                    {i.description && (
-                      <div className="shop-print-issue-line">
-                        <strong>Tech said:</strong> {i.description}
-                      </div>
-                    )}
-                    {(i.mechanic_diagnosis || i.work_performed) && (
-                      <div className="shop-print-issue-line">
-                        <strong>Shop:</strong>{" "}
-                        {[i.mechanic_diagnosis, i.work_performed].filter(Boolean).join(" · ")}
-                      </div>
-                    )}
-                    <div className="shop-print-issue-line muted">
-                      Reported by {i.reporter_name} · {i.severity}
-                      {i.created_at
-                        ? ` · ${String(i.created_at).replace("T", " ").slice(0, 16)}`
-                        : ""}
-                    </div>
-                    <div className="shop-print-checkline">
-                      <span>□ Done</span>
-                      <span>□ Parts needed</span>
-                      <span className="shop-print-notes-line">Notes: _______________</span>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-              <footer className="shop-print-unit-foot">
-                Mechanic: ________________ · Complete all items above for this unit before release.
-              </footer>
-            </section>
-          ))}
         </div>
       )}
 
@@ -756,7 +757,7 @@ export function IssuesPage() {
       )}
 
       {canShop && common.length > 0 && (
-        <div className="card" style={{ marginBottom: "1rem" }}>
+        <div className="card no-print" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginTop: 0 }}>Common problems (90 days)</h2>
           <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
             Repeated categories help spot fleet-wide issues (tires, batteries, etc.).

@@ -5547,25 +5547,12 @@ tr.row-low td {
     display: block !important;
     color: #000 !important;
     background: #fff !important;
+    padding: 0.15in 0.25in;
   }
 
+  /* Continuous flow — no forced page break per vehicle */
   .shop-print-page {
-    break-after: page;
-    page-break-after: always;
-    padding: 0.15in 0.2in;
-    box-sizing: border-box;
-    min-height: 0;
-  }
-
-  .shop-print-page:last-child {
-    break-after: auto;
-    page-break-after: auto;
-  }
-
-  /* One vehicle = one sheet */
-  .shop-print-unit-page {
-    break-inside: avoid;
-    page-break-inside: avoid;
+    padding: 0;
   }
 
   .shop-print-header h1 {
@@ -5582,19 +5569,20 @@ tr.row-low td {
 
   .shop-print-cover-note {
     font-style: italic;
-    margin-bottom: 0.65rem !important;
+    margin-bottom: 0.5rem !important;
   }
 
   .shop-print-index-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
   }
 
   .shop-print-index-table th,
   .shop-print-index-table td {
     border: 1px solid #444;
-    padding: 0.28rem 0.35rem;
+    padding: 0.22rem 0.3rem;
     vertical-align: top;
     text-align: left;
   }
@@ -5605,27 +5593,27 @@ tr.row-low td {
   }
 
   .shop-print-index-table .col-unit {
-    width: 3.5rem;
+    width: 3.25rem;
     white-space: nowrap;
   }
 
   .shop-print-index-table .col-n {
-    width: 1.75rem;
+    width: 1.5rem;
     text-align: center;
   }
 
   .shop-print-index-table .col-flags {
-    width: 6.5rem;
-    font-size: 0.75rem;
+    width: 6rem;
+    font-size: 0.72rem;
   }
 
   .shop-print-index-problems {
     margin: 0;
-    padding-left: 1.1rem;
+    padding-left: 1rem;
   }
 
   .shop-print-index-problems li {
-    margin: 0.1rem 0;
+    margin: 0.05rem 0;
     line-height: 1.25;
   }
 
@@ -5634,31 +5622,41 @@ tr.row-low td {
     font-weight: 500;
   }
 
+  .shop-print-detail-title {
+    margin: 0.75rem 0 0.4rem;
+    font-size: 1.05rem;
+    border-bottom: 2px solid #000;
+    padding-bottom: 0.2rem;
+    color: #000;
+    break-after: avoid;
+  }
+
+  .shop-print-unit-block {
+    margin-bottom: 0.65rem;
+    /* Prefer keeping a unit block together when it fits; otherwise allow flow */
+    break-inside: auto;
+  }
+
   .shop-print-unit-header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    gap: 0.75rem;
-    border-bottom: 2px solid #000;
-    padding-bottom: 0.35rem;
-    margin-bottom: 0.5rem;
+    gap: 0.5rem;
+    border-bottom: 1.5px solid #000;
+    padding-bottom: 0.2rem;
+    margin-bottom: 0.35rem;
+    break-after: avoid;
   }
 
-  .shop-print-unit-header h1 {
+  .shop-print-unit-header h2 {
     margin: 0;
-    font-size: 1.5rem;
+    font-size: 1.15rem;
     color: #000;
   }
 
   .shop-print-unit-header p {
-    margin: 0.15rem 0 0;
-    font-size: 0.9rem;
-  }
-
-  .shop-print-unit-meta {
-    text-align: right;
-    font-size: 0.78rem;
-    color: #333;
+    margin: 0.1rem 0 0;
+    font-size: 0.82rem;
   }
 
   .shop-print-unit-issues {
@@ -5668,10 +5666,10 @@ tr.row-low td {
   }
 
   .shop-print-unit-issue {
-    border: 1px solid #555;
-    border-radius: 4px;
-    padding: 0.35rem 0.45rem;
-    margin-bottom: 0.4rem;
+    border: 1px solid #666;
+    border-radius: 3px;
+    padding: 0.28rem 0.4rem;
+    margin-bottom: 0.3rem;
     break-inside: avoid;
   }
 
@@ -5679,49 +5677,49 @@ tr.row-low td {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.25rem 0.4rem;
-    margin-bottom: 0.15rem;
+    gap: 0.2rem 0.35rem;
+    margin-bottom: 0.1rem;
   }
 
   .shop-print-issue-num {
     font-weight: 800;
-    min-width: 1.25rem;
+    min-width: 1.1rem;
   }
 
   .shop-print-issue-title {
-    font-size: 0.95rem;
-    flex: 1 1 12rem;
+    font-size: 0.9rem;
+    flex: 1 1 10rem;
   }
 
   .shop-print-issue-badges {
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     font-weight: 700;
     text-transform: uppercase;
     color: #333;
   }
 
   .shop-print-issue-line {
-    font-size: 0.8rem;
-    line-height: 1.3;
-    margin: 0.1rem 0;
+    font-size: 0.76rem;
+    line-height: 1.25;
+    margin: 0.05rem 0;
   }
 
   .shop-print-checkline {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.75rem 1rem;
-    margin-top: 0.35rem;
-    font-size: 0.78rem;
+    gap: 0.5rem 0.85rem;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
     border-top: 1px dashed #999;
-    padding-top: 0.25rem;
+    padding-top: 0.2rem;
   }
 
   .shop-print-notes-line {
-    flex: 1 1 8rem;
+    flex: 1 1 7rem;
   }
 
   .shop-print-unit-foot {
-    margin-top: 0.65rem;
+    margin-top: 0.75rem;
     padding-top: 0.35rem;
     border-top: 1px solid #000;
     font-size: 0.8rem;
