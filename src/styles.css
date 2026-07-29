@@ -1548,6 +1548,428 @@ textarea {
   color: var(--ok, #2f9e44);
 }
 
+/* License plate / unit → auto-fill vehicle */
+.vehicle-quick-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-bottom: 0.15rem;
+}
+
+.vehicle-quick-pick-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.vehicle-quick-pick-status {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.warning-text {
+  color: var(--warning, #c9a227);
+  font-weight: 600;
+}
+
+.vehicle-quick-pick-match {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--ok, #2f9e44) 40%, var(--line));
+  background: color-mix(in srgb, var(--ok, #2f9e44) 10%, var(--surface, #fff));
+}
+
+.vehicle-quick-pick-match-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  font-size: 0.88rem;
+  line-height: 1.3;
+}
+
+.vehicle-quick-pick-vin {
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.vehicle-quick-pick-hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface, #fff);
+}
+
+.vehicle-quick-pick-hit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.vehicle-quick-pick-hit:last-child {
+  border-bottom: 0;
+}
+
+.vehicle-quick-pick-hit:hover,
+.vehicle-quick-pick-hit:focus-visible {
+  background: color-mix(in srgb, var(--accent, #2563eb) 10%, transparent);
+}
+
+.vehicle-quick-pick-dropdown-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Shop job — upload parts receipts before complete */
+.shop-receipt-panel {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent, #2563eb) 6%, var(--surface, #fff));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.shop-receipt-panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.shop-receipt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.shop-receipt-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 8%, var(--surface, #fff));
+}
+
+.shop-receipt-form {
+  margin: 0;
+  gap: 0.45rem;
+}
+
+.shop-receipt-kind {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* Parts order hub (AutoZone / First Call tracking) */
+.parts-order-page {
+  max-width: 640px;
+}
+
+.parts-order-vendors {
+  margin-bottom: 0.85rem;
+}
+
+.parts-order-vendors-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.95rem;
+}
+
+.parts-order-vendor-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.parts-order-vendor-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  text-align: center;
+  text-decoration: none;
+}
+
+.parts-order-vendor-arrow {
+  opacity: 0.75;
+  font-size: 0.85em;
+}
+
+.parts-order-vendor-hint {
+  margin: 0.55rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+/* Sticky plate strip — backup when Ctrl+V on vendor site is empty */
+.parts-order-paste-helper {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  margin-bottom: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 12px;
+  border: 2px solid color-mix(in srgb, var(--warning, #c9a227) 70%, var(--line));
+  background: color-mix(in srgb, var(--warning, #c9a227) 16%, var(--surface, #fff));
+  box-shadow: 0 4px 16px color-mix(in srgb, #000 12%, transparent);
+}
+
+.parts-order-paste-helper-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.parts-order-paste-helper-steps {
+  margin: 0 0 0.5rem;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.parts-order-paste-helper-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.parts-order-paste-value {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-size: 1.25rem !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.06em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  padding: 0.55rem 0.65rem !important;
+  border: 2px solid var(--ink) !important;
+  border-radius: 10px !important;
+  background: var(--surface, #fff) !important;
+  color: var(--ink) !important;
+  cursor: text;
+}
+
+.parts-order-paste-helper-warn {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--danger, #c0392b);
+  line-height: 1.3;
+}
+
+.parts-order-vehicle-ready {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--ok, #2f9e44) 35%, var(--line));
+  background: color-mix(in srgb, var(--ok, #2f9e44) 8%, var(--surface, #fff));
+}
+
+.parts-order-vehicle-ready-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  font-size: 0.88rem;
+  line-height: 1.3;
+}
+
+.parts-order-copy-hint {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.parts-order-clipboard-ready {
+  color: var(--ok, #2f9e44);
+  font-weight: 600;
+}
+
+.parts-order-vehicle-ready-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+button.parts-order-vendor-btn {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+.parts-order-form {
+  margin-bottom: 0.75rem;
+}
+
+.parts-order-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+@media (max-width: 480px) {
+  .parts-order-two-col {
+    grid-template-columns: 1fr;
+  }
+
+  .parts-order-vendor-btns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.parts-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.parts-order-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.65rem;
+}
+
+.parts-order-meta {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+}
+
+.parts-order-notes {
+  margin: 0.3rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.parts-order-dates {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+}
+
+.parts-order-status {
+  display: inline-flex;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.parts-order-status.st-needed {
+  background: color-mix(in srgb, var(--warning, #c9a227) 18%, transparent);
+  color: var(--warning, #c9a227);
+}
+
+.parts-order-status.st-in-flight {
+  background: color-mix(in srgb, var(--accent, #2563eb) 16%, transparent);
+  color: var(--accent, #2563eb);
+}
+
+.parts-order-status.st-done {
+  background: color-mix(in srgb, var(--ok, #2f9e44) 18%, transparent);
+  color: var(--ok, #2f9e44);
+}
+
+.parts-order-status.st-closed {
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted);
+}
+
+.parts-order-card.st-needed {
+  border-left: 3px solid var(--warning, #c9a227);
+}
+
+.parts-order-card.st-in-flight {
+  border-left: 3px solid var(--accent, #2563eb);
+}
+
+.parts-order-card.st-done {
+  border-left: 3px solid var(--ok, #2f9e44);
+}
+
+.parts-order-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.35rem;
+  margin-top: 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.parts-order-pip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0;
+}
+
+.parts-order-pip.is-done,
+.parts-order-pip.is-active {
+  color: var(--ink);
+}
+
+.parts-order-pip.is-active {
+  color: var(--accent, #2563eb);
+}
+
+.parts-order-pip-line {
+  display: inline-block;
+  width: 0.65rem;
+  height: 2px;
+  margin-left: 0.15rem;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  vertical-align: middle;
+}
+
+.parts-order-pip.is-done .parts-order-pip-line {
+  background: color-mix(in srgb, var(--ok, #2f9e44) 50%, transparent);
+}
+
+.parts-order-actions {
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
 /* Time off requests */
 .time-off-page {
   max-width: 640px;
@@ -6716,21 +7138,82 @@ tr.row-low td {
   max-width: 14rem;
 }
 
-.warranty-model-serial-block {
+/* Numbered form sections — order makes the meaning clear */
+.warranty-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.75rem 0.8rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--muted) 5%, var(--surface));
+}
+
+.warranty-section-equipment {
+  border-color: color-mix(in srgb, var(--brand, #3b82f6) 40%, var(--line));
+  background: color-mix(in srgb, var(--brand, #3b82f6) 7%, var(--surface));
+}
+
+.warranty-section-part {
+  border-color: color-mix(in srgb, var(--ok, #2f9e44) 35%, var(--line));
+  background: color-mix(in srgb, var(--ok, #2f9e44) 6%, var(--surface));
+}
+
+.warranty-section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.warranty-section-num {
+  flex-shrink: 0;
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 800;
+  background: var(--ink);
+  color: var(--surface, #fff);
+  line-height: 1;
+}
+
+.warranty-section-num-inline {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-right: 0.15rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  font-size: 0.72rem;
+}
+
+.warranty-section-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.warranty-section-sub {
+  margin: 0.12rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.25;
+  font-weight: 500;
+}
+
+.warranty-ms-row {
   display: grid;
   grid-template-columns: 1fr;
   gap: 0.65rem;
-  align-items: start;
-  padding: 0.65rem 0.75rem;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--brand, #3b82f6) 5%, var(--surface));
+  align-items: end;
 }
 
 @media (min-width: 560px) {
-  .warranty-model-serial-block {
+  .warranty-ms-row {
     grid-template-columns: 1fr auto;
-    align-items: end;
   }
 }
 
@@ -6739,6 +7222,36 @@ tr.row-low td {
   grid-template-columns: 1fr 1fr;
   gap: 0.55rem;
   min-width: 0;
+}
+
+.warranty-part-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+.warranty-part-fields label:first-child {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 480px) {
+  .warranty-part-fields label:first-child {
+    grid-column: auto;
+  }
+
+  .warranty-part-fields {
+    grid-template-columns: 1.4fr 1fr;
+  }
+}
+
+.warranty-job-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+.warranty-job-fields .span-2 {
+  grid-column: 1 / -1;
 }
 
 .warranty-ms-upload {

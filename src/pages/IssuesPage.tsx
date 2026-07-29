@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
+import { PartsReceiptUploadPanel } from "../components/PartsReceiptUploadPanel";
+import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
 import {
   DRIVER_ISSUE_OPTIONS,
   SHOP_CONCERN_OPTIONS,
@@ -698,6 +700,11 @@ export function IssuesPage() {
             </button>
           )}
           {canShop && (
+            <Link className="btn secondary btn-sm" to="/parts-orders">
+              Order parts
+            </Link>
+          )}
+          {canShop && (
             <button className="btn secondary btn-sm" type="button" onClick={() => window.print()}>
               Print work order
             </button>
@@ -977,23 +984,15 @@ export function IssuesPage() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>{isDriver ? "What’s wrong?" : "Report vehicle issue"}</h2>
             <form className="form" onSubmit={createIssue}>
-              <label>
-                Vehicle
-                <select
-                  value={vehicleId}
-                  onChange={(e) => setVehicleId(e.target.value)}
-                  required
-                  disabled={submitting}
-                >
-                  <option value="">Select…</option>
-                  {vehicles.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.unit_number}
-                      {v.assigned_driver ? ` — ${v.assigned_driver}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <VehicleQuickPick
+                value={vehicleId}
+                vehicles={vehicles as VehicleMatch[]}
+                onChange={(id) => setVehicleId(id)}
+                required
+                disabled={submitting}
+                label="License plate or unit #"
+                placeholder="Type plate to find the unit…"
+              />
               <label>
                 Most common issues
                 <select
@@ -1167,7 +1166,7 @@ export function IssuesPage() {
                 {mStatus === "in_progress" &&
                   "Unit is in the shop. Log concerns and diagnostics as you go — finish details on complete."}
                 {mStatus === "completed" &&
-                  "Record what was wrong, what you tested, and what you fixed. Required for the work history."}
+                  "Record what was wrong, what you fixed, and upload parts receipts for this unit before you complete."}
                 {mStatus === "cancelled" &&
                   "This job will leave the active board. Enter why it was cancelled."}
               </p>
@@ -1332,6 +1331,11 @@ export function IssuesPage() {
                           />
                         </label>
                       </div>
+                      <PartsReceiptUploadPanel
+                        vehicleId={manage.vehicle_id}
+                        unitNumber={manage.unit_number}
+                        issueId={manage.id}
+                      />
                     </>
                   )}
                   {mStatus === "in_progress" && (
@@ -1410,6 +1414,16 @@ export function IssuesPage() {
                   {mStatus === "completed" && "Complete job"}
                   {mStatus === "cancelled" && "Cancel job"}
                 </button>
+                <Link
+                  className="btn secondary"
+                  to={`/parts-orders?vehicle=${manage.vehicle_id}&unit=${encodeURIComponent(
+                    manage.unit_number || ""
+                  )}&issue=${manage.id}&desc=${encodeURIComponent(
+                    (manage.title || manage.description || "").slice(0, 80)
+                  )}`}
+                >
+                  Order parts for unit
+                </Link>
                 <button className="btn secondary" type="button" onClick={() => setManage(null)}>
                   Close
                 </button>

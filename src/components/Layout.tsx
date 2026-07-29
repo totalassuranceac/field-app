@@ -167,6 +167,9 @@ function pathCategory(pathname: string): string {
   ) {
     return "company";
   }
+  if (pathname.startsWith("/parts-orders")) {
+    return "shop";
+  }
   return "home";
 }
 
@@ -198,6 +201,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const [timeOffPending, setTimeOffPending] = useState(0);
   /** Tool loan approvals waiting for manager / office */
   const [toolLoanPending, setToolLoanPending] = useState(0);
+  /** Open parts orders (needed / ordered / arriving) */
+  const [partsOrderPending, setPartsOrderPending] = useState(0);
   /** Open tech repair requests waiting for shop to schedule */
   const [openRepairsCount, setOpenRepairsCount] = useState(0);
   /** Open collapsible nav section (same Command Center style for every role) */
@@ -280,6 +285,14 @@ export function Layout({ children }: { children: ReactNode }) {
       } catch {
         /* optional */
       }
+      if (isMechanic || isOffice || isWarehouse || adminShell || user?.role === "admin") {
+        try {
+          const po = await api<{ pending?: number }>("/parts-orders/pending-count");
+          if (!cancelled) setPartsOrderPending(Number(po.pending) || 0);
+        } catch {
+          /* optional */
+        }
+      }
     }
     // Defer badge poll so first paint is not blocked (longer delay on cellular)
     const start = window.setTimeout(() => void poll(), 1200);
@@ -294,7 +307,17 @@ export function Layout({ children }: { children: ReactNode }) {
       window.removeEventListener("vendor-runs-changed", onVendorChange);
       window.removeEventListener("parts-dropoffs-changed", onVendorChange);
     };
-  }, [user?.id, showVendorCounter, showRepairBadge, showFuelOcrBadge]);
+  }, [
+    user?.id,
+    user?.role,
+    showVendorCounter,
+    showRepairBadge,
+    showFuelOcrBadge,
+    isMechanic,
+    isOffice,
+    isWarehouse,
+    adminShell,
+  ]);
 
   useEffect(() => {
     document.title = "Total Assurance";
@@ -525,6 +548,24 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/service",
       label: "Oil / service",
       show: adminShell || isMechanic,
+    },
+    {
+      to: "/parts-orders",
+      label: "Order parts",
+      show:
+        adminShell ||
+        isMechanic ||
+        isOffice ||
+        isWarehouse ||
+        user?.role === "admin" ||
+        user?.role === "viewer",
+      ...(partsOrderPending > 0
+        ? {
+            badge: partsOrderPending,
+            badgeAlways: false as const,
+            badgeLabel: `${partsOrderPending} open parts order${partsOrderPending === 1 ? "" : "s"}`,
+          }
+        : {}),
     },
   ];
 

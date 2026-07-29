@@ -4,6 +4,7 @@ import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { CollapsibleSection, LogItem, LogList } from "../components/CollapsibleLog";
 import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
+import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
 import {
   applyOcrLearning,
   clearOcrHintsCache,
@@ -32,14 +33,11 @@ interface Employee {
   /** Most-used gas card last-4 from their fuel history */
   gas_card_last4?: string | null;
 }
-interface Vehicle {
-  id: number;
-  unit_number: string;
-  assigned_driver?: string | null;
-  driver_employee_id?: number | null;
-  driver_name?: string | null;
+interface Vehicle extends VehicleMatch {
   /** Server: this is the logged-in tech’s usual unit */
   is_my_default?: boolean;
+  driver_employee_id?: number | null;
+  driver_name?: string | null;
 }
 interface FuelEntry {
   id: number;
@@ -754,51 +752,23 @@ export function FuelPage() {
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2>New fuel stop</h2>
           <form className="form" onSubmit={onSubmit}>
-            {/* STEP 1 — unit (usual first; full fleet so helpers can cover other vans) */}
-            <label>
-              1. Vehicle unit
-              <select
+            {/* STEP 1 — plate or unit (usual vans still in dropdown) */}
+            <div>
+              <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>1. Vehicle</p>
+              <VehicleQuickPick
                 value={vehicleId}
-                onChange={(e) => applyVehicleCrew(e.target.value)}
+                vehicles={vehicles}
+                onChange={(id) => applyVehicleCrew(id)}
                 required
-              >
-                <option value="">Select unit…</option>
-                {usualVehicles.length > 0 && (
-                  <optgroup label="Your usual unit">
-                    {usualVehicles.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.unit_number}
-                        {v.driver_name || v.assigned_driver
-                          ? ` — ${v.driver_name || v.assigned_driver}`
-                          : ""}
-                        {" (default)"}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                <optgroup
-                  label={
-                    usualVehicles.length
-                      ? "Other vans (rode with someone else)"
-                      : "All active units"
-                  }
-                >
-                  {(usualVehicles.length ? otherVehicles : vehicles).map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.unit_number}
-                      {v.driver_name || v.assigned_driver
-                        ? ` — ${v.driver_name || v.assigned_driver}`
-                        : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              </select>
-            </label>
+                label="License plate or unit #"
+                placeholder="Type plate to auto-fill unit…"
+              />
+            </div>
             {crewNote && <div className="info-banner">{crewNote}</div>}
             {isDriver && (
               <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
-                Default is your usual van. If you rode with another tech today, pick their unit
-                under <strong>Other vans</strong>.
+                Default is your usual van. Type a plate or pick another unit if you rode with someone
+                else.
               </p>
             )}
 

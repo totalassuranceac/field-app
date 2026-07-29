@@ -261,21 +261,60 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "plate-lookup",
+    title: "Find a unit by license plate",
+    summary:
+      "Type a plate (or unit #) on fuel, repairs, service, or parts order forms — the app fills unit, year/make/model, and driver.",
+    roles: ["mechanic", "driver", "office", "admin", "warehouse"],
+    path: "/fuel",
+    steps: [
+      "On any form that asks for a vehicle, use License plate or unit #.",
+      "Type the plate (spaces/dashes optional) or the unit number.",
+      "When it matches, unit details appear — confirm, then continue the form.",
+      "If several match, tap the right one. Or use Or pick unit under the field.",
+    ],
+    tips: [
+      "Plate data comes from the fleet registry — keep plates updated under Vehicles.",
+      "On oil change log, matching a unit can also suggest the current odometer.",
+    ],
+  },
+  {
+    id: "shop-parts-order",
+    title: "Order parts (AutoZone / First Call)",
+    summary:
+      "Open AutoZone Pro or First Call Online from the app, log what you need, track Needed → Ordered → Arriving → Received.",
+    roles: ["mechanic", "office", "warehouse", "admin"],
+    path: "/parts-orders",
+    steps: [
+      "Open Order parts under Shop.",
+      "Type the vehicle plate (or unit #) — when it matches, the plate is copied to the clipboard automatically.",
+      "Open AutoZone or First Call → click their plate field → Ctrl+V (already ready; no extra copy button).",
+      "If paste is empty, use Copy again on the yellow bar.",
+      "Save the part on the order list, then Mark ordered / Arriving / Received as it moves.",
+    ],
+    tips: [
+      "Their catalogs don’t let us pre-fill the plate in the link — auto-copy on select + paste is the workaround.",
+      "After you buy, log the invoice under Parts receipts if it was a company card.",
+    ],
+  },
+  {
     id: "field-warranty",
     title: "Drop off a warranty part",
-    summary: "Model & serial required · nameplate photo helps · log number on the box.",
+    summary:
+      "Part name + equipment unit model/serial (not the part) · unit nameplate photo helps · log number on the box.",
     roles: ["driver", "warehouse", "office", "admin"],
     path: "/warranties",
     steps: [
       "Open Warranties (Warehouse menu).",
-      "Enter part name. Model # and serial # of the unit the part came off are required.",
-      "Optional: photo the unit nameplate — fill the frame with M/N and S/N (avoid metal glare).",
-      "Add service address when you can — warehouse uses it later to find who sold the part.",
-      "Photo the shelf or bin where you leave the part (required).",
+      "Step 1 — Equipment: enter model # and serial # from the unit nameplate the part came off of (optional nameplate photo auto-fills).",
+      "Step 2 — Warranty part: enter the failed part name (and optional SKU).",
+      "Step 3 — Job details if you have them (address helps warehouse later).",
+      "Step 4 — Photo the shelf or bin where you leave the part (required).",
       "Submit — a popup shows the warranty log number (e.g. W0726-001).",
       "Write that number on the box, then tap Got it — take me home.",
     ],
     tips: [
+      "Section 1 is always the equipment unit; section 2 is the part on the box — don’t mix them up.",
       "Do not skip the number on the box — warehouse matches it to your drop-off photo.",
       "When you fix a wrong model/serial from a nameplate scan, the app learns for next time.",
     ],
@@ -283,19 +322,19 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "field-parts-receipt",
     title: "Submit a parts purchase receipt",
-    summary: "Photo company-card invoices and packing slips instead of turning paper in.",
+    summary:
+      "Photo the invoice, link it to the vehicle you worked on — all parts for that unit stay together.",
     roles: ["driver", "mechanic", "warehouse", "office", "admin"],
     path: "/parts-receipts",
     steps: [
-      "Open Parts receipts (Warehouse menu).",
-      "Choose Vendor pickup (invoice / packing slip #) or Other store (Home Depot, etc.).",
-      "For vendor pickups: enter vendor name + invoice or packing slip number.",
-      "For other stores: enter the store name; add total/card last 4 if helpful.",
-      "Take a clear photo of the full receipt or packing slip.",
-      "Check what the scan filled in — fix anything wrong so the app learns.",
-      "Save. Office/warehouse can see the submission; no paper turn-in needed.",
+      "On the shop board, open the job and set status to Completed.",
+      "Fill work performed / parts used, then use Parts receipts for this job — Upload parts receipt.",
+      "Photo the invoice, enter vendor + invoice #, save (tied to that unit and ticket).",
+      "Add more receipts if needed, then tap Complete job.",
+      "Office can also browse Parts receipts grouped by vehicle.",
     ],
     tips: [
+      "Upload receipts on the completed job screen so they stay with that repair and unit.",
       "Each correction you make teaches the scanner where invoice # and vendor sit on that vendor’s slip.",
     ],
   },

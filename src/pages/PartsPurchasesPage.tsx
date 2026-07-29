@@ -1,7 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, OfflineQueuedError, can } from "../api";
 import { useAuth } from "../auth";
 import { PhotoCapture } from "../components/PhotoCapture";
+import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
 import {
   ocrPartsReceiptImage,
   loadOcrHints,
@@ -19,6 +21,14 @@ interface PartsReceipt {
   card_last4: string | null;
   notes: string | null;
   receipt_key: string;
+  vehicle_id?: number | null;
+  issue_id?: number | null;
+  parts_order_id?: number | null;
+  vehicle_unit?: string | null;
+  vehicle_plate?: string | null;
+  vehicle_year?: number | null;
+  vehicle_make?: string | null;
+  vehicle_model?: string | null;
   purchased_by_name?: string | null;
   created_at: string;
 }
@@ -57,7 +67,14 @@ async function compressPhoto(file: File, maxBytes = 850_000): Promise<File> {
 
 export function PartsPurchasesPage() {
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
   const canLog = can(user, "logPartsPurchase");
+  const isMechanic = user?.role === "mechanic" || user?.role === "driver";
+  const canViewAll =
+    user?.role === "admin" ||
+    user?.role === "office" ||
+    user?.role === "warehouse" ||
+    user?.role === "viewer";
 
   const [kind, setKind] = useState<"vendor" | "other">("vendor");
   const [vendorName, setVendorName] = useState("");
@@ -67,6 +84,12 @@ export function PartsPurchasesPage() {
   const [cardLast4, setCardLast4] = useState("");
   const [notes, setNotes] = useState("");
   const [vendors, setVendors] = useState<string[]>([]);
+  const [vehicles, setVehicles] = useState<VehicleMatch[]>([]);
+  const [vehicleId, setVehicleId] = useState(() => searchParams.get("vehicle") || "");
+  const [selectedVehicle, setSelectedVehicle] = useState<VehicleMatch | null>(null);
+  const [issueId] = useState(() => searchParams.get("issue") || "");
+  const [partsOrderId] = useState(() => searchParams.get("order") || "");
+  const [listFilter, setListFilter] = useState<"mine" | "all" | "vehicle">("mine");
 
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -81,19 +104,39 @@ export function PartsPurchasesPage() {
   const [busy, setBusy] = useState(false);
 
   async function loadList() {
-    const d = await api<{ receipts: PartsReceipt[] }>("/parts-purchases?mine=1");
+    const q = new URLSearchParams();
+    if (listFilter === "mine" || !canViewAll) q.set("mine", "1");
+    if (listFilter === "vehicle" && vehicleId) q.set("vehicle_id", vehicleId);
+    // Office viewing one unit's full parts history
+    if (listFilter === "all" && vehicleId) q.set("vehicle_id", vehicleId);
+    const d = await api<{ receipts: PartsReceipt[] }>(
+      `/parts-purchases?${q.toString()}`
+    );
     setList(d.receipts || []);
   }
 
   useEffect(() => {
     loadList().catch((e) => setError(e.message));
+  }, [listFilter, vehicleId, canViewAll]);
+
+  useEffect(() => {
     if (canLog) {
       api<{ vendors: string[] }>("/parts-purchases/vendors")
         .then((d) => setVendors(d.vendors || []))
         .catch(() => {});
       loadOcrHints((path) => api(path)).then(setHints).catch(() => {});
+      api<{ vehicles: VehicleMatch[] }>("/vehicles?filter=active")
+        .then((r) => setVehicles(r.vehicles || []))
+        .catch(() => {});
     }
   }, [canLog]);
+
+  // Prefill vehicle from deep link once list loads
+  useEffect(() => {
+    if (!vehicleId || selectedVehicle) return;
+    const hit = vehicles.find((v) => String(v.id) === vehicleId);
+    if (hit) setSelectedVehicle(hit);
+  }, [vehicleId, vehicles, selectedVehicle]);
 
   useEffect(() => {
     return () => {
@@ -157,6 +200,11 @@ export function PartsPurchasesPage() {
     onPhotoPick(null);
     setOcrNote("");
     setLastOcr(null);
+    // Keep vehicle if deep-linked from shop / order parts
+    if (!searchParams.get("vehicle")) {
+      setVehicleId("");
+      setSelectedVehicle(null);
+    }
   }
 
   async function submit(e: FormEvent) {
@@ -171,6 +219,10 @@ export function PartsPurchasesPage() {
     }
     if (kind === "vendor" && !invoiceNumber.trim()) {
       setError("Invoice or packing slip number is required for vendor pickups.");
+      return;
+    }
+    if (isMechanic && !vehicleId) {
+      setError("Select the vehicle this parts purchase was for.");
       return;
     }
     setBusy(true);
@@ -218,18 +270,25 @@ export function PartsPurchasesPage() {
           card_last4: cardLast4.replace(/\D/g, "").slice(-4) || null,
           notes: notes.trim() || null,
           receipt_key: up.key,
+          vehicle_id: vehicleId ? Number(vehicleId) : null,
+          issue_id: issueId ? Number(issueId) : null,
+          parts_order_id: partsOrderId ? Number(partsOrderId) : null,
           ocr_feedback,
         }),
       });
 
+      const unitBit = selectedVehicle
+        ? ` for unit ${selectedVehicle.unit_number}`
+        : vehicleId
+          ? " (vehicle linked)"
+          : "";
       setOk(
         kind === "vendor"
-          ? `Saved ${vendorName.trim()} invoice ${invoiceNumber.trim()} with photo. Thanks — no paper turn-in needed.`
-          : `Saved ${vendorName.trim()} purchase receipt. Thanks — no paper turn-in needed.`
+          ? `Saved ${vendorName.trim()} invoice ${invoiceNumber.trim()}${unitBit}.`
+          : `Saved ${vendorName.trim()} receipt${unitBit}.`
       );
       resetForm();
       await loadList();
-      // Refresh OCR hints after learning
       loadOcrHints((path) => api(path)).then(setHints).catch(() => {});
     } catch (err) {
       if (err instanceof OfflineQueuedError) {
@@ -242,6 +301,24 @@ export function PartsPurchasesPage() {
       setBusy(false);
     }
   }
+
+  const byVehicle = useMemo(() => {
+    const map = new Map<string, { label: string; receipts: PartsReceipt[]; total: number }>();
+    for (const r of list) {
+      const key = r.vehicle_id ? String(r.vehicle_id) : "none";
+      const label = r.vehicle_unit
+        ? `Unit ${r.vehicle_unit}${r.vehicle_plate ? ` · ${r.vehicle_plate}` : ""}`
+        : "No vehicle linked";
+      let g = map.get(key);
+      if (!g) {
+        g = { label, receipts: [], total: 0 };
+        map.set(key, g);
+      }
+      g.receipts.push(r);
+      if (r.total_cost != null) g.total += Number(r.total_cost);
+    }
+    return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [list]);
 
   if (!canLog && !can(user, "viewPartsPurchase")) {
     return (
@@ -258,8 +335,8 @@ export function PartsPurchasesPage() {
         <div>
           <h1>Parts receipts</h1>
           <p>
-            Photo company-card purchases and vendor packing slips here instead of turning paper in.
-            The app reads invoice # and vendor when it can — and gets smarter when you correct it.
+            Photo the receipt after you buy parts. Link it to the vehicle so all parts for that unit
+            stay together.
           </p>
         </div>
       </div>
@@ -270,6 +347,27 @@ export function PartsPurchasesPage() {
       {canLog && (
         <form className="card warranty-form" onSubmit={submit}>
           <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Submit a purchase receipt</h2>
+
+          <div className="span-2" style={{ marginBottom: "0.75rem" }}>
+            <VehicleQuickPick
+              value={vehicleId}
+              vehicles={vehicles}
+              onChange={(id, v) => {
+                setVehicleId(id);
+                setSelectedVehicle(v);
+              }}
+              required={isMechanic}
+              disabled={busy}
+              label="Vehicle this purchase was for *"
+              placeholder="Type plate or unit worked on…"
+            />
+            {selectedVehicle && (
+              <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
+                Parts history will show under unit {selectedVehicle.unit_number}
+                {selectedVehicle.plate ? ` · ${selectedVehicle.plate}` : ""}
+              </p>
+            )}
+          </div>
 
           <div className="warranty-filters" style={{ marginBottom: "0.75rem" }}>
             <button
@@ -292,8 +390,8 @@ export function PartsPurchasesPage() {
 
           <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
             {kind === "vendor"
-              ? "Picking up at Johnstone, Ferguson, etc.? Enter vendor + invoice or packing slip #, then photo the slip."
-              : "Home Depot, Lowe’s, Ace, etc.? Enter the store name (and total if you want), then photo the receipt."}
+              ? "Johnstone, AutoZone, First Call, etc. — vendor + invoice #, then photo the slip."
+              : "Home Depot, Lowe’s, Ace — store name, then photo the receipt."}
           </p>
 
           <div className="warranty-form-grid">
@@ -304,7 +402,7 @@ export function PartsPurchasesPage() {
                 value={vendorName}
                 onChange={(e) => setVendorName(e.target.value)}
                 required
-                placeholder={kind === "vendor" ? "e.g. Johnstone" : "e.g. Home Depot"}
+                placeholder={kind === "vendor" ? "e.g. AutoZone / Johnstone" : "e.g. Home Depot"}
                 disabled={busy}
               />
               <datalist id="parts-vendor-list">
@@ -363,7 +461,7 @@ export function PartsPurchasesPage() {
               <input
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="Job / truck / why purchased"
+                placeholder="What was purchased / job notes"
                 disabled={busy}
               />
             </label>
@@ -376,7 +474,7 @@ export function PartsPurchasesPage() {
               hint={
                 scanning
                   ? "Reading receipt…"
-                  : "Take photo of the full invoice or packing slip. Whole page in frame works best."
+                  : "Take photo of the full invoice or packing slip."
               }
               previewUrl={preview}
               onPick={(f) => onPhotoPick(f)}
@@ -387,34 +485,105 @@ export function PartsPurchasesPage() {
           {ocrNote && <div className="info-banner">{ocrNote}</div>}
 
           <button className="btn" type="submit" disabled={busy || scanning || !photoFile}>
-            {busy ? "Saving…" : scanning ? "Still reading…" : "Save receipt photo"}
+            {busy ? "Saving…" : scanning ? "Still reading…" : "Save receipt"}
           </button>
         </form>
       )}
 
-      <h2 style={{ fontSize: "1rem", marginTop: "1.25rem" }}>Your recent submissions</h2>
+      <div className="filters no-print" style={{ margin: "1rem 0 0.5rem" }}>
+        <button
+          type="button"
+          className={`chip ${listFilter === "mine" ? "active" : ""}`}
+          onClick={() => setListFilter("mine")}
+        >
+          Mine
+        </button>
+        {canViewAll && (
+          <button
+            type="button"
+            className={`chip ${listFilter === "all" ? "active" : ""}`}
+            onClick={() => setListFilter("all")}
+          >
+            All
+          </button>
+        )}
+        {vehicleId && (
+          <button
+            type="button"
+            className={`chip ${listFilter === "vehicle" ? "active" : ""}`}
+            onClick={() => setListFilter("vehicle")}
+          >
+            This unit
+          </button>
+        )}
+      </div>
+
+      <h2 style={{ fontSize: "1rem", marginTop: "0.5rem" }}>
+        {listFilter === "vehicle" && selectedVehicle
+          ? `Parts for unit ${selectedVehicle.unit_number}`
+          : "Receipts by vehicle"}
+      </h2>
       {list.length === 0 ? (
         <p className="muted">No parts receipts yet.</p>
       ) : (
-        <ul className="log-list" style={{ listStyle: "none", padding: 0 }}>
-          {list.map((r) => (
-            <li key={r.id} className="card log-item" style={{ marginBottom: "0.5rem" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem" }}>
-                <strong>{r.vendor_name}</strong>
-                <span className="muted" style={{ fontSize: "0.8rem" }}>
-                  {r.purchase_kind === "vendor" ? "Vendor" : "Other"}
+        byVehicle.map((g) => (
+          <section key={g.label} style={{ marginBottom: "1rem" }}>
+            <h3
+              style={{
+                fontSize: "0.95rem",
+                margin: "0 0 0.4rem",
+                display: "flex",
+                justifyContent: "space-between",
+                gap: "0.5rem",
+                flexWrap: "wrap",
+              }}
+            >
+              <span>{g.label}</span>
+              {g.total > 0 && (
+                <span className="muted" style={{ fontWeight: 600 }}>
+                  ${g.total.toFixed(2)} total
                 </span>
-              </div>
-              <div className="muted" style={{ fontSize: "0.85rem" }}>
-                {r.invoice_number ? `Inv ${r.invoice_number}` : "No invoice #"}
-                {r.total_cost != null ? ` · $${Number(r.total_cost).toFixed(2)}` : ""}
-                {r.card_last4 ? ` · ••${r.card_last4}` : ""}
-                {r.purchase_date ? ` · ${r.purchase_date}` : ""}
-              </div>
-              {r.notes ? <div style={{ fontSize: "0.85rem" }}>{r.notes}</div> : null}
-            </li>
-          ))}
-        </ul>
+              )}
+            </h3>
+            <ul className="log-list" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {g.receipts.map((r) => (
+                <li key={r.id} className="card log-item" style={{ marginBottom: "0.5rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem" }}>
+                    <strong>{r.vendor_name}</strong>
+                    <span className="muted" style={{ fontSize: "0.8rem" }}>
+                      {r.purchase_kind === "vendor" ? "Vendor" : "Other"}
+                    </span>
+                  </div>
+                  <div className="muted" style={{ fontSize: "0.85rem" }}>
+                    {r.invoice_number ? `Inv ${r.invoice_number}` : "No invoice #"}
+                    {r.total_cost != null ? ` · $${Number(r.total_cost).toFixed(2)}` : ""}
+                    {r.card_last4 ? ` · ••${r.card_last4}` : ""}
+                    {r.purchase_date ? ` · ${r.purchase_date}` : ""}
+                    {r.purchased_by_name ? ` · ${r.purchased_by_name}` : ""}
+                  </div>
+                  {r.notes ? <div style={{ fontSize: "0.85rem" }}>{r.notes}</div> : null}
+                  {r.receipt_key ? (
+                    <a
+                      href={`/api/uploads/${encodeURIComponent(r.receipt_key)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: "0.85rem" }}
+                    >
+                      View photo
+                    </a>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))
+      )}
+
+      {isMechanic && (
+        <p className="muted" style={{ marginTop: "1rem", fontSize: "0.85rem" }}>
+          Tip: on a shop job set status to <strong>Completed</strong> and upload receipts there
+          before you finish the job. This page is for browsing history by vehicle.
+        </p>
       )}
     </div>
   );

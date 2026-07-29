@@ -236,15 +236,13 @@ export function WarrantiesPage() {
       ].filter(Boolean);
       if (parts.length) {
         setNameplateNote(
-          `Read from nameplate (${parsed.confidence}): ${parts.join(" · ")}. Check & fix if needed — the app learns from corrections.`
+          `Filled from nameplate (${parsed.confidence}): ${parts.join(" · ")}. Check & fix if needed.`
         );
       } else {
-        setNameplateNote(
-          "Couldn’t read model/serial clearly — enter them from the nameplate, then save. Photo still helps warehouse."
-        );
+        setNameplateNote("Couldn’t read clearly — type model & serial from the nameplate.");
       }
     } catch {
-      setNameplateNote("Nameplate scan unavailable — type model and serial, then save.");
+      setNameplateNote("Scan unavailable — type model & serial from the nameplate.");
     } finally {
       setNameplateScanning(false);
     }
@@ -268,11 +266,15 @@ export function WarrantiesPage() {
   async function submitDropoff(e: FormEvent) {
     e.preventDefault();
     if (!model.trim()) {
-      setError("Unit model number is required (equipment the part was removed from).");
+      setError(
+        "Equipment model # is required — from the unit the part was removed from (not the part itself)."
+      );
       return;
     }
     if (!serial.trim()) {
-      setError("Unit serial number is required (equipment the part was removed from).");
+      setError(
+        "Equipment serial # is required — from the unit the part was removed from (not the part itself)."
+      );
       return;
     }
     if (!photoFile) {
@@ -471,114 +473,155 @@ export function WarrantiesPage() {
 
       <form className="card warranty-form" onSubmit={submitDropoff}>
         <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Log warranty part drop-off</h2>
-        <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-          Model # and serial # of the unit are required. Use the small{" "}
-          <strong>📷 Photo</strong> next to them for the nameplate (optional — auto-fills). Location
-          photo is required before drop-off.
-        </p>
+
         <div className="warranty-form-grid">
-          <label>
-            Part name *
-            <input
-              value={partName}
-              onChange={(e) => setPartName(e.target.value)}
-              required
-              placeholder="e.g. Contactor 40A"
-            />
-          </label>
-          <label>
-            Part code
-            <input value={partCode} onChange={(e) => setPartCode(e.target.value)} placeholder="SKU" />
-          </label>
+          {/* 1 — Equipment first (unit the part came off) */}
+          <section className="span-2 warranty-section warranty-section-equipment">
+            <header className="warranty-section-head">
+              <span className="warranty-section-num" aria-hidden>
+                1
+              </span>
+              <div>
+                <h3 className="warranty-section-title">Equipment this part came off</h3>
+                <p className="warranty-section-sub">Furnace, condenser, air handler nameplate</p>
+              </div>
+            </header>
+            <div className="warranty-ms-row">
+              <div className="warranty-ms-fields">
+                <label>
+                  Model #
+                  <input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    required
+                    placeholder="M/N"
+                    autoComplete="off"
+                    autoFocus
+                  />
+                </label>
+                <label>
+                  Serial #
+                  <input
+                    value={serial}
+                    onChange={(e) => setSerial(e.target.value)}
+                    required
+                    placeholder="S/N"
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+              <div className="warranty-ms-upload">
+                <span className="warranty-ms-upload-label muted">Nameplate photo</span>
+                <PhotoCapture
+                  compact
+                  label="Nameplate"
+                  hint={nameplateScanning ? "Reading…" : "Optional — auto-fills above"}
+                  tip={PHOTO_TIPS.nameplate}
+                  previewUrl={nameplatePreview}
+                  onPick={(f) => onNameplatePick(f)}
+                  onClear={() => onNameplatePick(null)}
+                  disabled={busy || nameplateScanning}
+                />
+              </div>
+            </div>
+            {nameplateNote ? (
+              <div className="info-banner" style={{ marginTop: "0.5rem" }}>
+                {nameplateNote}
+              </div>
+            ) : null}
+          </section>
 
-          <div className="span-2 warranty-model-serial-block">
-            <div className="warranty-ms-fields">
+          {/* 2 — Failed part being left for warranty */}
+          <section className="span-2 warranty-section warranty-section-part">
+            <header className="warranty-section-head">
+              <span className="warranty-section-num" aria-hidden>
+                2
+              </span>
+              <div>
+                <h3 className="warranty-section-title">Warranty part you are dropping off</h3>
+                <p className="warranty-section-sub">The failed part on the box</p>
+              </div>
+            </header>
+            <div className="warranty-part-fields">
               <label>
-                Unit model # *
+                Part name *
                 <input
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  value={partName}
+                  onChange={(e) => setPartName(e.target.value)}
                   required
-                  placeholder="From unit nameplate"
-                  autoComplete="off"
+                  placeholder="e.g. Contactor 40A"
                 />
               </label>
               <label>
-                Unit serial # *
+                Part code
                 <input
-                  value={serial}
-                  onChange={(e) => setSerial(e.target.value)}
-                  required
-                  placeholder="From unit nameplate"
-                  autoComplete="off"
+                  value={partCode}
+                  onChange={(e) => setPartCode(e.target.value)}
+                  placeholder="SKU (optional)"
                 />
               </label>
             </div>
-            <div className="warranty-ms-upload">
-              <span className="warranty-ms-upload-label muted">Nameplate (optional)</span>
-              <PhotoCapture
-                compact
-                label="Nameplate"
-                hint={
-                  nameplateScanning
-                    ? "Reading…"
-                    : "Photo data plate to auto-fill model & serial"
-                }
-                tip={PHOTO_TIPS.nameplate}
-                previewUrl={nameplatePreview}
-                onPick={(f) => onNameplatePick(f)}
-                onClear={() => onNameplatePick(null)}
-                disabled={busy || nameplateScanning}
-              />
-            </div>
-          </div>
-          {nameplateNote ? (
-            <div className="span-2 info-banner" style={{ marginTop: 0 }}>
-              {nameplateNote}
-            </div>
-          ) : null}
+          </section>
 
-          <label className="span-2">
-            Service address
-            <input
-              value={address}
-              onChange={(e) => setAddress(e.target.value)}
-              placeholder="Job site address"
-            />
-          </label>
-          <label>
-            Customer
-            <input value={customer} onChange={(e) => setCustomer(e.target.value)} />
-          </label>
-          <label>
-            Vendor
-            <input
-              value={vendor}
-              onChange={(e) => setVendor(e.target.value)}
-              placeholder="e.g. Johnstone"
-            />
-          </label>
-          <label className="span-2">
-            Notes
-            <input
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="e.g. left on blue shelf by door"
-            />
-          </label>
+          {/* 3 — Job context */}
+          <section className="span-2 warranty-section warranty-section-job">
+            <header className="warranty-section-head">
+              <span className="warranty-section-num" aria-hidden>
+                3
+              </span>
+              <div>
+                <h3 className="warranty-section-title">Job details</h3>
+                <p className="warranty-section-sub">Optional but helps warehouse</p>
+              </div>
+            </header>
+            <div className="warranty-job-fields">
+              <label className="span-2">
+                Service address
+                <input
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="Job site address"
+                />
+              </label>
+              <label>
+                Customer
+                <input value={customer} onChange={(e) => setCustomer(e.target.value)} />
+              </label>
+              <label>
+                Vendor
+                <input
+                  value={vendor}
+                  onChange={(e) => setVendor(e.target.value)}
+                  placeholder="e.g. Johnstone"
+                />
+              </label>
+              <label className="span-2">
+                Notes
+                <input
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="e.g. left on blue shelf by door"
+                />
+              </label>
+            </div>
+          </section>
 
+          {/* 4 — Where you left it */}
           <div className="span-2 warranty-location-row">
             <div className="warranty-location-text">
               <strong>
-                Drop-off location photo *
+                <span className="warranty-section-num warranty-section-num-inline" aria-hidden>
+                  4
+                </span>{" "}
+                Where you left the part *
                 {!photoFile ? (
-                  <span className="warranty-need-photo"> — required</span>
+                  <span className="warranty-need-photo"> — photo required</span>
                 ) : (
                   <span className="muted"> — attached</span>
                 )}
               </strong>
               <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.82rem" }}>
-                Shelf, bin, or counter where you left the part
+                Shelf, bin, or counter
               </p>
             </div>
             <PhotoCapture
@@ -676,9 +719,9 @@ export function WarrantiesPage() {
               }
             >
               <div className="warranty-meta muted">
-                {w.part_code ? `${w.part_code} · ` : ""}
-                {w.model_number ? `Model ${w.model_number}` : ""}
-                {w.serial_number ? ` · S/N ${w.serial_number}` : ""}
+                {w.part_code ? `Part ${w.part_code} · ` : ""}
+                {w.model_number ? `Unit model ${w.model_number}` : ""}
+                {w.serial_number ? ` · Unit S/N ${w.serial_number}` : ""}
               </div>
               {w.service_address ? <div className="warranty-meta">{w.service_address}</div> : null}
               {w.customer_name ? (
@@ -699,7 +742,7 @@ export function WarrantiesPage() {
                       />
                     </a>
                     <span className="muted" style={{ fontSize: "0.75rem" }}>
-                      Nameplate · tap to enlarge
+                      Unit nameplate · tap to enlarge
                     </span>
                   </div>
                 ) : null}

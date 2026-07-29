@@ -775,6 +775,12 @@ export function DashboardPage() {
     if (isMechanic) {
       return [
         { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs & schedule", primary: true },
+        {
+          to: "/parts-orders",
+          icon: "🛒",
+          title: "Order parts",
+          hint: "AutoZone · First Call · track",
+        },
         { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Receipt photo · odometer" },
         { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card purchases" },
         { to: "/yard", icon: "📋", title: "Yard walk", hint: "Stickers · cams · GPS" },
@@ -787,6 +793,12 @@ export function DashboardPage() {
     if (isAdminShell) {
       return [
         { to: "/issues", icon: "🔧", title: "Repairs", hint: "Shop + field requests", primary: true },
+        {
+          to: "/parts-orders",
+          icon: "🛒",
+          title: "Order parts",
+          hint: "AutoZone · First Call · track",
+        },
         { to: "/inventory", icon: "📦", title: "Warehouse", hint: "Stock · pickup · stage" },
         { to: "/warranties", icon: "🧾", title: "Warranties", hint: "Drop-offs to process" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet on the road" },

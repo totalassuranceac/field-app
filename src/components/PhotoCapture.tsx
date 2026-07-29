@@ -9,7 +9,7 @@ export const PHOTO_TIPS = {
   receipt:
     "Fill the frame · flat lighting · no glare on shiny paper · hold still until it snaps.",
   nameplate:
-    "Fill the frame with M/N and S/N · avoid glare on metal · hold square to the plate.",
+    "Equipment nameplate · fill frame with M/N & S/N · avoid metal glare.",
   dropoff: "Show the shelf or spot clearly so warehouse can find the box.",
 } as const;
 

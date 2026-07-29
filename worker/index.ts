@@ -1601,6 +1601,66 @@ async function syncFleetInsuranceToCompanyVehicles(
   return n;
 }
 
+/**
+ * Fast vehicle lookup by license plate, unit #, or VIN (for form auto-fill).
+ * Query: ?q= or ?plate=  (2+ chars). Returns best matches first.
+ */
+api.get("/vehicles/lookup", async (c) => {
+  const raw = (c.req.query("q") || c.req.query("plate") || c.req.query("unit") || "").trim();
+  if (raw.length < 2) {
+    return c.json({ vehicles: [], query: raw });
+  }
+  const alnum = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const like = `%${raw.replace(/%/g, "").replace(/_/g, "")}%`;
+  const alnumLike = alnum ? `%${alnum}%` : like;
+
+  try {
+    // Prefer plate match, then unit, then VIN. Active first.
+    const rows = await c.env.DB.prepare(
+      `SELECT id, unit_number, plate, year, make, model, vin, status,
+              current_odometer, assigned_driver, phone
+       FROM vehicles
+       WHERE status != 'retired'
+         AND (
+           upper(replace(replace(replace(ifnull(plate,''),'-',''),' ',''),'.','')) LIKE ?
+           OR upper(ifnull(unit_number,'')) LIKE upper(?)
+           OR upper(replace(ifnull(vin,''),' ','')) LIKE ?
+           OR upper(ifnull(make,'')) || ' ' || upper(ifnull(model,'')) LIKE upper(?)
+         )
+       ORDER BY
+         CASE
+           WHEN upper(replace(replace(replace(ifnull(plate,''),'-',''),' ',''),'.','')) = ? THEN 0
+           WHEN upper(replace(replace(replace(ifnull(plate,''),'-',''),' ',''),'.','')) LIKE ? THEN 1
+           WHEN upper(ifnull(unit_number,'')) = upper(?) THEN 2
+           WHEN upper(ifnull(unit_number,'')) LIKE upper(?) THEN 3
+           ELSE 4
+         END,
+         CASE status WHEN 'active' THEN 0 ELSE 1 END,
+         unit_number
+       LIMIT 12`
+    )
+      .bind(
+        alnumLike,
+        like,
+        alnumLike,
+        like,
+        alnum,
+        alnum + "%",
+        raw,
+        like
+      )
+      .all();
+
+    return c.json({
+      vehicles: rows.results || [],
+      query: raw,
+      normalized: alnum,
+    });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e), vehicles: [] }, 500);
+  }
+});
+
 api.get("/vehicles", async (c) => {
   const filter = c.req.query("filter");
   /**
@@ -2643,19 +2703,48 @@ api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c)
 
 // ——— Parts purchase receipts (company card / vendor invoice photos) ———
 
+let partsPurchaseVehicleColsReady = false;
+async function ensurePartsPurchaseVehicleCols(db: D1Database): Promise<void> {
+  if (partsPurchaseVehicleColsReady) return;
+  for (const sql of [
+    `ALTER TABLE parts_purchase_receipts ADD COLUMN vehicle_id INTEGER`,
+    `ALTER TABLE parts_purchase_receipts ADD COLUMN issue_id INTEGER`,
+    `ALTER TABLE parts_purchase_receipts ADD COLUMN parts_order_id INTEGER`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_purch_vehicle ON parts_purchase_receipts(vehicle_id, created_at DESC)`,
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  partsPurchaseVehicleColsReady = true;
+}
+
 api.get("/parts-purchases", requireRoles(ROLE_PERMS.viewPartsPurchase), async (c) => {
   const user = c.get("user");
+  await ensurePartsPurchaseVehicleCols(c.env.DB);
   const mine = c.req.query("mine") === "1";
+  const vehicleId = Number(c.req.query("vehicle_id") || 0);
   try {
-    let sql = `SELECT p.*, u.display_name as purchased_by_name
+    let sql = `SELECT p.*, u.display_name as purchased_by_name,
+        v.unit_number as vehicle_unit, v.plate as vehicle_plate,
+        v.year as vehicle_year, v.make as vehicle_make, v.model as vehicle_model
        FROM parts_purchase_receipts p
-       LEFT JOIN users u ON u.id = p.purchased_by_user_id`;
+       LEFT JOIN users u ON u.id = p.purchased_by_user_id
+       LEFT JOIN vehicles v ON v.id = p.vehicle_id`;
     const binds: unknown[] = [];
+    const where: string[] = [];
     if (mine || user.role === "driver") {
-      sql += ` WHERE p.purchased_by_user_id = ?`;
+      where.push(`p.purchased_by_user_id = ?`);
       binds.push(user.id);
     }
-    sql += ` ORDER BY p.created_at DESC LIMIT 100`;
+    if (vehicleId > 0) {
+      where.push(`p.vehicle_id = ?`);
+      binds.push(vehicleId);
+    }
+    if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
+    sql += ` ORDER BY p.created_at DESC LIMIT 150`;
     const rows = await c.env.DB.prepare(sql).bind(...binds).all();
     return c.json({ receipts: rows.results || [] });
   } catch (e) {
@@ -2702,6 +2791,7 @@ api.get("/parts-purchases/vendors", requireRoles(ROLE_PERMS.logPartsPurchase), a
 
 api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
   const user = c.get("user");
+  await ensurePartsPurchaseVehicleCols(c.env.DB);
   const body = await c.req.json<{
     purchase_kind?: "vendor" | "other";
     vendor_name?: string;
@@ -2711,6 +2801,9 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
     card_last4?: string;
     notes?: string;
     receipt_key?: string;
+    vehicle_id?: number | null;
+    issue_id?: number | null;
+    parts_order_id?: number | null;
     ocr_feedback?: {
       raw_text?: string;
       ocr?: OcrFieldSnapshot;
@@ -2749,13 +2842,30 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
   const purchaseDate =
     (body.purchase_date || "").trim() || new Date().toISOString().slice(0, 10);
   const notes = (body.notes || "").trim() || null;
+  const vehicleId =
+    body.vehicle_id != null && Number(body.vehicle_id) > 0 ? Number(body.vehicle_id) : null;
+  const issueId =
+    body.issue_id != null && Number(body.issue_id) > 0 ? Number(body.issue_id) : null;
+  const partsOrderId =
+    body.parts_order_id != null && Number(body.parts_order_id) > 0
+      ? Number(body.parts_order_id)
+      : null;
+
+  // Mechanics: vehicle required so parts history ties to the unit worked on
+  if ((user.role === "mechanic" || user.role === "driver") && !vehicleId) {
+    return c.json(
+      { error: "Select the vehicle this purchase was for (plate or unit #)." },
+      400
+    );
+  }
 
   try {
     const r = await c.env.DB.prepare(
       `INSERT INTO parts_purchase_receipts (
          purchased_by_user_id, purchase_kind, vendor_name, invoice_number,
-         purchase_date, total_cost, card_last4, notes, receipt_key, ocr_raw
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         purchase_date, total_cost, card_last4, notes, receipt_key, ocr_raw,
+         vehicle_id, issue_id, parts_order_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         user.id,
@@ -2767,15 +2877,21 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
         cardLast4,
         notes,
         receiptKey,
-        body.ocr_feedback?.raw_text ? body.ocr_feedback.raw_text.slice(0, 8000) : null
+        body.ocr_feedback?.raw_text ? body.ocr_feedback.raw_text.slice(0, 8000) : null,
+        vehicleId,
+        issueId,
+        partsOrderId
       )
       .run();
 
     const id = Number(r.meta.last_row_id);
     const row = await c.env.DB.prepare(
-      `SELECT p.*, u.display_name as purchased_by_name
+      `SELECT p.*, u.display_name as purchased_by_name,
+          v.unit_number as vehicle_unit, v.plate as vehicle_plate,
+          v.year as vehicle_year, v.make as vehicle_make, v.model as vehicle_model
        FROM parts_purchase_receipts p
        LEFT JOIN users u ON u.id = p.purchased_by_user_id
+       LEFT JOIN vehicles v ON v.id = p.vehicle_id
        WHERE p.id = ?`
     )
       .bind(id)
@@ -2808,13 +2924,20 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
       }
     }
 
+    const unitLabel =
+      row && (row as { vehicle_unit?: string }).vehicle_unit
+        ? ` · unit ${(row as { vehicle_unit: string }).vehicle_unit}`
+        : vehicleId
+          ? ` · vehicle #${vehicleId}`
+          : "";
+
     await writeAudit(
       c.env.DB,
       user,
       "create",
       "parts_purchase",
       id,
-      `${kind}: ${vendorName}${invoice ? ` inv ${invoice}` : ""}`,
+      `${kind}: ${vendorName}${invoice ? ` inv ${invoice}` : ""}${unitLabel}`,
       null,
       row
     );
@@ -2827,7 +2950,7 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
         targets.filter((tid) => tid !== user.id),
         "parts_purchase",
         "Parts receipt submitted",
-        `${user.display_name || "Tech"}: ${vendorName}${invoice ? ` · inv ${invoice}` : ""}${total != null ? ` · $${total.toFixed(2)}` : ""}`,
+        `${user.display_name || "Tech"}: ${vendorName}${invoice ? ` · inv ${invoice}` : ""}${total != null ? ` · $${total.toFixed(2)}` : ""}${unitLabel}`,
         { type: "parts_purchase", id }
       );
     } catch {
@@ -2840,6 +2963,13 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
     if (/no such table/i.test(msg)) {
       return c.json(
         { error: "Run migration 037_parts_purchase_receipts.sql on the database." },
+        500
+      );
+    }
+    // Older DBs without vehicle columns — retry insert without them
+    if (/no such column|vehicle_id/i.test(msg) && vehicleId) {
+      return c.json(
+        { error: "Vehicle link not ready — refresh and try again (schema updating)." },
         500
       );
     }
@@ -4638,13 +4768,19 @@ api.post("/warranties", async (c) => {
     if (!partName) return c.json({ error: "Part name is required" }, 400);
     if (!modelNumber) {
       return c.json(
-        { error: "Unit model number is required (from the unit the part was removed from)." },
+        {
+          error:
+            "Equipment model # is required — from the unit the part was removed from (not the failed part).",
+        },
         400
       );
     }
     if (!serialNumber) {
       return c.json(
-        { error: "Unit serial number is required (from the unit the part was removed from)." },
+        {
+          error:
+            "Equipment serial # is required — from the unit the part was removed from (not the failed part).",
+        },
         400
       );
     }
@@ -12149,6 +12285,491 @@ api.post("/tool-loans/:id/cancel", async (c) => {
     .run();
 
   await writeAudit(c.env.DB, user, "update", "tool_loan_request", id, "Cancelled");
+  return c.json({ ok: true });
+});
+
+// ——— Parts order hub (mechanic order tracking; vendors open externally) ———
+
+const PARTS_ORDER_VENDORS = {
+  autozone: {
+    id: "autozone" as const,
+    label: "AutoZone Pro",
+    url: "https://www.autozonepro.com",
+  },
+  firstcall: {
+    id: "firstcall" as const,
+    label: "First Call Online",
+    url: "https://www.firstcallonline.com/",
+  },
+};
+
+type PartsOrderStatus = "needed" | "ordered" | "arriving" | "received" | "cancelled";
+type PartsOrderVendorPref = "autozone" | "firstcall" | "either" | "other";
+
+let partsOrderTablesReady = false;
+async function ensurePartsOrderTables(db: D1Database): Promise<void> {
+  if (partsOrderTablesReady) return;
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS parts_order_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      vehicle_id INTEGER,
+      vehicle_label TEXT,
+      issue_id INTEGER,
+      part_description TEXT NOT NULL,
+      part_number TEXT,
+      vendor_preference TEXT NOT NULL DEFAULT 'either',
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'needed',
+      ordered_from TEXT,
+      order_note TEXT,
+      ordered_at TEXT,
+      arriving_at TEXT,
+      received_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_order_user ON parts_order_requests(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_order_status ON parts_order_requests(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_order_issue ON parts_order_requests(issue_id)`,
+  ];
+  for (const sql of stmts) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  partsOrderTablesReady = true;
+}
+
+function canUsePartsOrderHub(role: string): boolean {
+  return (
+    role === "admin" ||
+    role === "office" ||
+    role === "mechanic" ||
+    role === "warehouse" ||
+    role === "viewer"
+  );
+}
+
+function canManageAllPartsOrders(role: string): boolean {
+  return role === "admin" || role === "office" || role === "warehouse" || role === "mechanic";
+}
+
+api.get("/parts-orders/vendors", async (c) => {
+  return c.json({
+    vendors: [
+      PARTS_ORDER_VENDORS.autozone,
+      PARTS_ORDER_VENDORS.firstcall,
+    ],
+  });
+});
+
+api.get("/parts-orders/pending-count", async (c) => {
+  const user = c.get("user");
+  if (!canUsePartsOrderHub(user.role)) return c.json({ pending: 0 });
+  await ensurePartsOrderTables(c.env.DB);
+  try {
+    if (user.role === "viewer") return c.json({ pending: 0 });
+    // Open work: still needed / ordered / arriving (not done)
+    if (user.role === "mechanic") {
+      const row = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM parts_order_requests
+         WHERE user_id = ? AND status IN ('needed', 'ordered', 'arriving')`
+      )
+        .bind(user.id)
+        .first<{ c: number }>();
+      return c.json({ pending: row?.c ?? 0 });
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM parts_order_requests
+       WHERE status IN ('needed', 'ordered', 'arriving')`
+    ).first<{ c: number }>();
+    return c.json({ pending: row?.c ?? 0 });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
+/**
+ * ?view=mine | open | all
+ * open = needed/ordered/arriving (shop board)
+ */
+api.get("/parts-orders", async (c) => {
+  const user = c.get("user");
+  if (!canUsePartsOrderHub(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  await ensurePartsOrderTables(c.env.DB);
+  const view = (c.req.query("view") || "open").toLowerCase();
+  try {
+    let sql = `SELECT r.*,
+        u.display_name as requested_by_name,
+        v.unit_number as vehicle_unit
+       FROM parts_order_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN vehicles v ON v.id = r.vehicle_id`;
+    const binds: unknown[] = [];
+
+    if (view === "mine") {
+      sql += ` WHERE r.user_id = ?`;
+      binds.push(user.id);
+    } else if (view === "open") {
+      sql += ` WHERE r.status IN ('needed', 'ordered', 'arriving')`;
+      if (user.role === "mechanic" && !canManageAllPartsOrders(user.role)) {
+        /* mechanics see all open — they order for the shop */
+      }
+    } else {
+      // all — last 90 days closed + all open
+      sql += ` WHERE r.status IN ('needed', 'ordered', 'arriving')
+        OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days')`;
+    }
+
+    sql += ` ORDER BY
+      CASE r.status
+        WHEN 'needed' THEN 0
+        WHEN 'ordered' THEN 1
+        WHEN 'arriving' THEN 2
+        WHEN 'received' THEN 3
+        ELSE 4 END,
+      r.created_at DESC LIMIT 150`;
+
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+
+    let pending = 0;
+    if (user.role === "mechanic") {
+      const p = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM parts_order_requests
+         WHERE user_id = ? AND status IN ('needed', 'ordered', 'arriving')`
+      )
+        .bind(user.id)
+        .first<{ c: number }>();
+      pending = p?.c ?? 0;
+    } else if (user.role !== "viewer") {
+      const p = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM parts_order_requests
+         WHERE status IN ('needed', 'ordered', 'arriving')`
+      ).first<{ c: number }>();
+      pending = p?.c ?? 0;
+    }
+
+    return c.json({
+      requests: rows.results || [],
+      pending,
+      vendors: [PARTS_ORDER_VENDORS.autozone, PARTS_ORDER_VENDORS.firstcall],
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        requests: [],
+        pending: 0,
+        vendors: [PARTS_ORDER_VENDORS.autozone, PARTS_ORDER_VENDORS.firstcall],
+        error: "Run migration 048_parts_order_requests.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/parts-orders", async (c) => {
+  const user = c.get("user");
+  if (!canUsePartsOrderHub(user.role) || user.role === "viewer") {
+    return c.json({ error: "Not allowed to create parts orders" }, 403);
+  }
+  await ensurePartsOrderTables(c.env.DB);
+  const body = await c.req.json<{
+    part_description?: string;
+    part_number?: string;
+    vehicle_id?: number | null;
+    vehicle_label?: string;
+    issue_id?: number | null;
+    vendor_preference?: PartsOrderVendorPref;
+    notes?: string;
+  }>();
+
+  const partDescription = (body.part_description || "").trim();
+  if (!partDescription || partDescription.length < 2) {
+    return c.json({ error: "Describe the part you need" }, 400);
+  }
+  const partNumber = (body.part_number || "").trim() || null;
+  const vehicleLabel = (body.vehicle_label || "").trim() || null;
+  const vehicleId =
+    body.vehicle_id != null && Number(body.vehicle_id) > 0 ? Number(body.vehicle_id) : null;
+  const issueId =
+    body.issue_id != null && Number(body.issue_id) > 0 ? Number(body.issue_id) : null;
+  const prefRaw = (body.vendor_preference || "either").toLowerCase();
+  const vendorPref: PartsOrderVendorPref =
+    prefRaw === "autozone" ||
+    prefRaw === "firstcall" ||
+    prefRaw === "other" ||
+    prefRaw === "either"
+      ? prefRaw
+      : "either";
+  const notes = (body.notes || "").trim() || null;
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO parts_order_requests (
+         user_id, vehicle_id, vehicle_label, issue_id, part_description, part_number,
+         vendor_preference, notes, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'needed', datetime('now'), datetime('now'))`
+    )
+      .bind(
+        user.id,
+        vehicleId,
+        vehicleLabel,
+        issueId,
+        partDescription,
+        partNumber,
+        vendorPref,
+        notes
+      )
+      .run();
+    const id = Number(ins.meta.last_row_id);
+
+    // Notify warehouse + office/admin (not the requester)
+    const notifyIds = new Set<number>();
+    for (const uid of await usersByRoles(c.env.DB, ["admin", "office", "warehouse"])) {
+      notifyIds.add(uid);
+    }
+    notifyIds.delete(user.id);
+    if (notifyIds.size) {
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          [...notifyIds],
+          "parts_order_request",
+          `Parts order needed · ${user.display_name}`,
+          `${partDescription.slice(0, 100)}${
+            vehicleLabel || vehicleId ? ` · ${vehicleLabel || `vehicle #${vehicleId}`}` : ""
+          }`,
+          { type: "parts_order", id }
+        ).catch(() => {
+          /* non-fatal */
+        })
+      );
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "parts_order_request",
+      id,
+      partDescription.slice(0, 120)
+    );
+
+    const row = await c.env.DB.prepare(
+      `SELECT r.*, u.display_name as requested_by_name,
+          v.unit_number as vehicle_unit
+       FROM parts_order_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN vehicles v ON v.id = r.vehicle_id
+       WHERE r.id = ?`
+    )
+      .bind(id)
+      .first();
+
+    return c.json({ ok: true, request: row }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+/**
+ * Advance / set status.
+ * Body: status = ordered | arriving | received | needed | cancelled
+ *       ordered_from? = autozone | firstcall | other
+ *       order_note?
+ */
+api.post("/parts-orders/:id/status", async (c) => {
+  const user = c.get("user");
+  if (!canManageAllPartsOrders(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    status?: PartsOrderStatus;
+    ordered_from?: string | null;
+    order_note?: string | null;
+  }>();
+  const next = body.status;
+  const allowed: PartsOrderStatus[] = [
+    "needed",
+    "ordered",
+    "arriving",
+    "received",
+    "cancelled",
+  ];
+  if (!next || !allowed.includes(next)) {
+    return c.json({ error: "Invalid status" }, 400);
+  }
+
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_order_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      status: string;
+      part_description: string;
+      ordered_from: string | null;
+      order_note: string | null;
+      ordered_at: string | null;
+      arriving_at: string | null;
+      received_at: string | null;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  // Mechanics can update any open shop order; cancel only own or admin/office
+  if (next === "cancelled") {
+    const isOwner = before.user_id === user.id;
+    if (!isOwner && user.role !== "admin" && user.role !== "office") {
+      return c.json({ error: "Only the requester or office/admin can cancel" }, 403);
+    }
+  }
+
+  let orderedFrom = before.ordered_from;
+  if (body.ordered_from === "autozone" || body.ordered_from === "firstcall" || body.ordered_from === "other") {
+    orderedFrom = body.ordered_from;
+  } else if (next === "ordered" && !orderedFrom) {
+    orderedFrom = "other";
+  }
+
+  const orderNote =
+    body.order_note !== undefined
+      ? (body.order_note || "").trim() || null
+      : before.order_note;
+
+  let orderedAt = before.ordered_at;
+  let arrivingAt = before.arriving_at;
+  let receivedAt = before.received_at;
+  const nowIso = new Date().toISOString();
+  if (next === "ordered" && !orderedAt) orderedAt = nowIso;
+  if (next === "arriving") {
+    if (!orderedAt) orderedAt = nowIso;
+    if (!arrivingAt) arrivingAt = nowIso;
+  }
+  if (next === "received") {
+    if (!orderedAt) orderedAt = nowIso;
+    if (!receivedAt) receivedAt = nowIso;
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE parts_order_requests SET
+       status = ?,
+       ordered_from = ?,
+       order_note = ?,
+       ordered_at = ?,
+       arriving_at = ?,
+       received_at = ?,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(next, orderedFrom, orderNote, orderedAt, arrivingAt, receivedAt, id)
+    .run();
+
+  // Notify requester on progress (if someone else updated)
+  if (before.user_id !== user.id && next !== before.status) {
+    const label =
+      next === "ordered"
+        ? "ordered"
+        : next === "arriving"
+          ? "on the way / arriving"
+          : next === "received"
+            ? "received"
+            : next === "cancelled"
+              ? "cancelled"
+              : next;
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.user_id],
+        "parts_order_status",
+        `Parts order ${label} · ${before.part_description.slice(0, 60)}`,
+        orderNote
+          ? orderNote.slice(0, 120)
+          : `Updated by ${user.display_name}`,
+        { type: "parts_order", id }
+      ).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  // When mechanic marks ordered, ping warehouse
+  if (next === "ordered" && before.status === "needed") {
+    const ids = new Set(
+      await usersByRoles(c.env.DB, ["admin", "office", "warehouse"])
+    );
+    ids.delete(user.id);
+    if (ids.size) {
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          [...ids],
+          "parts_order_status",
+          `Parts ordered · ${before.part_description.slice(0, 60)}`,
+          `${user.display_name}${orderedFrom ? ` via ${orderedFrom}` : ""}${
+            orderNote ? ` · ${orderNote.slice(0, 80)}` : ""
+          }`,
+          { type: "parts_order", id }
+        ).catch(() => {
+          /* ignore */
+        })
+      );
+    }
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "parts_order_request",
+    id,
+    `${before.status}→${next}`
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as requested_by_name,
+        v.unit_number as vehicle_unit
+     FROM parts_order_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN vehicles v ON v.id = r.vehicle_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, request: row });
+});
+
+api.post("/parts-orders/:id/cancel", async (c) => {
+  const user = c.get("user");
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_order_requests WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; user_id: number; status: string }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status === "received" || before.status === "cancelled") {
+    return c.json({ error: "Already closed" }, 400);
+  }
+  const isOwner = before.user_id === user.id;
+  if (!isOwner && user.role !== "admin" && user.role !== "office") {
+    return c.json({ error: "Only the requester or office/admin can cancel" }, 403);
+  }
+  await c.env.DB.prepare(
+    `UPDATE parts_order_requests SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
+  )
+    .bind(id)
+    .run();
+  await writeAudit(c.env.DB, user, "update", "parts_order_request", id, "Cancelled");
   return c.json({ ok: true });
 });
 

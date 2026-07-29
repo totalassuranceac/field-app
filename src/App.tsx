@@ -90,6 +90,9 @@ const TimeOffPage = lazy(() =>
 const ToolLoanPage = lazy(() =>
   import("./pages/ToolLoanPage").then((m) => ({ default: m.ToolLoanPage }))
 );
+const PartsOrderPage = lazy(() =>
+  import("./pages/PartsOrderPage").then((m) => ({ default: m.PartsOrderPage }))
+);
 
 function PageFallback() {
   return (
@@ -293,6 +296,10 @@ export default function App() {
                     <Route
                       path="/tool-loans"
                       element={<LazyPage title="Tool Loan Request" Page={ToolLoanPage} />}
+                    />
+                    <Route
+                      path="/parts-orders"
+                      element={<LazyPage title="Order parts" Page={PartsOrderPage} />}
                     />
                     <Route
                       path="/reviews"

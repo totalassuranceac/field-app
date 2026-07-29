@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
 import type { Vehicle } from "./VehiclesPage";
 
 interface DueRow {
@@ -234,17 +235,19 @@ export function ServicePage() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>Log oil change</h2>
             <form className="form" onSubmit={onSubmit}>
-              <label>
-                Vehicle
-                <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} required>
-                  <option value="">Select…</option>
-                  {vehicles.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.unit_number}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <VehicleQuickPick
+                value={vehicleId}
+                vehicles={vehicles as VehicleMatch[]}
+                onChange={(id, v) => {
+                  setVehicleId(id);
+                  if (v?.current_odometer != null && !odometer) {
+                    setOdometer(String(v.current_odometer));
+                  }
+                }}
+                required
+                label="License plate or unit #"
+                placeholder="Type plate to auto-fill unit…"
+              />
               <label>
                 Date of change
                 <input

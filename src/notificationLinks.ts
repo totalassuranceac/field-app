@@ -53,6 +53,16 @@ export function notificationLink(n: {
     }
     return "/tool-loans";
   }
+  if (
+    kind === "parts_order_request" ||
+    kind === "parts_order_status" ||
+    entity === "parts_order" ||
+    text.includes("parts order") ||
+    text.includes("parts ordered") ||
+    text.includes("parts order needed")
+  ) {
+    return "/parts-orders";
+  }
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
   if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
     return "/warranties";
