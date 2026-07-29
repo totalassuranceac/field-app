@@ -99,6 +99,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Which line is mid-resolve — only that button disables (not the whole page). */
+  const [resolvingId, setResolvingId] = useState<number | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [expandedTicket, setExpandedTicket] = useState<Record<number, boolean>>({});
@@ -348,15 +350,98 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     });
   }
 
+  /** Instant UI update so Picked / Not needed feels instant even if reload is slow. */
+  function applyLineLocally(
+    lineId: number,
+    status: LineStatus,
+    qtyReceived?: number | null,
+    notes?: string | null
+  ) {
+    const patchLine = (line: TicketLine): TicketLine => {
+      if (line.id !== lineId) return line;
+      return {
+        ...line,
+        status,
+        qty_received:
+          status === "picked"
+            ? qtyReceived != null
+              ? qtyReceived
+              : line.qty_requested
+            : status === "partial"
+              ? qtyReceived ?? line.qty_received
+              : status === "pending" || status === "not_ready" || status === "cancelled"
+                ? status === "cancelled"
+                  ? line.qty_received
+                  : null
+                : line.qty_received,
+        notes: notes != null && notes !== "" ? notes : line.notes,
+      };
+    };
+    const openish = (s: string) => ["pending", "not_ready", "partial"].includes(s);
+
+    setTickets((prev) =>
+      prev.map((t) => ({
+        ...t,
+        lines: (t.lines || []).map(patchLine),
+      }))
+    );
+
+    setGroups((prev) =>
+      prev
+        .map((g) => {
+          const tickets = g.tickets.map((t) => {
+            const lines = (t.lines || []).map(patchLine);
+            const open_lines = lines.filter((l) => openish(l.status)).length;
+            const picked_lines = lines.filter((l) => l.status === "picked").length;
+            let ticketStatus = t.status;
+            if (lines.length && open_lines === 0) {
+              ticketStatus = lines.every((l) => l.status === "cancelled")
+                ? "cancelled"
+                : "done";
+            } else if (picked_lines > 0 || lines.some((l) => l.status === "partial")) {
+              ticketStatus = "partial";
+            } else {
+              ticketStatus = "open";
+            }
+            return {
+              ...t,
+              lines,
+              open_lines,
+              picked_lines,
+              status: ticketStatus,
+            };
+          });
+          // On "open" filter, drop finished tickets so the list matches reality
+          const keep =
+            filter === "all"
+              ? tickets
+              : tickets.filter((t) => t.status === "open" || t.status === "partial");
+          const waiting = keep.reduce(
+            (s, t) => s + (t.lines || []).filter((l) => openish(l.status)).length,
+            0
+          );
+          return { ...g, tickets: keep, waiting };
+        })
+        .filter((g) => (filter === "open" ? g.tickets.length > 0 : true))
+    );
+
+    setWaiting((w) => {
+      // Recompute from groups after patch is messy in one step — load() will correct
+      return Math.max(0, w - (status === "picked" || status === "cancelled" ? 1 : 0));
+    });
+  }
+
   async function resolveLine(
     lineId: number,
     status: LineStatus,
     qtyReceived?: number | null,
     notes?: string
   ) {
-    setBusy(true);
+    setResolvingId(lineId);
     setError("");
     setOk("");
+    // Optimistic — UI updates immediately so counter doesn't wait on network
+    applyLineLocally(lineId, status, qtyReceived, notes || null);
     try {
       await api(`/inventory/part-pickups/lines/${lineId}/resolve`, {
         method: "POST",
@@ -366,6 +451,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           notes: notes || null,
           receive_stock: status === "picked" || status === "partial",
         }),
+        timeoutMs: 15_000,
       });
       setOk(
         status === "picked"
@@ -378,12 +464,19 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                 ? "Marked not needed — off the pickup list."
                 : "Updated."
       );
-      await load();
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
+      // Refresh in background — never leave the button hung on this
+      void load().catch(() => {
+        /* optimistic state already applied */
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
+      setError(err instanceof Error ? err.message : "Update failed — try again");
+      // Pull truth from server after failure
+      void load().catch(() => {
+        /* ignore */
+      });
     } finally {
-      setBusy(false);
+      setResolvingId(null);
     }
   }
 
@@ -576,21 +669,35 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                   .join(" · ")}
                               </span>
                             )}
-                            {canNotNeeded && l.lineId != null && (
-                              <button
-                                type="button"
-                                className="btn secondary btn-sm pp-not-needed-btn vendor-run-sheet-drop"
-                                disabled={busy}
-                                onClick={() => {
-                                  const reason = askNotNeededReason(
-                                    `${l.qty}× ${l.name || "Part"}`
-                                  );
-                                  if (!reason) return;
-                                  void resolveLine(l.lineId!, "cancelled", null, reason);
-                                }}
-                              >
-                                Not needed
-                              </button>
+                            {l.lineId != null && (
+                              <span className="vendor-run-sheet-actions">
+                                {canResolve && (
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm"
+                                    disabled={resolvingId === l.lineId || busy}
+                                    onClick={() => void resolveLine(l.lineId!, "picked")}
+                                  >
+                                    {resolvingId === l.lineId ? "Saving…" : "Picked up"}
+                                  </button>
+                                )}
+                                {canNotNeeded && (
+                                  <button
+                                    type="button"
+                                    className="btn secondary btn-sm pp-not-needed-btn vendor-run-sheet-drop"
+                                    disabled={resolvingId === l.lineId || busy}
+                                    onClick={() => {
+                                      const reason = askNotNeededReason(
+                                        `${l.qty}× ${l.name || "Part"}`
+                                      );
+                                      if (!reason) return;
+                                      void resolveLine(l.lineId!, "cancelled", null, reason);
+                                    }}
+                                  >
+                                    Not needed
+                                  </button>
+                                )}
+                              </span>
                             )}
                           </span>
                         </li>
@@ -801,6 +908,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                     canResolve={canResolve}
                     canNotNeeded={canNotNeeded}
                     busy={busy}
+                    resolvingId={resolvingId}
                     expanded={!!expandedTicket[t.id] || t.status === "open" || t.status === "partial"}
                     onToggle={() =>
                       setExpandedTicket((p) => ({ ...p, [t.id]: !p[t.id] }))
@@ -848,6 +956,7 @@ function TicketCard({
   canResolve,
   canNotNeeded,
   busy,
+  resolvingId,
   expanded,
   onToggle,
   onResolve,
@@ -858,6 +967,7 @@ function TicketCard({
   canResolve: boolean;
   canNotNeeded: boolean;
   busy: boolean;
+  resolvingId: number | null;
   expanded: boolean;
   onToggle: () => void;
   onResolve: (
@@ -1008,15 +1118,15 @@ function TicketCard({
                           <button
                             type="button"
                             className="btn btn-sm"
-                            disabled={busy}
+                            disabled={busy || resolvingId === line.id}
                             onClick={() => void onResolve(line.id, "picked")}
                           >
-                            Picked
+                            {resolvingId === line.id ? "Saving…" : "Picked"}
                           </button>
                           <button
                             type="button"
                             className="btn ghost btn-sm"
-                            disabled={busy}
+                            disabled={busy || resolvingId === line.id}
                             onClick={() => void onResolve(line.id, "not_ready")}
                           >
                             Not ready
@@ -1036,7 +1146,7 @@ function TicketCard({
                             <button
                               type="button"
                               className="btn ghost btn-sm"
-                              disabled={busy || !partialQty[line.id]}
+                              disabled={busy || resolvingId === line.id || !partialQty[line.id]}
                               onClick={() =>
                                 void onResolve(line.id, "partial", Number(partialQty[line.id]))
                               }
@@ -1050,7 +1160,7 @@ function TicketCard({
                         <button
                           type="button"
                           className="btn secondary btn-sm pp-not-needed-btn"
-                          disabled={busy}
+                          disabled={busy || resolvingId === line.id}
                           title="Drop this part — you’ll type why"
                           onClick={() => {
                             const label =

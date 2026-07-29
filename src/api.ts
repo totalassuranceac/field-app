@@ -36,16 +36,27 @@ function redirectToLogin() {
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 
+/** Default request timeout (ms). Mobile carriers often stall ~15s then fail the page. */
+const DEFAULT_TIMEOUT_MS = 12_000;
+/** Auth must fail fast so the app never sits on a blank “Loading…” screen. */
+const AUTH_TIMEOUT_MS = 6_000;
+
+export type ApiOptions = RequestInit & {
+  /** Override request timeout in ms (0 = no timeout). */
+  timeoutMs?: number;
+};
+
 /**
  * API helper. Mutating requests that hit offline / bad signal are queued in
  * IndexedDB and sent automatically when connection returns.
  */
 export async function api<T = unknown>(
   path: string,
-  options: RequestInit = {}
+  options: ApiOptions = {}
 ): Promise<T> {
   const method = (options.method || "GET").toUpperCase();
   const queueable = isQueueableMutation(path, method);
+  const { timeoutMs: timeoutOpt, ...fetchInit } = options;
 
   if (typeof navigator !== "undefined" && navigator.onLine === false && queueable) {
     const item = await enqueueFromRequest(path, options);
@@ -57,19 +68,52 @@ export async function api<T = unknown>(
     throw new ApiError(0, "You appear to be offline. Check your connection and try again.");
   }
 
-  const headers = new Headers(options.headers || {});
-  if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
+  const headers = new Headers(fetchInit.headers || {});
+  if (fetchInit.body && !(fetchInit.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+
+  const isAuthMe = path === "/auth/me" || path.startsWith("/auth/me?");
+  const timeoutMs =
+    timeoutOpt !== undefined
+      ? timeoutOpt
+      : isAuthMe
+        ? AUTH_TIMEOUT_MS
+        : DEFAULT_TIMEOUT_MS;
+
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (controller && timeoutMs > 0) {
+    // Honor caller abort if provided
+    if (fetchInit.signal) {
+      if (fetchInit.signal.aborted) controller.abort();
+      else {
+        fetchInit.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
 
   let res: Response;
   try {
     res = await fetch(`/api${path}`, {
-      ...options,
+      ...fetchInit,
       headers,
       credentials: "include",
+      signal: controller?.signal ?? fetchInit.signal,
     });
   } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      throw new ApiError(
+        0,
+        "Server took too long to respond. Check signal and try again."
+      );
+    }
     if (queueable && isNetworkFailure(err)) {
       const item = await enqueueFromRequest(path, options);
       const count = await pendingCount();
@@ -80,6 +124,7 @@ export async function api<T = unknown>(
       "Network error — could not reach the server. Check connection and try again."
     );
   }
+  if (timer) clearTimeout(timer);
 
   // Gateway blips on mobile — queue mutations so they aren't lost
   if (queueable && (res.status === 502 || res.status === 503 || res.status === 504)) {

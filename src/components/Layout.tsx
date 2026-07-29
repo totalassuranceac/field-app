@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
 import { useAuth } from "../auth";
@@ -142,6 +142,7 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/inventory") ||
     pathname.startsWith("/part-pickup") ||
     pathname.startsWith("/vendor-runs") ||
+    pathname.startsWith("/parts-dropoff") ||
     pathname.startsWith("/truck-stock") ||
     pathname.startsWith("/parts-receipts") ||
     pathname.startsWith("/assets") ||
@@ -167,7 +168,7 @@ function pathCategory(pathname: string): string {
   return "home";
 }
 
-export function Layout({ children }: { children: React.ReactNode }) {
+export function Layout({ children }: { children: ReactNode }) {
   const { user, realUser, viewAsRole, setViewAsRole } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -187,6 +188,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [unread, setUnread] = useState(0);
   /** Parts waiting at vendors — warehouse glance counter (shows 0 when clear) */
   const [vendorWaiting, setVendorWaiting] = useState(0);
+  /** Parts left at shop after field pickup — ready for warehouse */
+  const [dropoffWaiting, setDropoffWaiting] = useState(0);
   /** Open tech repair requests waiting for shop to schedule */
   const [openRepairsCount, setOpenRepairsCount] = useState(0);
   /** Open collapsible nav section (same Command Center style for every role) */
@@ -225,6 +228,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         } catch {
           /* migration optional */
         }
+        try {
+          const dr = await api<{ waiting?: number }>("/inventory/parts-dropoffs/count");
+          if (!cancelled) setDropoffWaiting(Number(dr.waiting) || 0);
+        } catch {
+          /* migration optional */
+        }
       }
       if (showRepairBadge) {
         try {
@@ -243,16 +252,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
         }
       }
     }
-    // Defer badge poll so first paint is not blocked by extra API calls
-    const start = window.setTimeout(() => void poll(), 400);
-    const id = window.setInterval(poll, 30_000);
+    // Defer badge poll so first paint is not blocked (longer delay on cellular)
+    const start = window.setTimeout(() => void poll(), 1200);
+    const id = window.setInterval(poll, 45_000);
     const onVendorChange = () => void poll();
     window.addEventListener("vendor-runs-changed", onVendorChange);
+    window.addEventListener("parts-dropoffs-changed", onVendorChange);
     return () => {
       cancelled = true;
       window.clearTimeout(start);
       window.clearInterval(id);
       window.removeEventListener("vendor-runs-changed", onVendorChange);
+      window.removeEventListener("parts-dropoffs-changed", onVendorChange);
     };
   }, [user?.id, showVendorCounter, showRepairBadge]);
 
@@ -272,6 +283,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
       vendorWaiting > 0
         ? `${vendorWaiting} part${vendorWaiting === 1 ? "" : "s"} to pick up`
         : "No parts waiting for pickup",
+  };
+
+  const dropoffNavBadge = {
+    badge: dropoffWaiting,
+    badgeAlways: true as const,
+    badgeLabel:
+      dropoffWaiting > 0
+        ? `${dropoffWaiting} drop-off${dropoffWaiting === 1 ? "" : "s"} at the shop`
+        : "No parts waiting at the shop",
   };
 
   /**
@@ -311,6 +331,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
       show: adminShell || can(user, "logFuel") || can(user, "viewReports"),
     },
     {
+      to: "/fuel/receipt-review",
+      label: "Receipt verify",
+      show: adminShell || can(user, "editFuel"),
+    },
+    {
       to: "/inspections",
       label: "Weekly checks",
       show: adminShell || isDriver || isMechanic || isOffice,
@@ -347,6 +372,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
       label: "Part pickup",
       show: true,
       ...(showVendorCounter ? vendorNavBadge : {}),
+    },
+    {
+      to: "/parts-dropoff",
+      label: "Parts drop-off",
+      show: true,
+      ...(showVendorCounter ? dropoffNavBadge : {}),
     },
     {
       to: "/truck-stock",

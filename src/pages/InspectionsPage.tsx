@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 
@@ -47,11 +47,11 @@ const CHECK_ITEMS = [
 
 /** Last check as MM/YY, or N/A if never checked */
 function formatCheckWhen(dateStr: string | null | undefined): string {
-  if (!dateStr) return "N/A";
+  if (!dateStr) return "Never";
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateStr);
   if (m) return `${m[2]}/${m[1].slice(2)}`;
   const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return "N/A";
+  if (Number.isNaN(d.getTime())) return "Never";
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const yy = String(d.getFullYear()).slice(2);
   return `${mm}/${yy}`;
@@ -59,28 +59,43 @@ function formatCheckWhen(dateStr: string | null | undefined): string {
 
 type StatusTone = "good" | "repair" | "down";
 
-/** Green = good, yellow = needs repair, red = down */
-function unitStatus(w: WeeklyRow): { tone: StatusTone; label: string } {
+/** Green = working, yellow = needs attention / due, red = down */
+function unitStatus(w: WeeklyRow): { tone: StatusTone; label: string; detail: string } {
   if (w.status === "out_of_service") {
-    return { tone: "down", label: "Down" };
+    return { tone: "down", label: "Down", detail: "Out of service" };
   }
   if (w.last_status === "fail") {
-    return { tone: "down", label: "Down" };
+    return { tone: "down", label: "Down", detail: "Failed last check" };
   }
-  if (
-    (w.open_repairs && w.open_repairs > 0) ||
-    w.last_status === "pass_with_notes"
-  ) {
-    return { tone: "repair", label: "Repair" };
+  if ((w.open_repairs && w.open_repairs > 0) || w.last_status === "pass_with_notes") {
+    return { tone: "repair", label: "Repair", detail: "Has open issues" };
   }
   if (w.due || !w.last_check_date) {
-    // Due for weekly check or never checked — still needs attention (yellow)
-    return { tone: "repair", label: w.last_check_date ? "Due" : "Due" };
+    return {
+      tone: "repair",
+      label: "Due",
+      detail: w.last_check_date ? "Weekly check due" : "Never checked — do it now",
+    };
   }
   if (w.last_status === "pass" || !w.last_status) {
-    return { tone: "good", label: "Good" };
+    return { tone: "good", label: "Good", detail: "Working order" };
   }
-  return { tone: "repair", label: "Check" };
+  return { tone: "repair", label: "Check", detail: "Needs a check" };
+}
+
+function normName(s: string | null | undefined): string {
+  return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function isMyUnit(
+  w: WeeklyRow,
+  user: { display_name?: string | null } | null
+): boolean {
+  if (!user) return false;
+  const ad = normName(w.assigned_driver);
+  const me = normName(user.display_name);
+  if (!ad || !me) return false;
+  return ad === me || ad.includes(me) || me.includes(ad);
 }
 
 export function InspectionsPage() {
@@ -100,7 +115,14 @@ export function InspectionsPage() {
   const [checks, setChecks] = useState<Record<string, string>>(
     Object.fromEntries(CHECK_ITEMS.map((c) => [c.key, "ok"]))
   );
-  const [createIssue, setCreateIssue] = useState(true);
+
+  /** Collapsible sections — keep the page clean */
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [otherOpen, setOtherOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
+
+  const canCheck = can(user, "reportIssues");
+  const isField = user?.role === "driver" || user?.role === "mechanic";
 
   async function load() {
     const [v, i, w] = await Promise.all([
@@ -121,14 +143,15 @@ export function InspectionsPage() {
     setVehicleId(String(vehicleIdNum));
     setMode(kind);
     setNotes("");
-    setChecks(Object.fromEntries(CHECK_ITEMS.map((c) => [c.key, kind === "ok" ? "ok" : "attention"])));
-    setCreateIssue(kind === "issue");
+    // Issue flow is notes-first; full checklist only for "full" mode
+    setChecks(Object.fromEntries(CHECK_ITEMS.map((c) => [c.key, "ok"])));
     setDate(new Date().toISOString().slice(0, 10));
     setShow(true);
   }
 
   function overallFromChecks(): "pass" | "pass_with_notes" | "fail" {
     if (mode === "ok") return "pass";
+    if (mode === "issue") return "pass_with_notes";
     const vals = Object.values(checks);
     if (vals.some((v) => v === "fail")) return "fail";
     if (vals.some((v) => v === "attention") || notes.trim()) return "pass_with_notes";
@@ -141,10 +164,14 @@ export function InspectionsPage() {
     setOk("");
     try {
       const overall = overallFromChecks();
+      // Ticket only when problems found — never for a clean "all good" check
+      const openTicket = overall !== "pass";
       const checklist =
         mode === "ok"
           ? Object.fromEntries(CHECK_ITEMS.map((c) => [c.key, "ok"]))
-          : checks;
+          : mode === "issue"
+            ? { reported: "attention" }
+            : checks;
       const res = await api<{ created_issue_id: number | null }>("/inspections", {
         method: "POST",
         body: JSON.stringify({
@@ -154,13 +181,13 @@ export function InspectionsPage() {
           overall_status: overall,
           checklist,
           notes: notes || null,
-          create_issue_on_fail: createIssue,
+          create_issue_on_fail: openTicket,
         }),
       });
       if (overall === "pass") {
-        setOk("Weekly check saved — everything reported in working order.");
+        setOk("Saved — van marked in working order for this week. No shop ticket.");
       } else if (res.created_issue_id) {
-        setOk(`Check saved. Repair ticket #${res.created_issue_id} opened for the fleet manager.`);
+        setOk(`Saved. Repair ticket #${res.created_issue_id} opened for the shop.`);
       } else {
         setOk("Weekly check saved with notes.");
       }
@@ -175,22 +202,96 @@ export function InspectionsPage() {
     }
   }
 
-  const counts = {
-    good: weekly.filter((w) => unitStatus(w).tone === "good").length,
-    repair: weekly.filter((w) => unitStatus(w).tone === "repair").length,
-    down: weekly.filter((w) => unitStatus(w).tone === "down").length,
-  };
+  const groups = useMemo(() => {
+    const mine: WeeklyRow[] = [];
+    const needsCheck: WeeklyRow[] = [];
+    const done: WeeklyRow[] = [];
+    for (const w of weekly) {
+      if (isMyUnit(w, user)) {
+        mine.push(w);
+        continue;
+      }
+      const st = unitStatus(w);
+      if (st.tone !== "good" || w.due || !w.last_check_date) {
+        needsCheck.push(w);
+      } else {
+        done.push(w);
+      }
+    }
+    // Mine that also need a check rise first within mine
+    mine.sort((a, b) => {
+      const ad = unitStatus(a).tone === "good" && !a.due ? 1 : 0;
+      const bd = unitStatus(b).tone === "good" && !b.due ? 1 : 0;
+      return ad - bd || a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
+    });
+    const sortUnits = (a: WeeklyRow, b: WeeklyRow) =>
+      a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
+    needsCheck.sort(sortUnits);
+    done.sort(sortUnits);
+    return { mine, needsCheck, done };
+  }, [weekly, user]);
+
+  function renderUnitCard(w: WeeklyRow, opts?: { featured?: boolean }) {
+    const st = unitStatus(w);
+    const when = formatCheckWhen(w.last_check_date);
+    const featured = opts?.featured;
+    return (
+      <article
+        key={w.vehicle_id}
+        className={`weekly-card tone-${st.tone}${featured ? " is-featured" : ""}`}
+      >
+        <div className="weekly-card-main">
+          <div className="weekly-card-id">
+            <strong className="weekly-unit">Unit {w.unit_number}</strong>
+            <span className="weekly-driver muted">
+              {w.assigned_driver || "Unassigned"}
+              {featured ? " · your van" : ""}
+            </span>
+          </div>
+          <div className="weekly-card-meta">
+            <span className={`weekly-status-pill tone-${st.tone}`} title={st.detail}>
+              {st.label}
+            </span>
+            <span className="weekly-when" title="Last weekly check">
+              Last check: {when}
+            </span>
+          </div>
+        </div>
+
+        {canCheck && (
+          <div className="weekly-card-actions no-print">
+            <button
+              className="weekly-act good"
+              type="button"
+              onClick={() => openQuick(w.vehicle_id, "ok")}
+            >
+              <span className="weekly-act-title">All good</span>
+              <span className="weekly-act-hint">Van is working</span>
+            </button>
+            <button
+              className="weekly-act issue"
+              type="button"
+              onClick={() => openQuick(w.vehicle_id, "issue")}
+            >
+              <span className="weekly-act-title">Needs repair</span>
+              <span className="weekly-act-hint">Something’s wrong</span>
+            </button>
+          </div>
+        )}
+      </article>
+    );
+  }
 
   return (
     <div className="weekly-page">
       <div className="page-header">
         <div>
           <h1>Weekly checks</h1>
-          <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-            Green good · yellow repair/due · red down. Compact list — tap All good or Issue.
+          <p className="weekly-lead">
+            Check your van once a week. Pick one button — that’s it.
           </p>
         </div>
-        {can(user, "reportIssues") && (
+        {canCheck && !isField && (
           <button
             className="btn secondary no-print"
             type="button"
@@ -204,117 +305,198 @@ export function InspectionsPage() {
           </button>
         )}
       </div>
+
       {error && <div className="error">{error}</div>}
       {ok && <div className="success">{ok}</div>}
 
-      <div className="weekly-legend" aria-label="Status colors">
-        <span className="weekly-legend-item">
-          <span className="weekly-dot tone-good" /> Good
-        </span>
-        <span className="weekly-legend-item">
-          <span className="weekly-dot tone-repair" /> Repair / due
-        </span>
-        <span className="weekly-legend-item">
-          <span className="weekly-dot tone-down" /> Down
-        </span>
+      <div className="weekly-howto card" role="note">
+        <div className="weekly-howto-step">
+          <span className="weekly-howto-num good" aria-hidden>
+            ✓
+          </span>
+          <div>
+            <strong>All good</strong>
+            <p>Van is in working order — lights, tires, fluids, cam, GPS all fine.</p>
+          </div>
+        </div>
+        <div className="weekly-howto-step">
+          <span className="weekly-howto-num repair" aria-hidden>
+            !
+          </span>
+          <div>
+            <strong>Needs repair</strong>
+            <p>Something is wrong or worn. Describe it — a shop ticket is opened for you.</p>
+          </div>
+        </div>
       </div>
 
-      <div className="weekly-summary">
-        <span className="weekly-summary-chip tone-good">{counts.good} good</span>
-        <span className="weekly-summary-chip tone-repair">{counts.repair} repair</span>
-        <span className="weekly-summary-chip tone-down">{counts.down} down</span>
-      </div>
+      {/* Your unit(s) first for field staff */}
+      {groups.mine.length > 0 && (
+        <section className="weekly-section" aria-label="Your van">
+          <h2 className="weekly-section-title">
+            {groups.mine.length === 1 ? "Your van" : "Your vans"}
+          </h2>
+          <div className="weekly-list">{groups.mine.map((w) => renderUnitCard(w, { featured: true }))}</div>
+        </section>
+      )}
 
-      <div className="weekly-list">
-        {weekly.map((w) => {
-          const st = unitStatus(w);
-          const when = formatCheckWhen(w.last_check_date);
-          return (
-            <article key={w.vehicle_id} className={`weekly-card tone-${st.tone}`}>
-              <div className="weekly-card-top">
-                <div className="weekly-card-id">
-                  <strong className="weekly-unit">{w.unit_number}</strong>
-                  <span className="weekly-driver muted">
-                    {w.assigned_driver || "Unassigned"}
-                  </span>
-                </div>
-                <div className="weekly-card-status">
-                  <span className="weekly-when" title="Last check">
-                    {when}
-                  </span>
-                  <span className={`weekly-status-btn tone-${st.tone}`}>{st.label}</span>
-                </div>
-              </div>
-              {can(user, "reportIssues") && (
-                <div className="weekly-card-actions no-print">
-                  <button
-                    className="weekly-act good"
-                    type="button"
-                    onClick={() => openQuick(w.vehicle_id, "ok")}
-                  >
-                    Good
-                  </button>
-                  <button
-                    className="weekly-act issue"
-                    type="button"
-                    onClick={() => openQuick(w.vehicle_id, "issue")}
-                  >
-                    Issue
-                  </button>
+      {/* Units that still need attention */}
+      {groups.needsCheck.length > 0 && (
+        <section className="weekly-section" aria-label="Need a check">
+          {/* Field techs with a personal van: other vans stay collapsed so the page stays simple */}
+          {isField && groups.mine.length > 0 ? (
+            <>
+              <button
+                type="button"
+                className="weekly-collapse-toggle"
+                aria-expanded={otherOpen}
+                onClick={() => setOtherOpen((o) => !o)}
+              >
+                <span>
+                  Other vans that need a check
+                  <span className="weekly-section-count soft">{groups.needsCheck.length}</span>
+                </span>
+                <span className="weekly-chevron" aria-hidden>
+                  {otherOpen ? "▾" : "▸"}
+                </span>
+              </button>
+              {otherOpen && (
+                <div className="weekly-list">
+                  {groups.needsCheck.map((w) => renderUnitCard(w))}
                 </div>
               )}
-            </article>
-          );
-        })}
-        {!weekly.length && <div className="empty">No vehicles to show.</div>}
-      </div>
+            </>
+          ) : (
+            <>
+              <div className="weekly-section-head">
+                <h2 className="weekly-section-title">Vans that need a check</h2>
+                <span className="weekly-section-count">{groups.needsCheck.length}</span>
+              </div>
+              <div className="weekly-list">
+                {groups.needsCheck.map((w) => renderUnitCard(w))}
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
-      <div className="card weekly-recent">
-        <h2 style={{ marginTop: 0 }}>Recent</h2>
-        {!list.length ? (
-          <div className="empty">No checks yet.</div>
-        ) : (
-          <ul className="weekly-recent-list">
-            {list.slice(0, 12).map((i) => {
-              const tone: StatusTone =
-                i.overall_status === "fail"
-                  ? "down"
-                  : i.overall_status === "pass_with_notes"
-                    ? "repair"
-                    : "good";
-              return (
-                <li key={i.id} className="weekly-recent-row">
-                  <span className={`weekly-status-btn sm tone-${tone}`}>
-                    {tone === "good" ? "Good" : tone === "down" ? "Down" : "Repair"}
-                  </span>
-                  <div className="weekly-recent-meta">
-                    <strong>{i.unit_number}</strong>
-                    <span className="muted">
-                      {formatCheckWhen(i.inspection_date)} · {i.inspector_name}
-                      {i.notes ? ` · ${i.notes.slice(0, 40)}` : ""}
+      {/* Already good — collapsible */}
+      {groups.done.length > 0 && (
+        <section className="weekly-section weekly-section-muted">
+          <button
+            type="button"
+            className="weekly-collapse-toggle"
+            aria-expanded={doneOpen}
+            onClick={() => setDoneOpen((o) => !o)}
+          >
+            <span>
+              Already checked this week
+              <span className="weekly-section-count soft">{groups.done.length}</span>
+            </span>
+            <span className="weekly-chevron" aria-hidden>
+              {doneOpen ? "▾" : "▸"}
+            </span>
+          </button>
+          {doneOpen && (
+            <div className="weekly-list">{groups.done.map((w) => renderUnitCard(w))}</div>
+          )}
+        </section>
+      )}
+
+      {!weekly.length && <div className="empty card">No vehicles to show.</div>}
+
+      {/* Recent history — collapsible, closed by default */}
+      <section className="card weekly-recent">
+        <button
+          type="button"
+          className="weekly-collapse-toggle"
+          aria-expanded={recentOpen}
+          onClick={() => setRecentOpen((o) => !o)}
+        >
+          <span>
+            Recent checks
+            {list.length > 0 && (
+              <span className="weekly-section-count soft">{Math.min(list.length, 12)}</span>
+            )}
+          </span>
+          <span className="weekly-chevron" aria-hidden>
+            {recentOpen ? "▾" : "▸"}
+          </span>
+        </button>
+        {recentOpen &&
+          (!list.length ? (
+            <div className="empty">No checks yet.</div>
+          ) : (
+            <ul className="weekly-recent-list">
+              {list.slice(0, 12).map((i) => {
+                const tone: StatusTone =
+                  i.overall_status === "fail"
+                    ? "down"
+                    : i.overall_status === "pass_with_notes"
+                      ? "repair"
+                      : "good";
+                return (
+                  <li key={i.id} className="weekly-recent-row">
+                    <span className={`weekly-status-pill sm tone-${tone}`}>
+                      {tone === "good" ? "Good" : tone === "down" ? "Down" : "Repair"}
                     </span>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
+                    <div className="weekly-recent-meta">
+                      <strong>Unit {i.unit_number}</strong>
+                      <span className="muted">
+                        {formatCheckWhen(i.inspection_date)} · {i.inspector_name}
+                        {i.notes ? ` · ${i.notes.slice(0, 40)}` : ""}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          ))}
+      </section>
+
+      {canCheck && isField && (
+        <p className="weekly-advanced muted">
+          <button
+            type="button"
+            className="linkish"
+            onClick={() => {
+              setMode("full");
+              setShow(true);
+            }}
+          >
+            Open full item-by-item checklist
+          </button>
+        </p>
+      )}
 
       {show && (
         <div className="modal-backdrop" onClick={() => setShow(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal weekly-modal" onClick={(e) => e.stopPropagation()}>
             <h2>
               {mode === "ok"
-                ? "All good — weekly check"
+                ? "Confirm: all good"
                 : mode === "issue"
-                  ? "Report an issue"
+                  ? "Report: needs repair"
                   : "Full inspection checklist"}
             </h2>
+            {mode === "ok" && (
+              <p className="weekly-modal-lead">
+                You’re saying this van is in working order for the week.
+              </p>
+            )}
+            {mode === "issue" && (
+              <p className="weekly-modal-lead">
+                Describe what’s wrong. We’ll open a shop ticket so it gets fixed.
+              </p>
+            )}
             <form className="form" onSubmit={onSubmit}>
               <label>
                 Vehicle
-                <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} required>
+                <select
+                  value={vehicleId}
+                  onChange={(e) => setVehicleId(e.target.value)}
+                  required
+                >
                   <option value="">Select…</option>
                   {vehicles.map((v) => (
                     <option key={v.id} value={v.id}>
@@ -327,7 +509,12 @@ export function InspectionsPage() {
               <div className="form row">
                 <label>
                   Date
-                  <input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+                  <input
+                    type="date"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    required
+                  />
                 </label>
                 <label>
                   Odometer (optional)
@@ -340,13 +527,7 @@ export function InspectionsPage() {
                 </label>
               </div>
 
-              {mode === "ok" && (
-                <p className="muted">
-                  Marks this unit green for the week — everything in working order.
-                </p>
-              )}
-
-              {(mode === "full" || mode === "issue") && (
+              {mode === "full" && (
                 <div className="checklist">
                   {CHECK_ITEMS.map((c) => (
                     <div className="checklist-item" key={c.key}>
@@ -367,31 +548,35 @@ export function InspectionsPage() {
               )}
 
               <label>
-                {mode === "ok" ? "Notes (optional)" : "Describe the issue"}
+                {mode === "ok" ? "Notes (optional)" : "What’s wrong?"}
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   required={mode === "issue"}
+                  rows={mode === "issue" ? 4 : 2}
                   placeholder={
-                    mode === "issue" ? "What is wrong? When did you notice it?" : undefined
+                    mode === "issue"
+                      ? "Example: Right brake light out, noticed this morning"
+                      : mode === "full"
+                        ? "Describe problems if anything needs attention"
+                        : "Optional note"
                   }
                 />
               </label>
 
-              {mode !== "ok" && can(user, "reportIssues") && (
-                <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                  <input
-                    type="checkbox"
-                    checked={createIssue}
-                    onChange={(e) => setCreateIssue(e.target.checked)}
-                  />
-                  Open repair ticket for the fleet manager
-                </label>
+              {mode === "issue" && (
+                <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                  A shop repair ticket opens automatically when you save.
+                </p>
               )}
 
               <div className="toolbar">
                 <button className="btn" type="submit">
-                  {mode === "ok" ? "Confirm all good" : "Submit check"}
+                  {mode === "ok"
+                    ? "Save — all good"
+                    : mode === "issue"
+                      ? "Save — needs repair"
+                      : "Submit check"}
                 </button>
                 <button
                   className="btn secondary"

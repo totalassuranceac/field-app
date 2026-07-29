@@ -370,6 +370,26 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     tips: [
       "Include job address whenever possible — warehouse uses it to find where a warranty part was bought.",
       "Tech handoff from warehouse to truck is Inventory → Pickup (issue + truck scan).",
+      "If you already picked up at the vendor and left parts at the shop, use Parts drop-off instead.",
+    ],
+  },
+  {
+    id: "wh-parts-dropoff",
+    title: "Parts drop-off — parts already at the shop",
+    summary:
+      "When someone picks up from a vendor while they’re out and leaves the parts at the shop, log a drop-off so warehouse knows they’re ready to put away or issue.",
+    roles: ["everyone"],
+    path: "/parts-dropoff",
+    steps: [
+      "Open Parts drop-off (Warehouse menu).",
+      "Enter vendor, what’s in the drop-off, and optional unit/job + where you left them.",
+      "Optional: add part # / description lines for each piece.",
+      "Tap Log drop-off at shop — warehouse gets a notification.",
+      "Warehouse taps Received · ready to issue when they have the parts.",
+    ],
+    tips: [
+      "Use Part pickup when parts are still at the supply house waiting to be collected.",
+      "Use Parts drop-off when the parts are already on the counter / in the cage at the shop.",
     ],
   },
   {

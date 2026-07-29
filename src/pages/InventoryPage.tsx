@@ -551,11 +551,27 @@ export function InventoryPage() {
       const printedBy = user?.display_name || user?.username || "Warehouse";
       const when = new Date().toLocaleString();
 
-      const rows = parts
+      // Our part number = name (e.g. "3/4 SOFT COPPER"); vendor SKU stays on the barcode
+      const sorted = [...parts].sort((a, b) => {
+        const an = (a.name || "").trim();
+        const bn = (b.name || "").trim();
+        const byName = an.localeCompare(bn, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (byName !== 0) return byName;
+        return (a.code || "").localeCompare(b.code || "", undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      });
+
+      const rows = sorted
         .map((p, i) => {
-          const code = (p.code || "").trim() || `PART-${p.id}`;
+          const ourPn = (p.name || "").trim() || (p.code || "").trim() || `PART-${p.id}`;
+          const sku = (p.code || "").trim() || `PART-${p.id}`;
           const linked = (p.barcodes || []).filter(
-            (b) => b && b.toLowerCase() !== code.toLowerCase()
+            (b) => b && b.toLowerCase() !== sku.toLowerCase()
           );
           const linkedHtml = linked.length
             ? `<div class="linked">Also: ${linked
@@ -571,8 +587,8 @@ export function InventoryPage() {
           return `
           <tr>
             <td class="left">
-              <div class="pn">${escapeHtml(code)}</div>
-              <div class="pname">${escapeHtml(p.name || "")}</div>
+              <div class="pn">${escapeHtml(ourPn)}</div>
+              <div class="sku">SKU ${escapeHtml(sku)}</div>
               ${
                 p.primary_vendor
                   ? `<div class="vendor">${escapeHtml(p.primary_vendor)}</div>`
@@ -581,7 +597,7 @@ export function InventoryPage() {
               ${linkedHtml}
             </td>
             <td class="right">
-              <svg class="bc-main" data-code="${escapeHtml(code)}" data-i="${i}"></svg>
+              <svg class="bc-main" data-code="${escapeHtml(sku)}" data-i="${i}"></svg>
             </td>
           </tr>`;
         })
@@ -623,10 +639,16 @@ export function InventoryPage() {
     .pn {
       font-weight: 800;
       font-size: 0.95rem;
-      font-family: ui-monospace, Consolas, monospace;
-      letter-spacing: 0.02em;
+      letter-spacing: 0.01em;
+      line-height: 1.25;
     }
-    .pname { color: #333; font-size: 0.78rem; margin-top: 0.12rem; line-height: 1.25; }
+    .sku {
+      color: #333;
+      font-size: 0.72rem;
+      margin-top: 0.12rem;
+      font-family: ui-monospace, Consolas, monospace;
+      line-height: 1.25;
+    }
     .vendor { color: #666; font-size: 0.7rem; margin-top: 0.1rem; }
     .linked { color: #444; font-size: 0.68rem; margin-top: 0.25rem; font-family: ui-monospace, Consolas, monospace; }
     .linked-bcs { margin-top: 0.2rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
@@ -650,21 +672,21 @@ export function InventoryPage() {
     <div>
       <h1>Part barcode directory</h1>
       <p class="sub">
-        Part number on the left · scannable barcode on the right.
-        Keep in the warehouse folder when boxes are missing labels.
+        Sorted by our part number (left) · scan barcode (SKU) on the right.
+        Example: <strong>3/4 SOFT COPPER</strong>. Keep in the warehouse folder when boxes are missing labels.
       </p>
     </div>
     <div class="meta">
       <div>${escapeHtml(when)}</div>
       <div>Prepared: ${escapeHtml(printedBy)}</div>
-      <div>${parts.length} part${parts.length === 1 ? "" : "s"}</div>
+      <div>${sorted.length} part${sorted.length === 1 ? "" : "s"}</div>
     </div>
   </header>
   <table>
     <tbody>${rows}</tbody>
   </table>
   <footer>
-    Scan barcodes open the part in Field App (part # or linked UPC).
+    Our part number is the name (e.g. 3/4 SOFT COPPER). Barcodes encode the system SKU for scanning.
     Link package barcodes from each part’s detail page.
   </footer>
   <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
@@ -707,7 +729,9 @@ export function InventoryPage() {
       w.document.open();
       w.document.write(html);
       w.document.close();
-      setOk(`Barcode directory ready — ${parts.length} parts. Use the print dialog (or Ctrl+P).`);
+      setOk(
+        `Barcode directory ready — ${sorted.length} parts, sorted by our part number. Use the print dialog (or Ctrl+P).`
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not build barcode list");
     }

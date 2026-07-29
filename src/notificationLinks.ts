@@ -28,6 +28,9 @@ export function notificationLink(n: {
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
   if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
     return "/warranties";
+  if (kind === "parts_dropoff" || entity === "parts_dropoff" || text.includes("parts at shop")) {
+    return "/parts-dropoff";
+  }
   if (kind === "pickup_waiting" || kind.includes("pickup")) return "/part-pickup";
   if (kind === "asset_attention" || kind.includes("asset")) return "/assets";
   if (kind.startsWith("handbook") || entity === "handbook" || text.includes("handbook")) {

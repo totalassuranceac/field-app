@@ -1,7 +1,17 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { api, Role, User, VIEW_AS_ROLES } from "./api";
 
 const VIEW_AS_KEY = "fleet_view_as_role";
+/** Last known session user — paints the app shell instantly while /auth/me revalidates. */
+const USER_CACHE_KEY = "fleet_user_cache_v1";
 
 interface AuthState {
   user: User | null;
@@ -28,9 +38,32 @@ function readViewAs(): Role | null {
   return null;
 }
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [realUser, setRealUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+function readCachedUser(): User | null {
+  try {
+    const raw = sessionStorage.getItem(USER_CACHE_KEY);
+    if (!raw) return null;
+    const u = JSON.parse(raw) as User;
+    if (!u || typeof u.id !== "number" || !u.role) return null;
+    return u;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedUser(user: User | null) {
+  try {
+    if (!user) sessionStorage.removeItem(USER_CACHE_KEY);
+    else sessionStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const cached = typeof window !== "undefined" ? readCachedUser() : null;
+  const [realUser, setRealUser] = useState<User | null>(cached);
+  // If we already know who they are, don't block the whole app on /auth/me
+  const [loading, setLoading] = useState(!cached);
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [viewAsRole, setViewAsRoleState] = useState<Role | null>(() => readViewAs());
 
@@ -46,13 +79,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await api<{ user: User | null; googleEnabled?: boolean }>("/auth/me");
-      setRealUser(data?.user ?? null);
+      const data = await api<{ user: User | null; googleEnabled?: boolean }>("/auth/me", {
+        timeoutMs: 6000,
+      });
+      const next = data?.user ?? null;
+      setRealUser(next);
+      writeCachedUser(next);
       setGoogleEnabled(Boolean(data?.googleEnabled));
       // Only true admins may keep view-as preview
       const isAdmin =
-        data?.user?.role === "admin" || data?.user?.real_role === "admin";
-      if (data?.user && !isAdmin) {
+        next?.role === "admin" || next?.real_role === "admin";
+      if (next && !isAdmin) {
         setViewAsRoleState(null);
         try {
           sessionStorage.removeItem(VIEW_AS_KEY);
@@ -61,17 +98,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
     } catch {
-      setRealUser(null);
+      // Keep cached user on blip so field staff can keep working; only clear if no cache
+      setRealUser((prev) => {
+        if (prev) return prev;
+        writeCachedUser(null);
+        return null;
+      });
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    // Hard cap so UI never stays blank if /auth/me hangs
-    const t = window.setTimeout(() => setLoading(false), 8000);
+    // Hard cap so UI never stays blank if /auth/me hangs (shorter when we have a cache)
+    const cap = cached ? 5000 : 4000;
+    const t = window.setTimeout(() => setLoading(false), cap);
     void refresh().finally(() => window.clearTimeout(t));
     return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
   const user = useMemo(() => {
@@ -92,14 +136,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const data = await api<{ user: User }>("/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
+      timeoutMs: 15_000,
     });
     setRealUser(data.user);
+    writeCachedUser(data.user);
     setViewAsRole(null);
+    setLoading(false);
   };
 
   const logout = async () => {
-    await api("/auth/logout", { method: "POST" });
+    try {
+      await api("/auth/logout", { method: "POST", timeoutMs: 5000 });
+    } catch {
+      /* still clear local session */
+    }
     setRealUser(null);
+    writeCachedUser(null);
     setViewAsRole(null);
   };
 

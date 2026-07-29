@@ -1,3 +1,4 @@
+import { useEffect, useState, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "./auth";
 import { Layout } from "./components/Layout";
@@ -6,6 +7,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { JoinPage } from "./pages/JoinPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { FuelPage } from "./pages/FuelPage";
+import { FuelReceiptReviewPage } from "./pages/FuelReceiptReviewPage";
 import { AlertsPage } from "./pages/AlertsPage";
 import { VehiclesPage } from "./pages/VehiclesPage";
 import { YardPage } from "./pages/YardPage";
@@ -23,6 +25,7 @@ import { InventoryPage } from "./pages/InventoryPage";
 import { AssetsPage } from "./pages/AssetsPage";
 
 import { VendorRunsPage } from "./pages/VendorRunsPage";
+import { PartsDropOffPage } from "./pages/PartsDropOffPage";
 import { TruckStockCountPage } from "./pages/TruckStockCountPage";
 import { WarrantiesPage } from "./pages/WarrantiesPage";
 import { PartsPurchasesPage } from "./pages/PartsPurchasesPage";
@@ -31,12 +34,49 @@ import { HowToPage } from "./pages/HowToPage";
 import { ReviewsPage } from "./pages/ReviewsPage";
 import { RolesPage } from "./pages/RolesPage";
 
-function Protected({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
-  if (loading) {
+function Protected({ children }: { children: ReactNode }) {
+  const { user, loading, refresh } = useAuth();
+  const [slow, setSlow] = useState(false);
+
+  useEffect(() => {
+    if (!loading) {
+      setSlow(false);
+      return;
+    }
+    const t = window.setTimeout(() => setSlow(true), 2500);
+    return () => window.clearTimeout(t);
+  }, [loading]);
+
+  if (loading && !user) {
     return (
       <div className="login-page">
-        <div className="muted">Loading…</div>
+        <div style={{ textAlign: "center", maxWidth: "18rem" }}>
+          <div className="muted">Loading…</div>
+          {slow && (
+            <div style={{ marginTop: "0.85rem" }}>
+              <p className="muted" style={{ fontSize: "0.85rem", margin: "0 0 0.65rem" }}>
+                Taking longer than usual — weak signal or server wake-up.
+              </p>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  void refresh();
+                }}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                style={{ marginLeft: "0.4rem" }}
+                onClick={() => window.location.assign(`/?reload=${Date.now()}`)}
+              >
+                Reload app
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -45,7 +85,7 @@ function Protected({ children }: { children: React.ReactNode }) {
 }
 
 /** After admin creates/resets password, force user into Settings to pick their own. */
-function PasswordGate({ children }: { children: React.ReactNode }) {
+function PasswordGate({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const location = useLocation();
   if (user?.must_change_password && location.pathname !== "/settings") {
@@ -65,7 +105,7 @@ function LoginRoute() {
   return <LoginPage />;
 }
 
-function Page({ children, title }: { children: React.ReactNode; title: string }) {
+function Page({ children, title }: { children: ReactNode; title: string }) {
   return <ErrorBoundary title={title}>{children}</ErrorBoundary>;
 }
 
@@ -103,6 +143,14 @@ export default function App() {
                     element={
                       <Page title="Fuel log">
                         <FuelPage />
+                      </Page>
+                    }
+                  />
+                  <Route
+                    path="/fuel/receipt-review"
+                    element={
+                      <Page title="Fuel receipt OCR review">
+                        <FuelReceiptReviewPage />
                       </Page>
                     }
                   />
@@ -173,6 +221,14 @@ export default function App() {
                     }
                   />
                   <Route path="/vendor-runs" element={<Navigate to="/part-pickup" replace />} />
+                  <Route
+                    path="/parts-dropoff"
+                    element={
+                      <Page title="Parts drop-off">
+                        <PartsDropOffPage />
+                      </Page>
+                    }
+                  />
                   <Route
                     path="/truck-stock"
                     element={

@@ -373,7 +373,11 @@ export function assertDriverVehicleAccess(
   return vehicleIds.includes(vehicleId);
 }
 
+/** Per-isolate: skip DB bootstrap work after first successful pass (speeds every API call). */
+let bootstrapDoneInIsolate = false;
+
 export async function ensureBootstrapAdmin(env: Env): Promise<void> {
+  if (bootstrapDoneInIsolate) return;
   const count = await env.DB.prepare("SELECT COUNT(*) as c FROM users").first<{ c: number }>();
   if ((count?.c ?? 0) > 0) {
     // Fix seed placeholder hashes if present
@@ -388,6 +392,7 @@ export async function ensureBootstrapAdmin(env: Env): Promise<void> {
         .bind(hash, salt, u.id)
         .run();
     }
+    bootstrapDoneInIsolate = true;
     return;
   }
 
@@ -406,6 +411,7 @@ export async function ensureBootstrapAdmin(env: Env): Promise<void> {
   )
     .bind("mechanic@example.com", "mechanic", "Fleet Mechanic", mech.hash, mech.salt)
     .run();
+  bootstrapDoneInIsolate = true;
 }
 
 export function googleConfigured(env: Env): boolean {

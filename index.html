@@ -13,7 +13,7 @@
     <meta name="format-detection" content="telephone=no" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <title>Field App · Total Assurance</title>
-    <!-- build: 2026-07-21-admin-polish -->
+    <!-- build: 2026-07-28-react-fix-v3 -->
     <script>
       // Apply saved theme before paint so dark mode is not a white flash
       try {
@@ -26,6 +26,35 @@
         document.documentElement.setAttribute("data-theme", t);
         document.documentElement.style.colorScheme = t;
       } catch (e) {}
+
+      // Drop stuck service workers / caches so phones don't keep an old broken app shell
+      (function () {
+        var BUILD = "2026-07-28-react-fix-v3";
+        try {
+          var prev = localStorage.getItem("ta_app_build");
+          if (prev !== BUILD) {
+            localStorage.setItem("ta_app_build", BUILD);
+            if (window.caches && prev) {
+              caches.keys().then(function (keys) {
+                return Promise.all(
+                  keys.map(function (k) {
+                    return caches.delete(k);
+                  })
+                );
+              });
+            }
+          }
+        } catch (e) {}
+        try {
+          if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              regs.forEach(function (r) {
+                r.unregister();
+              });
+            });
+          }
+        } catch (e) {}
+      })();
     </script>
     <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
@@ -123,15 +152,32 @@
       </div>
     </div>
     <script>
-      // If React never replaces #root, show a clear recovery path (not a blank page).
+      // Wake the API while JS downloads (cuts cold-start hangs on phones).
+      try {
+        fetch("/api/health", { credentials: "include", cache: "no-store" }).catch(function () {});
+      } catch (e) {}
+
+      // If React never replaces #root, recover automatically once, then show Retry.
       window.__TA_BOOT__ = Date.now();
+      function bootStillStuck() {
+        return !!document.getElementById("boot-shell");
+      }
       setTimeout(function () {
         var shell = document.getElementById("boot-shell");
         var msg = document.getElementById("boot-msg");
         if (!shell || !msg) return;
-        // React removes boot-shell when it mounts; if still here after 6s, help the user
-        msg.textContent =
-          "Still starting… If this does not change, use Retry (clears a stuck cache).";
+        msg.textContent = "Still starting…";
+        // One automatic reload if the bundle never mounts (stuck cache / flaky load).
+        try {
+          var key = "ta_boot_autoreload";
+          var last = Number(sessionStorage.getItem(key) || "0");
+          if (Date.now() - last > 60_000) {
+            sessionStorage.setItem(key, String(Date.now()));
+            msg.textContent = "Reloading once to clear a stuck start…";
+            location.replace("/?reload=" + Date.now());
+            return;
+          }
+        } catch (e) {}
         if (!document.getElementById("boot-retry")) {
           var a = document.createElement("a");
           a.id = "boot-retry";
@@ -140,16 +186,15 @@
           var inner = shell.querySelector(".boot-inner") || shell;
           inner.appendChild(a);
         }
-      }, 6000);
+      }, 7000);
       setTimeout(function () {
-        var shell = document.getElementById("boot-shell");
-        if (!shell) return;
+        if (!bootStillStuck()) return;
         var msg = document.getElementById("boot-msg");
         if (msg) {
           msg.innerHTML =
-            "The app did not finish loading on this device.<br/>Open the link below in a new tab, or clear site data for this site and try again.";
+            "Could not start on this connection.<br/>Tap Retry, or open the app again on better signal.";
         }
-      }, 12000);
+      }, 14000);
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { CollapsibleSection, LogItem, LogList } from "../components/CollapsibleLog";
@@ -96,6 +96,7 @@ export function FuelPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
+  const canReviewReceipts = can(user, "editFuel");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [entries, setEntries] = useState<FuelEntry[]>([]);
@@ -104,6 +105,8 @@ export function FuelPage() {
   );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Admin/office: open a recent entry to view receipt + jump to verify/edit */
+  const [inspectId, setInspectId] = useState<number | null>(null);
   const [success, setSuccess] = useState<{
     unit: string;
     odometer: number;
@@ -661,17 +664,33 @@ export function FuelPage() {
         <div>
           <h1>Fuel log</h1>
           <p>
-            <strong>Your job:</strong> pick the unit, photo the receipt, type the odometer. The app
-            prioritizes <strong>gallons</strong> and <strong>total $</strong> from the photo (plus
-            date, store, card last 4 when readable).
+            {canReviewReceipts ? (
+              <>
+                Log new fuel stops below. Open <strong>Recent fuel entries</strong> to view receipt
+                photos, correct values, and verify so the app learns.
+              </>
+            ) : (
+              <>
+                <strong>Your job:</strong> pick the unit, photo the receipt, type the odometer. The
+                app prioritizes <strong>gallons</strong> and <strong>total $</strong> from the photo
+                (plus date, store, card last 4 when readable).
+              </>
+            )}
           </p>
         </div>
-        {totals && (
-          <div className="muted">
-            {totals.count} entries · {Number(totals.gallons).toFixed(1)} gal · $
-            {Number(totals.total_cost).toFixed(2)}
-          </div>
-        )}
+        <div className="toolbar no-print" style={{ flexDirection: "column", alignItems: "flex-end", gap: "0.35rem" }}>
+          {totals && (
+            <div className="muted" style={{ fontSize: "0.85rem" }}>
+              {totals.count} entries · {Number(totals.gallons).toFixed(1)} gal · $
+              {Number(totals.total_cost).toFixed(2)}
+            </div>
+          )}
+          {canReviewReceipts && (
+            <Link className="btn btn-sm" to="/fuel/receipt-review">
+              Review receipt photos
+            </Link>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -1108,54 +1127,99 @@ export function FuelPage() {
       <CollapsibleSection
         title="Recent fuel entries"
         count={entries.length}
-        hint="Tap a row for gallons / total / odometer"
-        defaultOpen={false}
+        hint={
+          canReviewReceipts
+            ? "Open a row → view receipt photo → Review & edit to verify / teach OCR"
+            : "Tap a row for gallons / total / odometer"
+        }
+        defaultOpen={canReviewReceipts}
       >
         <LogList className="fuel-entry-list" empty="No entries yet.">
-          {entries.map((e) => (
-            <LogItem
-              key={e.id}
-              summary={
-                <>
-                  <strong>{e.fuel_date}</strong>
-                  {e.fuel_time ? <span className="log-item-meta">{e.fuel_time}</span> : null}
-                  {e.unit_number ? (
-                    <span className="log-item-badge">Unit {e.unit_number}</span>
-                  ) : null}
-                  <span className="log-item-meta">
-                    {e.gallons != null ? `${Number(e.gallons).toFixed(1)} gal` : "—"}
-                    {e.total_cost != null ? ` · $${Number(e.total_cost).toFixed(2)}` : ""}
-                  </span>
-                </>
-              }
-            >
-              <div className="fuel-entry-stats">
-                <div className="fuel-entry-stat">
-                  <span className="fuel-entry-label">Odometer</span>
-                  <span className="fuel-entry-value">{e.odometer.toLocaleString()}</span>
+          {entries.map((e) => {
+            const open = inspectId === e.id;
+            return (
+              <LogItem
+                key={e.id}
+                defaultOpen={open}
+                summary={
+                  <>
+                    <strong>{e.fuel_date}</strong>
+                    {e.fuel_time ? <span className="log-item-meta">{e.fuel_time}</span> : null}
+                    {e.unit_number ? (
+                      <span className="log-item-badge">Unit {e.unit_number}</span>
+                    ) : null}
+                    <span className="log-item-meta">
+                      {e.gallons != null ? `${Number(e.gallons).toFixed(1)} gal` : "—"}
+                      {e.total_cost != null ? ` · $${Number(e.total_cost).toFixed(2)}` : ""}
+                    </span>
+                    {canReviewReceipts && e.receipt_key ? (
+                      <span className="log-item-badge" title="Has receipt photo">
+                        Photo
+                      </span>
+                    ) : null}
+                  </>
+                }
+              >
+                <div className="fuel-entry-stats">
+                  <div className="fuel-entry-stat">
+                    <span className="fuel-entry-label">Odometer</span>
+                    <span className="fuel-entry-value">{e.odometer.toLocaleString()}</span>
+                  </div>
+                  <div className="fuel-entry-stat">
+                    <span className="fuel-entry-label">Gallons</span>
+                    <span className="fuel-entry-value">
+                      {e.gallons != null ? Number(e.gallons).toFixed(1) : "—"}
+                    </span>
+                  </div>
+                  <div className="fuel-entry-stat">
+                    <span className="fuel-entry-label">Total</span>
+                    <span className="fuel-entry-value">
+                      {e.total_cost != null ? `$${Number(e.total_cost).toFixed(2)}` : "—"}
+                    </span>
+                  </div>
                 </div>
-                <div className="fuel-entry-stat">
-                  <span className="fuel-entry-label">Gallons</span>
-                  <span className="fuel-entry-value">
-                    {e.gallons != null ? Number(e.gallons).toFixed(1) : "—"}
-                  </span>
-                </div>
-                <div className="fuel-entry-stat">
-                  <span className="fuel-entry-label">Total</span>
-                  <span className="fuel-entry-value">
-                    {e.total_cost != null ? `$${Number(e.total_cost).toFixed(2)}` : "—"}
-                  </span>
-                </div>
-              </div>
-              {e.employee_name || e.entered_by_name ? (
-                <div className="muted">
-                  {e.employee_name || e.entered_by_name}
-                  {e.store_number ? ` · store ${e.store_number}` : ""}
-                  {e.card_last4 ? ` · card ••${e.card_last4}` : ""}
-                </div>
-              ) : null}
-            </LogItem>
-          ))}
+                {e.employee_name || e.entered_by_name ? (
+                  <div className="muted">
+                    {e.employee_name || e.entered_by_name}
+                    {e.store_number ? ` · store ${e.store_number}` : ""}
+                    {e.card_last4 ? ` · card ••${e.card_last4}` : ""}
+                  </div>
+                ) : null}
+                {canReviewReceipts && e.receipt_key ? (
+                  <div className="fuel-log-review-block no-print">
+                    <a
+                      href={`/api/uploads/${encodeURIComponent(e.receipt_key)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="fuel-log-receipt-thumb-link"
+                    >
+                      <img
+                        src={`/api/uploads/${encodeURIComponent(e.receipt_key)}`}
+                        alt={`Receipt unit ${e.unit_number}`}
+                        className="fuel-log-receipt-thumb"
+                      />
+                    </a>
+                    <div className="fuel-log-review-actions">
+                      <p className="muted" style={{ margin: 0, fontSize: "0.8rem" }}>
+                        Tap photo for full size. Open review to correct fields and teach OCR.
+                      </p>
+                      <Link
+                        className="btn btn-sm"
+                        to={`/fuel/receipt-review?id=${e.id}`}
+                        onClick={() => setInspectId(e.id)}
+                      >
+                        Review &amp; edit · verify
+                      </Link>
+                    </div>
+                  </div>
+                ) : canReviewReceipts ? (
+                  <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.8rem" }}>
+                    No receipt photo on this entry.
+                  </p>
+                ) : null}
+              </LogItem>
+            );
+          })}
         </LogList>
       </CollapsibleSection>
     </div>

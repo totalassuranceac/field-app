@@ -171,11 +171,23 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 app.use("/api/*", cors({ origin: (o) => o || "*", credentials: true }));
 
 app.use("/api/*", async (c, next) => {
-  // Never block API (or login) if bootstrap/DB is slow
+  // Auth/health must stay instant — never run bootstrap work on the hot path
+  const p = new URL(c.req.url).pathname;
+  if (
+    p === "/api/health" ||
+    p === "/api/auth/me" ||
+    p === "/api/auth/login" ||
+    p.startsWith("/api/auth/invite") ||
+    p.startsWith("/api/auth/google")
+  ) {
+    await next();
+    return;
+  }
+  // Never block API if bootstrap/DB is slow (isolate cache makes this near-free after first hit)
   try {
     await Promise.race([
       ensureBootstrapAdmin(c.env),
-      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      new Promise<void>((resolve) => setTimeout(resolve, 800)),
     ]);
   } catch {
     // DB may not be migrated yet
@@ -1914,6 +1926,59 @@ api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) =>
 });
 
 // Fuel
+/** Ensure fuel OCR review columns exist (migration 043). Do not run bulk backfills here — that can hang mobile. */
+let fuelOcrColsReady = false;
+async function ensureFuelOcrReviewColumns(db: D1Database): Promise<void> {
+  if (fuelOcrColsReady) return;
+  const alters = [
+    `ALTER TABLE fuel_entries ADD COLUMN ocr_raw_text TEXT`,
+    `ALTER TABLE fuel_entries ADD COLUMN ocr_json TEXT`,
+    `ALTER TABLE fuel_entries ADD COLUMN ocr_needs_review INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE fuel_entries ADD COLUMN ocr_reviewed_at TEXT`,
+    `ALTER TABLE fuel_entries ADD COLUMN ocr_reviewed_by_user_id INTEGER`,
+  ];
+  for (const sql of alters) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* column exists */
+    }
+  }
+  fuelOcrColsReady = true;
+}
+
+function fuelOcrNeedsReview(
+  ocr: OcrFieldSnapshot | null | undefined,
+  final: OcrFieldSnapshot | null | undefined
+): boolean {
+  if (!ocr || !final) return true;
+  const fields = [
+    "fuel_date",
+    "fuel_time",
+    "gallons",
+    "total_cost",
+    "store_number",
+    "card_last4",
+  ] as const;
+  let anyDiff = false;
+  let anyCore = false;
+  for (const f of fields) {
+    const o = ocr[f];
+    const fin = final[f];
+    if (fin != null && String(fin).trim() !== "") anyCore = true;
+    const os = o == null ? "" : String(o).trim();
+    const fs = fin == null ? "" : String(fin).trim();
+    if (os !== fs) anyDiff = true;
+  }
+  // Missing gallons or total always review
+  if (final.gallons == null || final.total_cost == null) return true;
+  // OCR disagreed with submitted values — admin should confirm learning
+  if (anyDiff) return true;
+  // No usable final data
+  if (!anyCore) return true;
+  return false;
+}
+
 api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
   const from = c.req.query("from");
   const to = c.req.query("to");
@@ -2091,27 +2156,83 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
     stationNotes = stationNotes ? `${stationNotes} | ${flag}` : flag;
   }
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO fuel_entries
-      (employee_id, vehicle_id, odometer, gallons, total_cost, fuel_date, fuel_time,
-       store_number, card_last4, station_notes, receipt_key, entered_by_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      employeeId,
-      body.vehicle_id,
-      body.odometer,
-      body.gallons ?? null,
-      body.total_cost ?? null,
-      body.fuel_date,
-      body.fuel_time?.trim() || null,
-      body.store_number?.trim() || null,
-      cardLast4,
-      stationNotes || null,
-      body.receipt_key,
-      user.id
+  await ensureFuelOcrReviewColumns(c.env.DB);
+
+  const ocrSnap = body.ocr_feedback?.ocr || null;
+  const finalSnap: OcrFieldSnapshot = body.ocr_feedback?.final || {
+    fuel_date: body.fuel_date || null,
+    fuel_time: body.fuel_time?.trim() || null,
+    gallons: body.gallons ?? null,
+    total_cost: body.total_cost ?? null,
+    store_number: body.store_number?.trim() || null,
+    card_last4: cardLast4,
+  };
+  // Always queue for admin photo verification so OCR can be taught from every receipt.
+  // (Smart heuristics still stored; admin clears the queue by reviewing.)
+  const needsReviewFlag =
+    fuelOcrNeedsReview(ocrSnap, finalSnap) || cardMismatch || Boolean(body.receipt_key?.trim())
+      ? 1
+      : 0;
+  const ocrJson = JSON.stringify({
+    ocr: ocrSnap,
+    final: finalSnap,
+    raw_text: body.ocr_feedback?.raw_text || null,
+    saved_at: new Date().toISOString(),
+  });
+
+  let result;
+  try {
+    result = await c.env.DB.prepare(
+      `INSERT INTO fuel_entries
+        (employee_id, vehicle_id, odometer, gallons, total_cost, fuel_date, fuel_time,
+         store_number, card_last4, station_notes, receipt_key, entered_by_user_id,
+         ocr_raw_text, ocr_json, ocr_needs_review)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run();
+      .bind(
+        employeeId,
+        body.vehicle_id,
+        body.odometer,
+        body.gallons ?? null,
+        body.total_cost ?? null,
+        body.fuel_date,
+        body.fuel_time?.trim() || null,
+        body.store_number?.trim() || null,
+        cardLast4,
+        stationNotes || null,
+        body.receipt_key,
+        user.id,
+        body.ocr_feedback?.raw_text
+          ? String(body.ocr_feedback.raw_text).slice(0, 8000)
+          : null,
+        ocrJson,
+        needsReviewFlag
+      )
+      .run();
+  } catch {
+    // Pre-migration fallback
+    result = await c.env.DB.prepare(
+      `INSERT INTO fuel_entries
+        (employee_id, vehicle_id, odometer, gallons, total_cost, fuel_date, fuel_time,
+         store_number, card_last4, station_notes, receipt_key, entered_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        employeeId,
+        body.vehicle_id,
+        body.odometer,
+        body.gallons ?? null,
+        body.total_cost ?? null,
+        body.fuel_date,
+        body.fuel_time?.trim() || null,
+        body.store_number?.trim() || null,
+        cardLast4,
+        stationNotes || null,
+        body.receipt_key,
+        user.id
+      )
+      .run();
+  }
 
   const id = result.meta.last_row_id as number;
 
@@ -2227,6 +2348,243 @@ api.patch("/fuel/:id", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
   const after = await c.env.DB.prepare("SELECT * FROM fuel_entries WHERE id = ?").bind(id).first();
   await writeAudit(c.env.DB, c.get("user"), "update", "fuel_entry", id, "Updated fuel entry", before, after);
   return c.json({ entry: after });
+});
+
+/**
+ * Admin OCR receipt review queue — photos + OCR vs submitted values.
+ * ?filter=needs (default) | reviewed | all
+ */
+api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
+  await ensureFuelOcrReviewColumns(c.env.DB);
+  const filter = (c.req.query("filter") || "needs").toLowerCase();
+  const wantId = Number(c.req.query("id") || "0");
+  const limit = Math.min(100, Math.max(10, Number(c.req.query("limit") || "40")));
+  let where = "WHERE f.receipt_key IS NOT NULL AND trim(f.receipt_key) != ''";
+  // Needs review = any receipt photo not yet admin-verified (full queue for learning)
+  if (filter === "needs" || filter === "pending") {
+    where += " AND f.ocr_reviewed_at IS NULL";
+  } else if (filter === "reviewed") {
+    where += " AND f.ocr_reviewed_at IS NOT NULL";
+  }
+  // "all" — no extra filter
+  if (wantId > 0) {
+    where += " AND f.id = ?";
+  }
+  try {
+    const binds: unknown[] = [];
+    if (wantId > 0) binds.push(wantId);
+    binds.push(limit);
+    const rows = await c.env.DB.prepare(
+      `SELECT f.*, e.name as employee_name, v.unit_number,
+          u.display_name as entered_by_name,
+          ru.display_name as reviewed_by_name
+       FROM fuel_entries f
+       JOIN employees e ON e.id = f.employee_id
+       JOIN vehicles v ON v.id = f.vehicle_id
+       LEFT JOIN users u ON u.id = f.entered_by_user_id
+       LEFT JOIN users ru ON ru.id = f.ocr_reviewed_by_user_id
+       ${where}
+       ORDER BY f.created_at DESC
+       LIMIT ?`
+    )
+      .bind(...binds)
+      .all();
+
+    const pending = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM fuel_entries f
+       WHERE f.receipt_key IS NOT NULL AND trim(f.receipt_key) != ''
+         AND f.ocr_reviewed_at IS NULL`
+    ).first<{ c: number }>();
+
+    const list = (rows.results || []).map((r) => {
+      const row = r as Record<string, unknown>;
+      let ocr_payload: unknown = null;
+      if (row.ocr_json) {
+        try {
+          ocr_payload = JSON.parse(String(row.ocr_json));
+        } catch {
+          ocr_payload = null;
+        }
+      }
+      return { ...row, ocr_payload };
+    });
+
+    return c.json({
+      entries: list,
+      pending_count: pending?.c ?? 0,
+      filter,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column/i.test(msg)) {
+      return c.json({
+        entries: [],
+        pending_count: 0,
+        error: "Run migration 043_fuel_ocr_review.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/**
+ * Admin corrects receipt fields from the photo and teaches OCR memory.
+ */
+api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
+  const user = c.get("user");
+  const id = Number(c.req.param("id"));
+  await ensureFuelOcrReviewColumns(c.env.DB);
+  const body = await c.req.json<{
+    fuel_date?: string | null;
+    fuel_time?: string | null;
+    gallons?: number | null;
+    total_cost?: number | null;
+    store_number?: string | null;
+    card_last4?: string | null;
+    station_notes?: string | null;
+    odometer?: number | null;
+    mark_reviewed?: boolean;
+  }>();
+
+  const before = await c.env.DB.prepare(`SELECT * FROM fuel_entries WHERE id = ?`)
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  let ocrSnap: OcrFieldSnapshot = {
+    fuel_date: null,
+    fuel_time: null,
+    gallons: null,
+    total_cost: null,
+    store_number: null,
+    card_last4: null,
+  };
+  let rawText: string | null =
+    before.ocr_raw_text != null ? String(before.ocr_raw_text) : null;
+  if (before.ocr_json) {
+    try {
+      const p = JSON.parse(String(before.ocr_json)) as {
+        ocr?: OcrFieldSnapshot;
+        raw_text?: string | null;
+      };
+      if (p.ocr) ocrSnap = { ...ocrSnap, ...p.ocr };
+      if (p.raw_text) rawText = p.raw_text;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const cardLast4 =
+    body.card_last4 !== undefined
+      ? body.card_last4
+        ? String(body.card_last4).replace(/\D/g, "").slice(-4)
+        : null
+      : before.card_last4 != null
+        ? String(before.card_last4)
+        : null;
+
+  const finalSnap: OcrFieldSnapshot = {
+    fuel_date:
+      body.fuel_date !== undefined
+        ? body.fuel_date || null
+        : (before.fuel_date as string | null) || null,
+    fuel_time:
+      body.fuel_time !== undefined
+        ? body.fuel_time || null
+        : (before.fuel_time as string | null) || null,
+    gallons:
+      body.gallons !== undefined
+        ? body.gallons
+        : before.gallons != null
+          ? Number(before.gallons)
+          : null,
+    total_cost:
+      body.total_cost !== undefined
+        ? body.total_cost
+        : before.total_cost != null
+          ? Number(before.total_cost)
+          : null,
+    store_number:
+      body.store_number !== undefined
+        ? body.store_number || null
+        : (before.store_number as string | null) || null,
+    card_last4: cardLast4,
+  };
+
+  const odometer =
+    body.odometer !== undefined && body.odometer != null && Number.isFinite(Number(body.odometer))
+      ? Number(body.odometer)
+      : before.odometer != null
+        ? Number(before.odometer)
+        : null;
+
+  await c.env.DB.prepare(
+    `UPDATE fuel_entries SET
+       fuel_date = COALESCE(?, fuel_date),
+       fuel_time = ?,
+       gallons = ?,
+       total_cost = ?,
+       store_number = ?,
+       card_last4 = ?,
+       station_notes = COALESCE(?, station_notes),
+       odometer = COALESCE(?, odometer),
+       ocr_needs_review = 0,
+       ocr_reviewed_at = datetime('now'),
+       ocr_reviewed_by_user_id = ?,
+       ocr_json = ?,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(
+      finalSnap.fuel_date,
+      finalSnap.fuel_time,
+      finalSnap.gallons,
+      finalSnap.total_cost,
+      finalSnap.store_number,
+      finalSnap.card_last4,
+      body.station_notes !== undefined ? body.station_notes || null : null,
+      odometer,
+      user.id,
+      JSON.stringify({
+        ocr: ocrSnap,
+        final: finalSnap,
+        raw_text: rawText,
+        admin_reviewed_at: new Date().toISOString(),
+        admin_reviewed_by: user.id,
+      }),
+      id
+    )
+    .run();
+
+  // Teach OCR from original OCR read → admin-corrected final
+  let learned = 0;
+  try {
+    const r = await recordOcrFeedback(c.env.DB, user.id, rawText, ocrSnap, finalSnap);
+    learned = r.corrections || 0;
+  } catch {
+    /* non-fatal */
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "fuel_entry",
+    id,
+    `OCR review · taught ${learned} field(s)`
+  );
+
+  const entry = await c.env.DB.prepare(
+    `SELECT f.*, e.name as employee_name, v.unit_number
+     FROM fuel_entries f
+     JOIN employees e ON e.id = f.employee_id
+     JOIN vehicles v ON v.id = f.vehicle_id
+     WHERE f.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, entry, learned });
 });
 
 // ——— Parts purchase receipts (company card / vendor invoice photos) ———
@@ -2770,7 +3128,7 @@ api.post("/alerts/:id/ack", requireRoles(ROLE_PERMS.manageAlerts), async (c) => 
 api.get("/issues", async (c) => {
   const status = c.req.query("status");
   const report = c.req.query("report");
-  let sql = `SELECT i.*, v.unit_number, u.display_name as reporter_name
+  let sql = `SELECT i.*, v.unit_number, v.assigned_driver, u.display_name as reporter_name
     FROM vehicle_issues i
     JOIN vehicles v ON v.id = i.vehicle_id
     JOIN users u ON u.id = i.reported_by_user_id WHERE 1=1`;
@@ -5290,10 +5648,13 @@ api.post("/inspections", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
   if (!["pass", "pass_with_notes", "fail"].includes(body.overall_status)) {
     return c.json({ error: "overall_status must be pass, pass_with_notes, or fail" }, 400);
   }
+  // Open a shop ticket when problems are reported; never for a clean pass.
+  // create_issue_on_fail defaults to true for non-pass (client may omit it).
   let createdIssueId: number | null = null;
+  const hasProblems =
+    body.overall_status === "fail" || body.overall_status === "pass_with_notes";
   const shouldOpenIssue =
-    body.create_issue_on_fail !== false &&
-    (body.overall_status === "fail" || body.overall_status === "pass_with_notes");
+    hasProblems && body.create_issue_on_fail !== false && body.overall_status !== "pass";
   if (shouldOpenIssue && body.overall_status === "fail") {
     const fails = Object.entries(body.checklist || {})
       .filter(([, v]) => v === "fail" || v === "attention")
@@ -5311,22 +5672,23 @@ api.post("/inspections", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       )
       .run();
     createdIssueId = issue.meta.last_row_id as number;
-  } else if (
-    body.create_issue_on_fail !== false &&
-    body.overall_status === "pass_with_notes" &&
-    body.notes?.trim()
-  ) {
-    // Attention items with notes still open a lower-severity ticket
+  } else if (shouldOpenIssue && body.overall_status === "pass_with_notes") {
+    // Needs-repair / attention — always open a shop ticket (notes preferred)
+    const note = (body.notes || "").trim();
+    const badItems = Object.entries(body.checklist || {})
+      .filter(([, v]) => v === "fail" || v === "attention")
+      .map(([k]) => k.replace(/_/g, " "));
+    const desc =
+      note ||
+      (badItems.length ? `Items needing attention: ${badItems.join(", ")}` : "Weekly check — needs repair");
+    const title = note
+      ? `Weekly check — ${note.slice(0, 48)}${note.length > 48 ? "…" : ""}`
+      : `Weekly check — needs repair${badItems.length ? ` (${badItems.slice(0, 2).join(", ")})` : ""}`;
     const issue = await c.env.DB.prepare(
       `INSERT INTO vehicle_issues (vehicle_id, reported_by_user_id, severity, title, description, status)
        VALUES (?, ?, 'medium', ?, ?, 'open')`
     )
-      .bind(
-        body.vehicle_id,
-        user.id,
-        `Weekly check note — unit check`,
-        body.notes.trim()
-      )
+      .bind(body.vehicle_id, user.id, title, desc)
       .run();
     createdIssueId = issue.meta.last_row_id as number;
   }
@@ -6203,7 +6565,8 @@ api.get("/inventory/parts", requireRoles(ROLE_PERMS.viewInventory), async (c) =>
 });
 
 /**
- * Printable warehouse directory: every active part # + linked package barcodes.
+ * Printable warehouse directory: every active part + linked package barcodes.
+ * Sorted by our part name (e.g. "3/4 SOFT COPPER"), not vendor SKU.
  * Used for a binder/folder sheet when boxes are missing labels.
  */
 api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
@@ -6224,29 +6587,44 @@ api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInvent
             FROM part_barcodes pb WHERE pb.part_id = p.id) as linked_barcodes
          FROM parts p
          WHERE p.active = 1
-         ORDER BY lower(p.code), p.name`
+         ORDER BY lower(trim(p.name)), lower(trim(p.code))`
       ).all();
     } catch {
-      // Migration 042 not applied — still list part numbers for printing
+      // Migration 042 not applied — still list parts for printing
       rows = await c.env.DB.prepare(
         `SELECT p.id, p.code, p.name, p.primary_vendor, NULL as linked_barcodes
          FROM parts p
          WHERE p.active = 1
-         ORDER BY lower(p.code), p.name`
+         ORDER BY lower(trim(p.name)), lower(trim(p.code))`
       ).all();
     }
-    const parts = (rows.results || []).map((r) => ({
-      id: r.id,
-      code: r.code,
-      name: r.name,
-      primary_vendor: r.primary_vendor,
-      barcodes: r.linked_barcodes
-        ? String(r.linked_barcodes)
-            .split(/\s*·\s*/)
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : ([] as string[]),
-    }));
+    // Natural sort so "1/4…", "3/8…", "3/4 SOFT COPPER" order correctly for warehouse
+    const parts = (rows.results || [])
+      .map((r) => ({
+        id: r.id,
+        code: r.code,
+        name: r.name,
+        primary_vendor: r.primary_vendor,
+        barcodes: r.linked_barcodes
+          ? String(r.linked_barcodes)
+              .split(/\s*·\s*/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : ([] as string[]),
+      }))
+      .sort((a, b) => {
+        const an = (a.name || "").trim();
+        const bn = (b.name || "").trim();
+        const byName = an.localeCompare(bn, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (byName !== 0) return byName;
+        return (a.code || "").localeCompare(b.code || "", undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      });
     return c.json({ parts, count: parts.length });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -8797,6 +9175,7 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
 
     await refreshPartPickupTicketStatus(c.env.DB, line.ticket_id);
 
+    // Notify in background — never make the counter wait on notifications
     if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
       const label = line.part_name || line.part_code || `Line ${lineId}`;
       const statusLabel =
@@ -8809,19 +9188,30 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
               : status === "partial"
                 ? "Partial"
                 : status.replace("_", " ");
-      await notifyUsers(
-        c.env.DB,
-        [line.logged_by_user_id],
-        "vendor_run",
-        `${statusLabel} · ${line.vendor_name}`,
-        `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
-          body.notes ? ` · ${String(body.notes).trim()}` : ""
-        } — ${user.display_name}`,
-        { type: "part_pickup", id: line.ticket_id }
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          [line.logged_by_user_id],
+          "vendor_run",
+          `${statusLabel} · ${line.vendor_name}`,
+          `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
+            body.notes ? ` · ${String(body.notes).trim()}` : ""
+          } — ${user.display_name}`,
+          { type: "part_pickup", id: line.ticket_id }
+        ).catch(() => {
+          /* non-fatal */
+        })
       );
     }
 
-    return c.json({ ok: true });
+    return c.json({
+      ok: true,
+      line_id: lineId,
+      status,
+      qty_received: qtyRecv,
+      ticket_id: line.ticket_id,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) {
@@ -8829,6 +9219,317 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     }
     return c.json({ error: msg }, 500);
   }
+});
+
+// ——— Parts drop-off (brought to shop from vendor, ready to put away / issue) ———
+
+let partsDropoffTablesReady = false;
+async function ensurePartsDropoffTables(db: D1Database): Promise<void> {
+  if (partsDropoffTablesReady) return;
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS parts_dropoffs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vendor_name TEXT NOT NULL,
+      part_summary TEXT NOT NULL,
+      for_unit TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'waiting',
+      dropped_by_user_id INTEGER,
+      received_by_user_id INTEGER,
+      received_at TEXT,
+      source TEXT NOT NULL DEFAULT 'tech',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_dropoffs_status ON parts_dropoffs(status, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS parts_dropoff_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dropoff_id INTEGER NOT NULL,
+      line_no INTEGER NOT NULL DEFAULT 1,
+      part_code TEXT,
+      part_name TEXT,
+      qty REAL NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_dropoff_lines_dropoff ON parts_dropoff_lines(dropoff_id, line_no)`,
+  ];
+  for (const sql of stmts) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  partsDropoffTablesReady = true;
+}
+
+async function countPartsDropoffWaiting(db: D1Database): Promise<number> {
+  try {
+    await ensurePartsDropoffTables(db);
+    const row = await db
+      .prepare(`SELECT COUNT(*) as c FROM parts_dropoffs WHERE status = 'waiting'`)
+      .first<{ c: number }>();
+    return row?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+api.get("/inventory/parts-dropoffs/count", async (c) => {
+  const waiting = await countPartsDropoffWaiting(c.env.DB);
+  return c.json({ waiting });
+});
+
+/** List drop-offs: waiting (default) | received | all */
+api.get("/inventory/parts-dropoffs", async (c) => {
+  await ensurePartsDropoffTables(c.env.DB);
+  const status = (c.req.query("status") || "waiting").toLowerCase();
+  try {
+    let where = "WHERE 1=1";
+    if (status === "waiting" || status === "open") {
+      where = "WHERE d.status = 'waiting'";
+    } else if (status === "received" || status === "done") {
+      where = "WHERE d.status = 'received'";
+    } else if (status === "cancelled") {
+      where = "WHERE d.status = 'cancelled'";
+    }
+    // else all
+    const rows = await c.env.DB.prepare(
+      `SELECT d.*,
+          du.display_name as dropped_by_name,
+          ru.display_name as received_by_name
+       FROM parts_dropoffs d
+       LEFT JOIN users du ON du.id = d.dropped_by_user_id
+       LEFT JOIN users ru ON ru.id = d.received_by_user_id
+       ${where}
+       ORDER BY
+         CASE d.status WHEN 'waiting' THEN 0 WHEN 'received' THEN 1 ELSE 2 END,
+         d.created_at DESC
+       LIMIT 80`
+    ).all();
+
+    const list = [];
+    for (const r of rows.results || []) {
+      const id = Number((r as { id: number }).id);
+      let lines: unknown[] = [];
+      try {
+        const lr = await c.env.DB.prepare(
+          `SELECT * FROM parts_dropoff_lines WHERE dropoff_id = ? ORDER BY line_no, id`
+        )
+          .bind(id)
+          .all();
+        lines = lr.results || [];
+      } catch {
+        lines = [];
+      }
+      list.push({ ...r, lines });
+    }
+
+    const waiting = await countPartsDropoffWaiting(c.env.DB);
+    return c.json({ dropoffs: list, waiting });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        dropoffs: [],
+        waiting: 0,
+        error: "Run migration 044_parts_dropoffs.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/**
+ * Employee brought parts from a vendor to the shop.
+ * Body: vendor_name, part_summary (or parts[]), for_unit?, notes?, source?
+ */
+api.post("/inventory/parts-dropoffs", async (c) => {
+  const user = c.get("user");
+  await ensurePartsDropoffTables(c.env.DB);
+  const body = await c.req.json<{
+    vendor_name?: string;
+    part_summary?: string | null;
+    for_unit?: string | null;
+    notes?: string | null;
+    parts?: Array<{ part_code?: string | null; part_name?: string | null; qty?: number }>;
+    source?: "office" | "tech" | "warehouse" | "other";
+  }>();
+
+  const vendor = (body.vendor_name || "").trim();
+  if (!vendor) return c.json({ error: "Vendor name is required" }, 400);
+
+  const partsIn = body.parts || [];
+  let summary = (body.part_summary || "").trim();
+  if (!summary && partsIn.length) {
+    summary = partsIn
+      .map((p) => {
+        const label = (p.part_name || p.part_code || "Part").trim();
+        const q = Number(p.qty);
+        return Number.isFinite(q) && q !== 1 ? `${q}× ${label}` : label;
+      })
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (!summary || summary.length < 2) {
+    return c.json({ error: "What parts did you drop off? Add a short description or part lines." }, 400);
+  }
+
+  const forUnit = (body.for_unit || "").trim() || null;
+  const notes = (body.notes || "").trim() || null;
+  const source = body.source || defaultVendorRunSource(user.role);
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO parts_dropoffs (
+         vendor_name, part_summary, for_unit, notes, status,
+         dropped_by_user_id, source, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'waiting', ?, ?, datetime('now'), datetime('now'))`
+    )
+      .bind(vendor, summary, forUnit, notes, user.id, source)
+      .run();
+    const dropoffId = Number(ins.meta.last_row_id);
+
+    let lineNo = 1;
+    for (const p of partsIn.slice(0, 40)) {
+      const code = (p.part_code || "").trim() || null;
+      const name = (p.part_name || "").trim() || null;
+      if (!code && !name) continue;
+      const qty = Number(p.qty);
+      await c.env.DB.prepare(
+        `INSERT INTO parts_dropoff_lines (dropoff_id, line_no, part_code, part_name, qty)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+        .bind(dropoffId, lineNo++, code, name, Number.isFinite(qty) && qty > 0 ? qty : 1)
+        .run();
+    }
+
+    // Notify warehouse / admin so they can put away or issue
+    try {
+      const targets = await usersByRoles(c.env.DB, ["admin", "warehouse"]);
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          targets.filter((id) => id !== user.id),
+          "parts_dropoff",
+          `Parts at shop · ${vendor}`,
+          `${summary}${forUnit ? ` · unit ${forUnit}` : ""} — dropped by ${user.display_name}`,
+          { type: "parts_dropoff", id: dropoffId }
+        ).catch(() => {
+          /* non-fatal */
+        })
+      );
+    } catch {
+      /* optional */
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "parts_dropoff",
+      dropoffId,
+      `Drop-off ${vendor}: ${summary.slice(0, 80)}`
+    );
+
+    const row = await c.env.DB.prepare(
+      `SELECT d.*, u.display_name as dropped_by_name
+       FROM parts_dropoffs d
+       LEFT JOIN users u ON u.id = d.dropped_by_user_id
+       WHERE d.id = ?`
+    )
+      .bind(dropoffId)
+      .first();
+
+    return c.json({ ok: true, dropoff: row }, 201);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ error: msg }, 500);
+  }
+});
+
+/** Warehouse marks drop-off received (put away / ready to issue). */
+api.post("/inventory/parts-dropoffs/:id/receive", async (c) => {
+  const user = c.get("user");
+  if (!["admin", "warehouse", "office"].includes(user.role)) {
+    return c.json({ error: "Warehouse / office marks drop-offs received" }, 403);
+  }
+  await ensurePartsDropoffTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ notes?: string | null }>().catch(() => ({} as { notes?: string }));
+
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_dropoffs WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; status: string; dropped_by_user_id: number | null; vendor_name: string; part_summary: string }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status === "received") return c.json({ error: "Already marked received" }, 400);
+  if (before.status === "cancelled") return c.json({ error: "This drop-off was cancelled" }, 400);
+
+  const extra = (body.notes || "").trim();
+  await c.env.DB.prepare(
+    `UPDATE parts_dropoffs SET
+       status = 'received',
+       received_by_user_id = ?,
+       received_at = datetime('now'),
+       notes = CASE WHEN ? != '' THEN trim(COALESCE(notes,'') || CASE WHEN notes IS NOT NULL AND notes != '' THEN ' | ' ELSE '' END || ?) ELSE notes END,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(user.id, extra, extra, id)
+    .run();
+
+  if (before.dropped_by_user_id && before.dropped_by_user_id !== user.id) {
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.dropped_by_user_id],
+        "parts_dropoff",
+        `Drop-off received · ${before.vendor_name}`,
+        `${before.part_summary} — ${user.display_name} has it at the shop`,
+        { type: "parts_dropoff", id }
+      ).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  await writeAudit(c.env.DB, user, "update", "parts_dropoff", id, "Marked received at shop");
+  const row = await c.env.DB.prepare(`SELECT * FROM parts_dropoffs WHERE id = ?`).bind(id).first();
+  return c.json({ ok: true, dropoff: row });
+});
+
+api.post("/inventory/parts-dropoffs/:id/cancel", async (c) => {
+  const user = c.get("user");
+  await ensurePartsDropoffTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({} as { reason?: string }));
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_dropoffs WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; status: string; dropped_by_user_id: number | null }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "waiting") return c.json({ error: "Only waiting drop-offs can be cancelled" }, 400);
+
+  const isOwner = before.dropped_by_user_id === user.id;
+  const canManage = ["admin", "warehouse", "office"].includes(user.role);
+  if (!isOwner && !canManage) {
+    return c.json({ error: "Only the person who logged it, or warehouse, can cancel" }, 403);
+  }
+
+  const reason = (body.reason || "").trim();
+  await c.env.DB.prepare(
+    `UPDATE parts_dropoffs SET
+       status = 'cancelled',
+       notes = CASE WHEN ? != '' THEN trim(COALESCE(notes,'') || CASE WHEN notes IS NOT NULL AND notes != '' THEN ' | ' ELSE '' END || 'Cancelled: ' || ?) ELSE notes END,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(reason, reason, id)
+    .run();
+
+  await writeAudit(c.env.DB, user, "update", "parts_dropoff", id, "Cancelled drop-off");
+  return c.json({ ok: true });
 });
 
 // Legacy list still works for old data (read-only helper via part-pickups is primary)
@@ -10378,15 +11079,40 @@ function csvEscape(v: string | null): string {
 
 app.route("/api", api);
 
-// SPA fallback via assets binding
+// SPA fallback via assets binding — never cache HTML so phones always get the latest shell
 app.all("*", async (c) => {
   if (c.req.path.startsWith("/api/")) {
     return c.json({ error: "Not found" }, 404);
   }
-  if (c.env.ASSETS) {
-    return c.env.ASSETS.fetch(c.req.raw);
+  if (!c.env.ASSETS) {
+    return c.text("Frontend not built. Run npm run build.", 404);
   }
-  return c.text("Frontend not built. Run npm run build.", 404);
+  const res = await c.env.ASSETS.fetch(c.req.raw);
+  const path = new URL(c.req.url).pathname;
+  const ct = res.headers.get("Content-Type") || "";
+  const headers = new Headers(res.headers);
+  const isAsset = path.startsWith("/assets/");
+  const isHtml =
+    ct.includes("text/html") ||
+    path === "/" ||
+    path.endsWith(".html") ||
+    path.endsWith(".webmanifest");
+
+  if (isHtml) {
+    // Critical: installed PWAs were stuck on old broken JS after deploys
+    headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    headers.set("Pragma", "no-cache");
+    headers.set("Expires", "0");
+  } else if (isAsset) {
+    // Hashed bundles can be cached forever
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  }
+
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
 });
 
 // Explicit Workers entry so ExecutionContext is always passed into Hono

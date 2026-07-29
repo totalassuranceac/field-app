@@ -40,6 +40,8 @@ interface Issue {
   id: number;
   vehicle_id: number;
   unit_number: string;
+  /** Usual driver on the vehicle (for scheduling with the tech) */
+  assigned_driver: string | null;
   reporter_name: string;
   severity: string;
   title: string;
@@ -61,6 +63,7 @@ interface Issue {
 interface VehicleIssueGroup {
   vehicle_id: number;
   unit_number: string;
+  assigned_driver: string | null;
   issues: Issue[];
   needsSchedule: number;
   hasEmergency: boolean;
@@ -92,11 +95,15 @@ function groupIssuesByVehicle(list: Issue[]): VehicleIssueGroup[] {
       g = {
         vehicle_id: i.vehicle_id,
         unit_number: i.unit_number,
+        assigned_driver: i.assigned_driver || null,
         issues: [],
         needsSchedule: 0,
         hasEmergency: false,
       };
       map.set(i.vehicle_id, g);
+    }
+    if (!g.assigned_driver && i.assigned_driver) {
+      g.assigned_driver = i.assigned_driver;
     }
     g.issues.push(i);
     if (i.status === "open") g.needsSchedule += 1;
@@ -573,7 +580,15 @@ export function IssuesPage() {
           </div>
         )}
         <div className="muted shop-unit-issue-meta">
-          By {i.reporter_name} · {i.severity} · {when}
+          {i.assigned_driver ? (
+            <>
+              <span className="shop-driver-inline">
+                Driver: <strong>{i.assigned_driver}</strong>
+              </span>
+              {" · "}
+            </>
+          ) : null}
+          Reported by {i.reporter_name} · {i.severity} · {when}
         </div>
         {canShop && (
           <div className="log-item-actions no-print">
@@ -591,6 +606,7 @@ export function IssuesPage() {
     opts?: { defaultOpen?: boolean; scheduleCta?: boolean }
   ) {
     const open = opts?.defaultOpen ?? (g.needsSchedule > 0 || g.hasEmergency);
+    const driverLabel = g.assigned_driver?.trim() || "No assigned driver";
     return (
       <details
         key={g.vehicle_id}
@@ -602,6 +618,12 @@ export function IssuesPage() {
         <summary className="shop-unit-summary">
           <span className="shop-unit-title">
             <strong>Unit {g.unit_number}</strong>
+            <span
+              className={`shop-unit-driver${g.assigned_driver ? "" : " is-missing"}`}
+              title="Assigned driver — who to schedule with"
+            >
+              {g.assigned_driver ? driverLabel : "Unassigned"}
+            </span>
             <span className="shop-unit-count">
               {g.issues.length} problem{g.issues.length === 1 ? "" : "s"}
             </span>
@@ -613,6 +635,7 @@ export function IssuesPage() {
             )}
           </span>
           <span className="muted shop-unit-peek no-print">
+            {g.assigned_driver ? `Driver: ${g.assigned_driver} · ` : ""}
             {g.issues
               .slice(0, 3)
               .map((i) => issueHeadline(i))
@@ -644,12 +667,12 @@ export function IssuesPage() {
         </div>
         <div className="toolbar no-print">
           {can(user, "reportIssues") && !isOffice && (
-            <button className="btn" onClick={() => setShowNew(true)}>
+            <button className="btn btn-sm" type="button" onClick={() => setShowNew(true)}>
               {isDriver ? "New request" : "Report issue"}
             </button>
           )}
           {canShop && (
-            <button className="btn secondary" onClick={() => window.print()}>
+            <button className="btn secondary btn-sm" type="button" onClick={() => window.print()}>
               Print work order
             </button>
           )}
@@ -689,6 +712,7 @@ export function IssuesPage() {
               <thead>
                 <tr>
                   <th className="col-unit">Unit</th>
+                  <th className="col-driver">Driver</th>
                   <th className="col-n">#</th>
                   <th>All issues for this vehicle</th>
                   <th className="col-flags">Status / flags</th>
@@ -699,6 +723,9 @@ export function IssuesPage() {
                   <tr key={g.vehicle_id}>
                     <td className="col-unit">
                       <strong>{g.unit_number}</strong>
+                    </td>
+                    <td className="col-driver">
+                      {g.assigned_driver?.trim() || "—"}
                     </td>
                     <td className="col-n">{g.issues.length}</td>
                     <td>
@@ -714,7 +741,7 @@ export function IssuesPage() {
                               {i.status.replace(/_/g, " ")}
                               {i.scheduled_date ? ` · need ${i.scheduled_date}` : ""}
                               {i.is_emergency ? " · EMERGENCY" : ""}
-                              {i.reporter_name ? ` · ${i.reporter_name}` : ""}
+                              {i.reporter_name ? ` · reported by ${i.reporter_name}` : ""}
                             </span>
                           </li>
                         ))}
@@ -1009,9 +1036,18 @@ export function IssuesPage() {
             <h2>
               Shop work · Unit {manage.unit_number}
             </h2>
+            <p className="shop-manage-driver" style={{ marginTop: 0, marginBottom: "0.35rem" }}>
+              <strong>Assigned driver:</strong>{" "}
+              {manage.assigned_driver?.trim() || (
+                <span className="muted">None on file — check Vehicles</span>
+              )}
+            </p>
             <p style={{ marginTop: 0 }}>
-              <strong>Driver said:</strong> {manage.title}
+              <strong>Reported:</strong> {manage.title}
               {manage.description ? ` — ${manage.description}` : ""}
+              {manage.reporter_name ? (
+                <span className="muted"> · by {manage.reporter_name}</span>
+              ) : null}
             </p>
             {isMechanic && smsConfigured && smsContacts.length > 0 && (
               <form
@@ -1060,11 +1096,11 @@ export function IssuesPage() {
                 <label>
                   Status
                   <select value={mStatus} onChange={(e) => setMStatus(e.target.value)}>
-                    <option value="open">open</option>
-                    <option value="scheduled">scheduled</option>
-                    <option value="in_progress">in_progress</option>
-                    <option value="completed">completed</option>
-                    <option value="cancelled">cancelled</option>
+                    <option value="open">Open — not booked yet</option>
+                    <option value="scheduled">Scheduled — shop date set</option>
+                    <option value="in_progress">In progress — working on it</option>
+                    <option value="completed">Completed — job done</option>
+                    <option value="cancelled">Cancelled — not doing this</option>
                   </select>
                 </label>
                 <label>
@@ -1076,160 +1112,261 @@ export function IssuesPage() {
                     <option value="critical">critical</option>
                   </select>
                 </label>
-                <label>
-                  Scheduled date
-                  <input type="date" value={mDate} onChange={(e) => setMDate(e.target.value)} />
-                </label>
               </div>
-              <div className="shop-concerns-block">
-                <label className="shop-concerns-label" htmlFor="shop-concerns-summary">
-                  Vehicle issues / tech concerns
-                </label>
-                <details className="shop-concerns-dropdown">
-                  <summary id="shop-concerns-summary" className="shop-concerns-summary">
-                    <span className="shop-concerns-summary-text">
-                      {mConcerns.length === 0
-                        ? "Select concerns…"
-                        : mConcerns.length === 1
-                          ? mConcerns[0]
-                          : `${mConcerns.length} selected`}
-                    </span>
-                    <span className="shop-concerns-summary-meta muted">
-                      {mConcerns.length > 0 ? "tap to edit" : "check all that apply"}
-                      <span className="shop-concerns-chevron" aria-hidden>
-                        ▾
-                      </span>
-                    </span>
-                  </summary>
-                  <ul className="shop-concerns-list" role="group" aria-label="Vehicle issues and concerns">
-                    {SHOP_CONCERN_OPTIONS.map((label) => {
-                      const on = mConcerns.includes(label);
-                      return (
-                        <li key={label}>
-                          <label className={`shop-concern-row${on ? " is-on" : ""}`}>
-                            <span className="shop-concern-row-label">{label}</span>
-                            <input
-                              type="checkbox"
-                              className="shop-concern-row-check"
-                              checked={on}
-                              onChange={() => toggleConcern(label)}
-                            />
-                          </label>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </details>
-                {mConcerns.length > 1 && (
-                  <p className="shop-concerns-picks muted" aria-live="polite">
-                    {mConcerns.join(" · ")}
-                  </p>
-                )}
-              </div>
-              <label>
-                Problem found
-                <textarea
-                  value={mProblemFound}
-                  onChange={(e) => setMProblemFound(e.target.value)}
-                  placeholder="What was actually wrong (e.g. float switch stuck, open wire, worn pads)…"
-                  rows={2}
-                  required={mStatus === "completed"}
-                />
-              </label>
-              <label>
-                Diagnostics / troubleshooting
-                <textarea
-                  value={mDiagnostics}
-                  onChange={(e) => setMDiagnostics(e.target.value)}
-                  placeholder="Tests run, readings, steps to isolate the fault…"
-                  rows={3}
-                />
-              </label>
-              <label>
-                Work performed
-                <textarea
-                  value={mWork}
-                  onChange={(e) => setMWork(e.target.value)}
-                  placeholder="What you fixed, replaced, or adjusted…"
-                  rows={3}
-                  required={mStatus === "completed"}
-                />
-              </label>
-              <label>
-                Parts used
-                <textarea
-                  value={mParts}
-                  onChange={(e) => setMParts(e.target.value)}
-                  placeholder="Part #s, qty, brand"
-                />
-              </label>
-              <div className="form row">
+
+              <p className="shop-status-hint muted">
+                {mStatus === "open" &&
+                  "Keep open if the unit isn’t booked. Add a note if you’re waiting on the tech or parts."}
+                {mStatus === "scheduled" &&
+                  "Set the day the van comes in. You can fill diagnosis when work starts or when done."}
+                {mStatus === "in_progress" &&
+                  "Unit is in the shop. Log concerns and diagnostics as you go — finish details on complete."}
+                {mStatus === "completed" &&
+                  "Record what was wrong, what you tested, and what you fixed. Required for the work history."}
+                {mStatus === "cancelled" &&
+                  "This job will leave the active board. Enter why it was cancelled."}
+              </p>
+
+              {/* Book / wait */}
+              {(mStatus === "open" || mStatus === "scheduled") && (
+                <>
+                  {mStatus === "scheduled" && (
+                    <label>
+                      Scheduled date *
+                      <input
+                        type="date"
+                        value={mDate}
+                        onChange={(e) => setMDate(e.target.value)}
+                        required
+                      />
+                    </label>
+                  )}
+                  <label>
+                    {mStatus === "open" ? "Notes" : "Schedule notes"}
+                    <textarea
+                      value={mNotes}
+                      onChange={(e) => setMNotes(e.target.value)}
+                      placeholder={
+                        mStatus === "open"
+                          ? "Waiting on tech, parts, or more info…"
+                          : "Bring unit in AM, parts on order, bay notes…"
+                      }
+                      rows={2}
+                    />
+                  </label>
+                </>
+              )}
+
+              {/* Cancel */}
+              {mStatus === "cancelled" && (
                 <label>
-                  Labor hours
-                  <input
-                    type="number"
-                    step="0.25"
-                    value={mLabor}
-                    onChange={(e) => setMLabor(e.target.value)}
-                    inputMode="decimal"
+                  Reason cancelled *
+                  <textarea
+                    value={mNotes}
+                    onChange={(e) => setMNotes(e.target.value)}
+                    placeholder="Duplicate, fixed by tech, not needed, wrong unit…"
+                    rows={3}
+                    required
                   />
                 </label>
-              </div>
-              <label>
-                Schedule notes
-                <textarea
-                  value={mNotes}
-                  onChange={(e) => setMNotes(e.target.value)}
-                  placeholder="When to bring the unit in, parts on order…"
-                />
-              </label>
-              {isOilChangeWork && (
-                <div className="card shop-oil-block">
-                  <strong className="shop-oil-title">Oil change mileage</strong>
-                  <p className="muted shop-oil-hint">
-                    Tracking starts with this oil change (first time for the unit, or next interval).
-                    Enter the odometer now.
-                  </p>
-                  <div className="form row" style={{ marginTop: "0.45rem" }}>
+              )}
+
+              {/* Working or finishing */}
+              {(mStatus === "in_progress" || mStatus === "completed") && (
+                <>
+                  {mStatus === "in_progress" && (
                     <label>
-                      Odometer at oil change *
+                      Scheduled date
                       <input
-                        type="number"
-                        value={oilOdo}
-                        onChange={(e) => setOilOdo(e.target.value)}
-                        required
-                        inputMode="decimal"
-                        min={0}
-                        placeholder="Miles on the truck now"
+                        type="date"
+                        value={mDate}
+                        onChange={(e) => setMDate(e.target.value)}
                       />
                     </label>
-                    <label>
-                      Miles until next
-                      <input
-                        type="number"
-                        value={oilInterval}
-                        onChange={(e) => setOilInterval(e.target.value)}
-                        min={500}
-                        step={100}
-                      />
+                  )}
+                  <div className="shop-concerns-block">
+                    <label className="shop-concerns-label" htmlFor="shop-concerns-summary">
+                      Vehicle issues / tech concerns
+                      {mStatus === "completed" ? " *" : ""}
                     </label>
-                    {oilOdo && oilInterval && (
-                      <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
-                        Next oil change around{" "}
-                        <strong>
-                          {(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi
-                        </strong>
+                    <details className="shop-concerns-dropdown">
+                      <summary id="shop-concerns-summary" className="shop-concerns-summary">
+                        <span className="shop-concerns-summary-text">
+                          {mConcerns.length === 0
+                            ? "Select concerns…"
+                            : mConcerns.length === 1
+                              ? mConcerns[0]
+                              : `${mConcerns.length} selected`}
+                        </span>
+                        <span className="shop-concerns-summary-meta muted">
+                          {mConcerns.length > 0 ? "tap to edit" : "check all that apply"}
+                          <span className="shop-concerns-chevron" aria-hidden>
+                            ▾
+                          </span>
+                        </span>
+                      </summary>
+                      <ul
+                        className="shop-concerns-list"
+                        role="group"
+                        aria-label="Vehicle issues and concerns"
+                      >
+                        {SHOP_CONCERN_OPTIONS.map((label) => {
+                          const on = mConcerns.includes(label);
+                          return (
+                            <li key={label}>
+                              <label className={`shop-concern-row${on ? " is-on" : ""}`}>
+                                <span className="shop-concern-row-label">{label}</span>
+                                <input
+                                  type="checkbox"
+                                  className="shop-concern-row-check"
+                                  checked={on}
+                                  onChange={() => toggleConcern(label)}
+                                />
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </details>
+                    {mConcerns.length > 1 && (
+                      <p className="shop-concerns-picks muted" aria-live="polite">
+                        {mConcerns.join(" · ")}
                       </p>
                     )}
                   </div>
-                </div>
+                  <label>
+                    Problem found
+                    {mStatus === "completed" ? " *" : ""}
+                    <textarea
+                      value={mProblemFound}
+                      onChange={(e) => setMProblemFound(e.target.value)}
+                      placeholder="What was actually wrong…"
+                      rows={2}
+                      required={mStatus === "completed"}
+                    />
+                  </label>
+                  <label>
+                    Diagnostics / troubleshooting
+                    <textarea
+                      value={mDiagnostics}
+                      onChange={(e) => setMDiagnostics(e.target.value)}
+                      placeholder="Tests run, readings, steps to isolate the fault…"
+                      rows={mStatus === "completed" ? 3 : 2}
+                    />
+                  </label>
+                  {mStatus === "completed" && (
+                    <>
+                      <label>
+                        Work performed *
+                        <textarea
+                          value={mWork}
+                          onChange={(e) => setMWork(e.target.value)}
+                          placeholder="What you fixed, replaced, or adjusted…"
+                          rows={3}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Parts used
+                        <textarea
+                          value={mParts}
+                          onChange={(e) => setMParts(e.target.value)}
+                          placeholder="Part #s, qty, brand"
+                          rows={2}
+                        />
+                      </label>
+                      <div className="form row">
+                        <label>
+                          Labor hours
+                          <input
+                            type="number"
+                            step="0.25"
+                            value={mLabor}
+                            onChange={(e) => setMLabor(e.target.value)}
+                            inputMode="decimal"
+                          />
+                        </label>
+                      </div>
+                    </>
+                  )}
+                  {mStatus === "in_progress" && (
+                    <>
+                      <label>
+                        Parts on order / used so far
+                        <textarea
+                          value={mParts}
+                          onChange={(e) => setMParts(e.target.value)}
+                          placeholder="Optional — parts ordered or already used"
+                          rows={2}
+                        />
+                      </label>
+                      <label>
+                        Shop notes
+                        <textarea
+                          value={mNotes}
+                          onChange={(e) => setMNotes(e.target.value)}
+                          placeholder="Waiting on part, coming back tomorrow…"
+                          rows={2}
+                        />
+                      </label>
+                    </>
+                  )}
+                  {mStatus === "completed" && isOilChangeWork && (
+                    <div className="card shop-oil-block">
+                      <strong className="shop-oil-title">Oil change mileage</strong>
+                      <p className="muted shop-oil-hint">
+                        Tracking starts with this oil change. Enter the odometer now.
+                      </p>
+                      <div className="form row" style={{ marginTop: "0.45rem" }}>
+                        <label>
+                          Odometer at oil change *
+                          <input
+                            type="number"
+                            value={oilOdo}
+                            onChange={(e) => setOilOdo(e.target.value)}
+                            required
+                            inputMode="decimal"
+                            min={0}
+                            placeholder="Miles on the truck now"
+                          />
+                        </label>
+                        <label>
+                          Miles until next
+                          <input
+                            type="number"
+                            value={oilInterval}
+                            onChange={(e) => setOilInterval(e.target.value)}
+                            min={500}
+                            step={100}
+                          />
+                        </label>
+                        {oilOdo && oilInterval && (
+                          <p className="muted" style={{ margin: 0, gridColumn: "1 / -1" }}>
+                            Next oil change around{" "}
+                            <strong>
+                              {(
+                                Number(oilOdo) + (Number(oilInterval) || 5000)
+                              ).toLocaleString()}{" "}
+                              mi
+                            </strong>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
+
               <div className="toolbar">
                 <button className="btn" type="submit">
-                  Save shop record
+                  {mStatus === "open" && "Save as open"}
+                  {mStatus === "scheduled" && "Save schedule"}
+                  {mStatus === "in_progress" && "Update in progress"}
+                  {mStatus === "completed" && "Complete job"}
+                  {mStatus === "cancelled" && "Cancel job"}
                 </button>
                 <button className="btn secondary" type="button" onClick={() => setManage(null)}>
-                  Cancel
+                  Close
                 </button>
               </div>
             </form>
