@@ -354,19 +354,66 @@ textarea {
   justify-content: center;
 }
 
-/* Open drawer on phone */
+/* Open drawer on phone — header fixed; everything below scrolls in .drawer-scroll */
 .sidebar.open {
-  display: flex;
+  display: flex !important;
+  flex-direction: column;
   position: fixed;
-  inset: 0 auto 0 0;
+  top: 0;
+  left: 0;
+  bottom: 0;
   z-index: 40;
   width: min(300px, 88vw);
   max-width: 100%;
-  padding-top: max(1rem, env(safe-area-inset-top, 0px));
-  padding-bottom: max(1.25rem, env(safe-area-inset-bottom, 0px));
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  padding: max(1rem, env(safe-area-inset-top, 0px)) 0.85rem
+    max(0.75rem, env(safe-area-inset-bottom, 0px));
+  overflow: hidden;
   box-shadow: 8px 0 32px rgba(0, 0, 0, 0.35);
+}
+
+.sidebar.open .drawer-head {
+  flex: 0 0 auto;
+  margin-bottom: 0.5rem;
+}
+
+/*
+ * THE scroll surface for the menu.
+ * flex: 1 1 0 + min-height: 0 is required for overflow scroll in a flex column on Android.
+ */
+.sidebar.open .drawer-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  height: 0; /* force flex child to respect parent height (Android Chrome) */
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: scroll !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  padding-bottom: 1.5rem;
+}
+
+.sidebar.open .drawer-scroll .nav {
+  flex: none;
+  overflow: visible;
+  min-height: auto;
+  height: auto;
+}
+
+.sidebar.open .drawer-scroll .user-box,
+.sidebar.open .drawer-scroll .user-box-link {
+  margin-top: 0.75rem;
+  flex: none;
+}
+
+/* Page behind must not scroll while drawer is open (position:fixed is set in JS) */
+html.nav-open,
+body.nav-open {
+  overflow: hidden !important;
+  overscroll-behavior: none;
 }
 
 .app-shell:has(.sidebar.open) .nav-backdrop {
@@ -379,6 +426,18 @@ textarea {
   margin: 0;
   background: rgba(0, 0, 0, 0.45);
   cursor: pointer;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+/* Desktop: drawer-scroll is just a normal column, no forced height:0 */
+@media (min-width: 900px) and (min-device-width: 900px) {
+  .sidebar .drawer-scroll {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
 }
 
 .main {
@@ -417,7 +476,9 @@ textarea {
   flex-direction: column;
   gap: 0.2rem;
   flex: 1;
+  min-height: 0;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .nav a {
@@ -1250,6 +1311,382 @@ textarea {
   min-height: 46px;
   /* iOS zooms inputs under 16px — keep readable and no zoom jank */
   font-size: 16px;
+}
+
+/* Tool loan requests */
+.tool-loan-page {
+  max-width: 640px;
+}
+
+.tool-loan-disclaimer {
+  padding: 0.75rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--warning, #c9a227) 40%, var(--line));
+  background: color-mix(in srgb, var(--warning, #c9a227) 10%, var(--surface, #fff));
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.tool-loan-disclaimer ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.tool-loan-disclaimer li {
+  margin: 0.25rem 0;
+}
+
+.tool-loan-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.tool-loan-check input {
+  width: auto;
+  min-height: 0;
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
+.tool-loan-terms-full {
+  font-size: 0.85rem;
+}
+
+.tool-loan-terms-pre {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.8rem;
+  margin: 0.4rem 0 0;
+  padding: 0.55rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 8%, var(--surface, #fff));
+  line-height: 1.4;
+}
+
+.tool-loan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.tool-loan-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.tool-loan-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.65rem;
+}
+
+.tool-loan-amount {
+  margin: 0.35rem 0 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-loan-purpose {
+  margin: 0.35rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.tool-loan-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tool-loan-status.st-pending {
+  background: color-mix(in srgb, var(--warning, #c9a227) 18%, transparent);
+  color: var(--warning, #c9a227);
+}
+
+.tool-loan-status.st-approved {
+  background: color-mix(in srgb, var(--ok, #2f9e44) 18%, transparent);
+  color: var(--ok, #2f9e44);
+}
+
+.tool-loan-status.st-declined,
+.tool-loan-status.st-cancelled {
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted);
+}
+
+.tool-loan-card.st-pending {
+  border-left: 3px solid var(--warning, #c9a227);
+}
+
+.tool-loan-card.st-approved {
+  border-left: 3px solid var(--ok, #2f9e44);
+}
+
+.tool-loan-card.st-declined {
+  border-left: 3px solid var(--danger, #c0392b);
+}
+
+.tool-loan-remarks {
+  margin-top: 0.4rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #2563eb) 8%, var(--surface, #fff));
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+/* Requested → Approved → Ordered → Arrived tracker */
+.tool-loan-progress {
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.5rem 0.45rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--muted) 7%, var(--surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--line, #ddd) 80%, transparent);
+}
+
+.tool-loan-progress-closed {
+  padding: 0.4rem 0.5rem;
+}
+
+.tool-loan-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  justify-content: space-between;
+}
+
+.tool-loan-step {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.15rem;
+  z-index: 1;
+}
+
+.tool-loan-step-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  border: 2px solid color-mix(in srgb, var(--muted) 50%, transparent);
+  flex-shrink: 0;
+}
+
+.tool-loan-step.is-done .tool-loan-step-dot {
+  background: var(--ok, #2f9e44);
+  border-color: var(--ok, #2f9e44);
+}
+
+.tool-loan-step.is-active .tool-loan-step-dot {
+  background: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #2563eb) 25%, transparent);
+}
+
+.tool-loan-step-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--muted);
+}
+
+.tool-loan-step.is-done .tool-loan-step-label,
+.tool-loan-step.is-active .tool-loan-step-label {
+  color: var(--ink);
+}
+
+.tool-loan-step-when {
+  font-size: 0.62rem;
+  color: var(--muted);
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.tool-loan-step-line {
+  position: absolute;
+  top: 0.32rem;
+  left: calc(50% + 0.45rem);
+  width: calc(100% - 0.9rem);
+  height: 2px;
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  z-index: 0;
+}
+
+.tool-loan-step.is-done .tool-loan-step-line {
+  background: color-mix(in srgb, var(--ok, #2f9e44) 55%, transparent);
+}
+
+.tool-loan-progress-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.3;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tool-loan-progress-note.is-ready {
+  color: var(--ok, #2f9e44);
+}
+
+/* Time off requests */
+.time-off-page {
+  max-width: 640px;
+}
+
+.time-off-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.time-off-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.time-off-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.65rem;
+}
+
+.time-off-range {
+  margin: 0.35rem 0 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.time-off-reason {
+  margin: 0.3rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.time-off-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.time-off-status.st-pending {
+  background: color-mix(in srgb, var(--warning, #c9a227) 18%, transparent);
+  color: var(--warning, #c9a227);
+}
+
+.time-off-status.st-approved {
+  background: color-mix(in srgb, var(--ok, #2f9e44) 18%, transparent);
+  color: var(--ok, #2f9e44);
+}
+
+.time-off-status.st-declined {
+  background: color-mix(in srgb, var(--danger, #c0392b) 16%, transparent);
+  color: var(--danger, #c0392b);
+}
+
+.time-off-status.st-cancelled {
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted);
+}
+
+.time-off-card.st-pending {
+  border-left: 3px solid var(--warning, #c9a227);
+}
+
+.time-off-card.st-approved {
+  border-left: 3px solid var(--ok, #2f9e44);
+}
+
+.time-off-card.st-declined {
+  border-left: 3px solid var(--danger, #c0392b);
+}
+
+.time-off-remarks {
+  margin-top: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #2563eb) 8%, var(--surface, #fff));
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+/* Password with Show / Hide (first-time setup, sign-in, settings) */
+.password-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.password-field-label {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.password-field-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.password-field-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.password-field-toggle {
+  flex: 0 0 auto;
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface, var(--card, #fff));
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 0 0.85rem;
+  min-height: 46px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.password-field-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent, #2563eb) 40%, var(--line));
+}
+
+.password-field-toggle:active {
+  transform: scale(0.98);
+}
+
+[data-theme="dark"] .password-field-toggle {
+  background: color-mix(in srgb, var(--input-bg) 80%, #fff);
 }
 
 textarea {

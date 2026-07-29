@@ -19,6 +19,9 @@ interface Dash {
     open_warranties?: number;
     open_pickups?: number;
     open_vendor_runs?: number;
+    parts_dropoffs_waiting?: number;
+    fuel_ocr_pending?: number;
+    open_issues_stale?: number;
     assets_attention?: number;
     handbook_pending?: number;
     emergencies?: number;
@@ -390,6 +393,9 @@ export function DashboardPage() {
     warranties: stats?.open_warranties ?? 0,
     pickups: stats?.open_pickups ?? 0,
     vendor_runs: stats?.open_vendor_runs ?? 0,
+    dropoffs: stats?.parts_dropoffs_waiting ?? 0,
+    fuel_ocr: stats?.fuel_ocr_pending ?? 0,
+    stale_issues: stats?.open_issues_stale ?? 0,
     assets: stats?.assets_attention ?? 0,
     handbook: stats?.handbook_pending ?? 0,
   };
@@ -399,9 +405,14 @@ export function DashboardPage() {
     attentionTotal = myWeekly.length + myRepairs.length + (handbookPending ? 1 : 0);
   } else if (isWarehouse) {
     attentionTotal =
-      s.pickups + s.vendor_runs + s.warranties + s.assets + (handbookPending ? 1 : 0);
+      s.pickups +
+      s.vendor_runs +
+      s.dropoffs +
+      s.warranties +
+      s.assets +
+      (handbookPending ? 1 : 0);
   } else if (isMechanic) {
-    attentionTotal = s.emergencies + s.open_issues + s.weekly + s.tracking;
+    attentionTotal = s.emergencies + s.open_issues + s.weekly + s.tracking + s.stale_issues;
   } else {
     attentionTotal =
       s.emergencies +
@@ -413,6 +424,8 @@ export function DashboardPage() {
       s.warranties +
       s.pickups +
       s.vendor_runs +
+      s.dropoffs +
+      s.fuel_ocr +
       s.assets +
       (s.handbook > 0 ? 1 : 0);
   }
@@ -451,6 +464,15 @@ export function DashboardPage() {
           weight: 7,
         },
         {
+          key: "dropoff",
+          value: "→",
+          label: "Parts drop-off",
+          hint: "Brought parts to the shop? Tell warehouse",
+          to: "/parts-dropoff",
+          tone: "info",
+          weight: 6,
+        },
+        {
           key: "warranties",
           value: "→",
           label: "Warranty drop-off",
@@ -476,16 +498,25 @@ export function DashboardPage() {
         {
           key: "vendor_runs",
           value: s.vendor_runs,
-          label: "Part pickups waiting",
-          hint: "Parts ready at supply houses",
+          label: "To pick up at vendors",
+          hint: "Parts still at supply houses",
           to: "/part-pickup",
           tone: toneForCount(s.vendor_runs, 1, 3),
+          weight: 12,
+        },
+        {
+          key: "dropoffs",
+          value: s.dropoffs,
+          label: "At shop (drop-offs)",
+          hint: "Techs brought parts in — put away / issue",
+          to: "/parts-dropoff",
+          tone: toneForCount(s.dropoffs, 1, 2),
           weight: 11,
         },
         {
           key: "pickups",
           value: s.pickups,
-          label: "Open pickups / handoffs",
+          label: "Issue / handoff to truck",
           hint: "Custody waiting at the counter",
           to: "/inventory",
           tone: toneForCount(s.pickups, 1, 3),
@@ -545,10 +576,22 @@ export function DashboardPage() {
           key: "repairs",
           value: s.open_issues,
           label: "Shop board",
-          hint: "Needs schedule + booked work — open Repairs in app",
+          hint:
+            s.stale_issues > 0
+              ? `${s.stale_issues} open 3+ days without schedule`
+              : "Needs schedule + booked work",
           to: "/issues",
           tone: toneForCount(s.open_issues, 1, 4),
           weight: 10,
+        },
+        {
+          key: "stale",
+          value: s.stale_issues,
+          label: "Unscheduled 3+ days",
+          hint: "Open tickets needing a shop date",
+          to: "/issues?tab=needs",
+          tone: toneForCount(s.stale_issues, 1, 2),
+          weight: 9,
         },
         {
           key: "weekly",
@@ -622,13 +665,31 @@ export function DashboardPage() {
         weight: 13,
       },
       {
+        key: "fuel_ocr",
+        value: s.fuel_ocr,
+        label: "Fuel receipts to verify",
+        hint: "OCR uncertain — teach the app",
+        to: "/fuel/receipt-review",
+        tone: toneForCount(s.fuel_ocr, 1, 5),
+        weight: 13,
+      },
+      {
+        key: "dropoffs",
+        value: s.dropoffs,
+        label: "Parts at shop",
+        hint: "Drop-offs waiting for warehouse",
+        to: "/parts-dropoff",
+        tone: toneForCount(s.dropoffs, 1, 2),
+        weight: 12,
+      },
+      {
         key: "flags",
         value: s.open_alerts,
         label: "Mileage flags",
         hint: "Odd odometer / fuel patterns",
         to: "/alerts",
         tone: toneForCount(s.open_alerts, 1, 2),
-        weight: 12,
+        weight: 11,
       },
       {
         key: "tracking",
@@ -850,7 +911,7 @@ export function DashboardPage() {
                   <strong>Weekly vehicle check</strong>
                   <span className="muted">
                     {myWeekly.length
-                      ? myWeekly.map((v) => `Unit ${v.unit_number}`).join(" · ")
+                      ? `Your van: ${myWeekly.map((v) => `Unit ${v.unit_number}`).join(" · ")} — tap All good or Needs repair`
                       : "Done for your units"}
                   </span>
                 </span>
@@ -900,7 +961,40 @@ export function DashboardPage() {
                 </span>
                 <span>
                   <strong>Part pickup</strong>
-                  <span className="muted">When warehouse has your parts ready</span>
+                  <span className="muted">Parts still at the vendor? Log for warehouse</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/parts-dropoff">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Parts drop-off</strong>
+                  <span className="muted">Already brought parts to the shop? Tell warehouse</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/time-off">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Time Off Request</strong>
+                  <span className="muted">Manager approves in the app</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/tool-loans">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Tool Loan Request</strong>
+                  <span className="muted">Company tools · manager + office</span>
                 </span>
               </Link>
             </li>

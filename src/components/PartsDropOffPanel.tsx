@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -32,6 +33,7 @@ interface Dropoff {
  */
 export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const canReceive =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
 
@@ -127,9 +129,13 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setOk("Marked received — ready to put away / issue.");
+      setOk("Marked received — put away or issue to a truck next.");
       await load();
       window.dispatchEvent(new CustomEvent("parts-dropoffs-changed"));
+      const issue = window.confirm(
+        "Open Inventory to issue this part to a truck / put it in stock?"
+      );
+      if (issue) navigate("/inventory");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed");
     } finally {
@@ -166,6 +172,8 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
             <p style={{ margin: "0.25rem 0 0" }}>
               Picked up parts from a vendor while you were out? Log them here so warehouse knows
               they’re <strong>at the shop</strong> and ready to put away or issue to a truck.
+              {" "}
+              Still at the vendor? Use <Link to="/part-pickup">Part pickup</Link> instead.
             </p>
           </div>
           <div className="vendor-run-toolbar">

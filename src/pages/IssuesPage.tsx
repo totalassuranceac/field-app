@@ -87,6 +87,22 @@ function sortIssuesInGroup(a: Issue, b: Issue): number {
   );
 }
 
+/** Open without schedule for 3+ days */
+function isStaleOpen(i: Issue): boolean {
+  if (i.status !== "open") return false;
+  const t = Date.parse(String(i.created_at || "").replace(" ", "T"));
+  if (!Number.isFinite(t)) return false;
+  return Date.now() - t > 3 * 24 * 60 * 60 * 1000;
+}
+
+function isScheduledToday(i: Issue): boolean {
+  if (i.status !== "scheduled" && i.status !== "in_progress") return false;
+  const d = (i.scheduled_date || "").slice(0, 10);
+  if (!d) return i.status === "in_progress";
+  const today = new Date().toISOString().slice(0, 10);
+  return d === today || i.status === "in_progress";
+}
+
 function groupIssuesByVehicle(list: Issue[]): VehicleIssueGroup[] {
   const map = new Map<number, VehicleIssueGroup>();
   for (const i of list) {
@@ -192,7 +208,7 @@ export function IssuesPage() {
     const deepId = searchParams.get("id");
     const q = deepId
       ? "?report=schedule"
-      : filter === "active"
+      : filter === "active" || filter === "today"
         ? "?report=schedule"
         : filter === "all"
           ? ""
@@ -549,6 +565,16 @@ export function IssuesPage() {
           {i.status === "open" && (
             <span className="log-item-badge log-item-badge-needs">Needs schedule</span>
           )}
+          {isStaleOpen(i) && (
+            <span className="log-item-badge log-item-badge-needs" title="Open 3+ days">
+              3+ days
+            </span>
+          )}
+          {isScheduledToday(i) && (
+            <span className="log-item-badge" title="On today's shop list">
+              Today
+            </span>
+          )}
           <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
           <span className="shop-unit-issue-title">{head}</span>
         </div>
@@ -842,6 +868,7 @@ export function IssuesPage() {
             ]
           : [
               ["active", "Shop board"],
+              ["today", "Today"],
               ["open", `Needs schedule${needsSchedule.length ? ` (${needsSchedule.length})` : ""}`],
               ["scheduled", "Scheduled"],
               ["in_progress", "In progress"],
@@ -860,13 +887,31 @@ export function IssuesPage() {
         ))}
       </div>
 
-      {canShop && filter === "active" ? (
+      {canShop && filter === "today" ? (
+        <div className="shop-unit-list">
+          {(() => {
+            const todayIssues = issues.filter(isScheduledToday);
+            const groups = groupIssuesByVehicle(todayIssues);
+            if (!groups.length) {
+              return (
+                <div className="muted empty">
+                  Nothing scheduled for today. Use Needs schedule to book work.
+                </div>
+              );
+            }
+            return groups.map((g) =>
+              renderVehicleGroup(g, { defaultOpen: true, scheduleCta: false })
+            );
+          })()}
+        </div>
+      ) : canShop && filter === "active" ? (
         <>
           {boardByVehicle.length > 0 && (
             <div className="card no-print" style={{ marginBottom: "1rem" }}>
               <h2 style={{ marginTop: 0 }}>Scheduled / in progress</h2>
               <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-                Booked work by unit — all problems for a van stay together.
+                Booked work by unit — driver name shown so you can coordinate. Stale open tickets
+                (3+ days) are flagged under Needs schedule.
               </p>
               <div className="shop-unit-list">
                 {boardByVehicle.map((g) => renderVehicleGroup(g))}

@@ -111,10 +111,13 @@ export function ReportsPage() {
           <p>Printable work and compliance lists · CSV export for the office</p>
         </div>
         <div className="toolbar no-print">
-          <a className="btn secondary" href="/api/reports/fuel.csv">
-            Download fuel CSV
+          <a className="btn secondary btn-sm" href="/api/reports/fuel.csv">
+            Fuel CSV
           </a>
-          <button className="btn" onClick={() => window.print()}>
+          <a className="btn secondary btn-sm" href="/api/reports/issues.csv">
+            Repairs CSV
+          </a>
+          <button className="btn btn-sm" type="button" onClick={() => window.print()}>
             Print
           </button>
         </div>

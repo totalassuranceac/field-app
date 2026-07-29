@@ -3,6 +3,7 @@ import { api, can } from "../api";
 import { useTheme } from "../theme";
 import { useAuth } from "../auth";
 import { NtfySetupBanner } from "../components/NtfySetupBanner";
+import { PasswordField } from "../components/PasswordField";
 import {
   DEFAULT_NTFY_TOPIC,
   NTFY_ADMIN_TEST_TOPIC,
@@ -320,39 +321,30 @@ export function SettingsPage() {
           </p>
           <form className="form" onSubmit={changePassword}>
             {!forced && (
-              <label>
-                Current password
-                <input
-                  type="password"
-                  value={currentPw}
-                  onChange={(e) => setCurrentPw(e.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              </label>
+              <PasswordField
+                label="Current password"
+                value={currentPw}
+                onChange={(e) => setCurrentPw(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
             )}
-            <label>
-              New password
-              <input
-                type="password"
-                value={newPw}
-                onChange={(e) => setNewPw(e.target.value)}
-                autoComplete="new-password"
-                required
-                minLength={8}
-              />
-            </label>
-            <label>
-              Confirm new password
-              <input
-                type="password"
-                value={confirmPw}
-                onChange={(e) => setConfirmPw(e.target.value)}
-                autoComplete="new-password"
-                required
-                minLength={8}
-              />
-            </label>
+            <PasswordField
+              label="New password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+              autoComplete="new-password"
+              required
+              minLength={8}
+            />
+            <PasswordField
+              label="Confirm new password"
+              value={confirmPw}
+              onChange={(e) => setConfirmPw(e.target.value)}
+              autoComplete="new-password"
+              required
+              minLength={8}
+            />
             <button className="btn" type="submit">
               {forced ? "Save my password" : "Update password"}
             </button>

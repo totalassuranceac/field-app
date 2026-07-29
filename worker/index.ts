@@ -899,10 +899,46 @@ api.get("/dashboard", async (c) => {
   }
   let openVendorRuns = 0;
   try {
-    const vr = await c.env.DB.prepare(
-      `SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`
+    openVendorRuns = await countPartPickupWaiting(c.env.DB);
+  } catch {
+    try {
+      const vr = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`
+      ).first<{ c: number }>();
+      openVendorRuns = vr?.c ?? 0;
+    } catch {
+      /* optional */
+    }
+  }
+  let partsDropoffsWaiting = 0;
+  try {
+    partsDropoffsWaiting = await countPartsDropoffWaiting(c.env.DB);
+  } catch {
+    /* optional */
+  }
+  let fuelOcrPending = 0;
+  try {
+    const fo = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM fuel_entries
+       WHERE receipt_key IS NOT NULL AND trim(receipt_key) != ''
+         AND ocr_reviewed_at IS NULL
+         AND (IFNULL(ocr_needs_review, 0) = 1 OR ocr_json IS NULL)`
     ).first<{ c: number }>();
-    openVendorRuns = vr?.c ?? 0;
+    fuelOcrPending = fo?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+  let openIssuesStale = 0;
+  try {
+    const st = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM vehicle_issues
+       WHERE status = 'open'
+         AND datetime(created_at) < datetime('now', '-3 days')
+         ${scope?.clause || ""}`
+    )
+      .bind(...(scope?.binds || []))
+      .first<{ c: number }>();
+    openIssuesStale = st?.c ?? 0;
   } catch {
     /* optional */
   }
@@ -967,6 +1003,9 @@ api.get("/dashboard", async (c) => {
       open_warranties: openWarranties,
       open_pickups: openPickups,
       open_vendor_runs: openVendorRuns,
+      parts_dropoffs_waiting: partsDropoffsWaiting,
+      fuel_ocr_pending: fuelOcrPending,
+      open_issues_stale: openIssuesStale,
       assets_attention: assetsAttention,
       handbook_pending: handbookPending,
       emergencies,
@@ -2167,12 +2206,9 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
     store_number: body.store_number?.trim() || null,
     card_last4: cardLast4,
   };
-  // Always queue for admin photo verification so OCR can be taught from every receipt.
-  // (Smart heuristics still stored; admin clears the queue by reviewing.)
+  // Only queue when OCR is uncertain, disagrees with final, or card mismatch — not every clean scan
   const needsReviewFlag =
-    fuelOcrNeedsReview(ocrSnap, finalSnap) || cardMismatch || Boolean(body.receipt_key?.trim())
-      ? 1
-      : 0;
+    fuelOcrNeedsReview(ocrSnap, finalSnap) || cardMismatch ? 1 : 0;
   const ocrJson = JSON.stringify({
     ocr: ocrSnap,
     final: finalSnap,
@@ -2350,6 +2386,22 @@ api.patch("/fuel/:id", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
   return c.json({ entry: after });
 });
 
+/** Lightweight badge for admin/office fuel OCR verify queue */
+api.get("/fuel/receipt-review/count", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
+  try {
+    await ensureFuelOcrReviewColumns(c.env.DB);
+    const pending = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM fuel_entries f
+       WHERE f.receipt_key IS NOT NULL AND trim(f.receipt_key) != ''
+         AND f.ocr_reviewed_at IS NULL
+         AND (IFNULL(f.ocr_needs_review, 0) = 1 OR f.ocr_json IS NULL)`
+    ).first<{ c: number }>();
+    return c.json({ pending: pending?.c ?? 0 });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
 /**
  * Admin OCR receipt review queue — photos + OCR vs submitted values.
  * ?filter=needs (default) | reviewed | all
@@ -2360,9 +2412,10 @@ api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) 
   const wantId = Number(c.req.query("id") || "0");
   const limit = Math.min(100, Math.max(10, Number(c.req.query("limit") || "40")));
   let where = "WHERE f.receipt_key IS NOT NULL AND trim(f.receipt_key) != ''";
-  // Needs review = any receipt photo not yet admin-verified (full queue for learning)
+  // Needs = flagged for OCR learning / not yet admin-verified
   if (filter === "needs" || filter === "pending") {
-    where += " AND f.ocr_reviewed_at IS NULL";
+    where +=
+      " AND f.ocr_reviewed_at IS NULL AND (IFNULL(f.ocr_needs_review, 0) = 1 OR f.ocr_json IS NULL)";
   } else if (filter === "reviewed") {
     where += " AND f.ocr_reviewed_at IS NOT NULL";
   }
@@ -2393,7 +2446,8 @@ api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) 
     const pending = await c.env.DB.prepare(
       `SELECT COUNT(*) as c FROM fuel_entries f
        WHERE f.receipt_key IS NOT NULL AND trim(f.receipt_key) != ''
-         AND f.ocr_reviewed_at IS NULL`
+         AND f.ocr_reviewed_at IS NULL
+         AND (IFNULL(f.ocr_needs_review, 0) = 1 OR f.ocr_json IS NULL)`
     ).first<{ c: number }>();
 
     const list = (rows.results || []).map((r) => {
@@ -11071,11 +11125,1032 @@ api.get("/reports/fuel.csv", requireRoles(ROLE_PERMS.viewReports), async (c) => 
   });
 });
 
+api.get("/reports/issues.csv", requireRoles(ROLE_PERMS.viewReports), async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT i.id, v.unit_number, v.assigned_driver, i.status, i.severity, i.title,
+            i.scheduled_date, i.created_at, u.display_name as reporter,
+            i.is_emergency, i.completion_notes
+     FROM vehicle_issues i
+     JOIN vehicles v ON v.id = i.vehicle_id
+     LEFT JOIN users u ON u.id = i.reported_by_user_id
+     ORDER BY i.created_at DESC
+     LIMIT 2000`
+  ).all<{
+    id: number;
+    unit_number: string;
+    assigned_driver: string | null;
+    status: string;
+    severity: string;
+    title: string;
+    scheduled_date: string | null;
+    created_at: string;
+    reporter: string | null;
+    is_emergency: number | null;
+    completion_notes: string | null;
+  }>();
+
+  const header =
+    "id,unit_number,assigned_driver,status,severity,title,scheduled_date,created_at,reporter,is_emergency,completion_notes\n";
+  const lines = (rows.results || [])
+    .map((r) =>
+      [
+        r.id,
+        r.unit_number,
+        csvEscape(r.assigned_driver),
+        r.status,
+        r.severity,
+        csvEscape(r.title),
+        r.scheduled_date || "",
+        r.created_at,
+        csvEscape(r.reporter),
+        r.is_emergency ? 1 : 0,
+        csvEscape(r.completion_notes),
+      ].join(",")
+    )
+    .join("\n");
+  return new Response(header + lines, {
+    headers: {
+      "Content-Type": "text/csv",
+      "Content-Disposition": 'attachment; filename="repairs-report.csv"',
+    },
+  });
+});
+
 function csvEscape(v: string | null): string {
   if (!v) return "";
   if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
   return v;
 }
+
+// ——— Time off requests (employee → manager approval) ———
+
+let timeOffTablesReady = false;
+async function ensureTimeOffTables(db: D1Database): Promise<void> {
+  if (timeOffTablesReady) return;
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS time_off_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      manager_user_id INTEGER,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      request_type TEXT NOT NULL DEFAULT 'pto',
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      manager_remarks TEXT,
+      decided_by_user_id INTEGER,
+      decided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_time_off_user ON time_off_requests(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_time_off_manager ON time_off_requests(manager_user_id, status, start_date)`,
+    `CREATE INDEX IF NOT EXISTS idx_time_off_status ON time_off_requests(status, start_date)`,
+  ];
+  for (const sql of stmts) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  timeOffTablesReady = true;
+}
+
+const TIME_OFF_TYPES = new Set(["pto", "sick", "personal", "unpaid", "other"]);
+
+function isIsoDate(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+function timeOffTypeLabel(t: string): string {
+  const map: Record<string, string> = {
+    pto: "PTO / vacation",
+    sick: "Sick",
+    personal: "Personal",
+    unpaid: "Unpaid",
+    other: "Other",
+  };
+  return map[t] || t;
+}
+
+/** Who can decide for this request: assigned manager, or admin/office. */
+function canDecideTimeOff(
+  actor: { id: number; role: string },
+  req: { manager_user_id: number | null }
+): boolean {
+  if (actor.role === "admin" || actor.role === "office") return true;
+  if (req.manager_user_id != null && Number(req.manager_user_id) === actor.id) return true;
+  return false;
+}
+
+api.get("/time-off/pending-count", async (c) => {
+  const user = c.get("user");
+  await ensureTimeOffTables(c.env.DB);
+  try {
+    let n = 0;
+    if (user.role === "admin" || user.role === "office") {
+      const row = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM time_off_requests WHERE status = 'pending'`
+      ).first<{ c: number }>();
+      n = row?.c ?? 0;
+    } else {
+      const row = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM time_off_requests
+         WHERE status = 'pending' AND manager_user_id = ?`
+      )
+        .bind(user.id)
+        .first<{ c: number }>();
+      n = row?.c ?? 0;
+    }
+    return c.json({ pending: n });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
+/**
+ * List time-off requests.
+ * ?view=mine (default) | approvals | all
+ * approvals = pending (and recent decided) for managers
+ */
+api.get("/time-off", async (c) => {
+  const user = c.get("user");
+  await ensureTimeOffTables(c.env.DB);
+  const view = (c.req.query("view") || "mine").toLowerCase();
+  try {
+    let sql = `SELECT r.*,
+        u.display_name as employee_name,
+        m.display_name as manager_name,
+        d.display_name as decided_by_name
+       FROM time_off_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN users m ON m.id = r.manager_user_id
+       LEFT JOIN users d ON d.id = r.decided_by_user_id`;
+    const binds: unknown[] = [];
+
+    if (view === "approvals") {
+      if (user.role === "admin" || user.role === "office") {
+        sql += ` WHERE r.status = 'pending' OR (
+          r.status IN ('approved','declined') AND date(r.decided_at) >= date('now', '-60 days')
+        )`;
+      } else {
+        // Direct reports + any request assigned to this manager
+        sql += ` WHERE r.manager_user_id = ?
+          AND (r.status = 'pending' OR (
+            r.status IN ('approved','declined') AND date(r.decided_at) >= date('now', '-60 days')
+          ))`;
+        binds.push(user.id);
+      }
+      sql += ` ORDER BY
+        CASE r.status WHEN 'pending' THEN 0 ELSE 1 END,
+        r.start_date ASC, r.id DESC LIMIT 100`;
+    } else if (view === "all" && (user.role === "admin" || user.role === "office")) {
+      sql += ` ORDER BY r.created_at DESC LIMIT 150`;
+    } else {
+      // mine
+      sql += ` WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 80`;
+      binds.push(user.id);
+    }
+
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+    let pendingForMe = 0;
+    if (user.role === "admin" || user.role === "office") {
+      const p = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM time_off_requests WHERE status = 'pending'`
+      ).first<{ c: number }>();
+      pendingForMe = p?.c ?? 0;
+    } else {
+      const p = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM time_off_requests
+         WHERE status = 'pending' AND manager_user_id = ?`
+      )
+        .bind(user.id)
+        .first<{ c: number }>();
+      pendingForMe = p?.c ?? 0;
+    }
+
+    // Am I anyone's manager?
+    let isManager = user.role === "admin" || user.role === "office";
+    if (!isManager) {
+      try {
+        const m = await c.env.DB.prepare(
+          `SELECT COUNT(*) as c FROM users WHERE manager_user_id = ? AND active = 1`
+        )
+          .bind(user.id)
+          .first<{ c: number }>();
+        isManager = (m?.c ?? 0) > 0 || pendingForMe > 0;
+      } catch {
+        /* column optional on old DB */
+      }
+    }
+
+    return c.json({
+      requests: rows.results || [],
+      pending_for_me: pendingForMe,
+      is_manager: isManager,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        requests: [],
+        pending_for_me: 0,
+        is_manager: false,
+        error: "Run migration 045_time_off_requests.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/time-off", async (c) => {
+  const user = c.get("user");
+  await ensureTimeOffTables(c.env.DB);
+  const body = await c.req.json<{
+    start_date?: string;
+    end_date?: string;
+    request_type?: string;
+    reason?: string | null;
+  }>();
+
+  const start = (body.start_date || "").trim();
+  const end = (body.end_date || "").trim() || start;
+  if (!isIsoDate(start) || !isIsoDate(end)) {
+    return c.json({ error: "Start and end dates are required (YYYY-MM-DD)" }, 400);
+  }
+  if (end < start) {
+    return c.json({ error: "End date cannot be before start date" }, 400);
+  }
+  const requestType = (body.request_type || "pto").trim().toLowerCase();
+  if (!TIME_OFF_TYPES.has(requestType)) {
+    return c.json({ error: "Invalid request type" }, 400);
+  }
+  const reason = (body.reason || "").trim() || null;
+
+  // Resolve manager from users.manager_user_id; fall back to first active admin
+  let managerId: number | null = null;
+  try {
+    const me = await c.env.DB.prepare(
+      `SELECT manager_user_id FROM users WHERE id = ?`
+    )
+      .bind(user.id)
+      .first<{ manager_user_id: number | null }>();
+    if (me?.manager_user_id) managerId = Number(me.manager_user_id);
+  } catch {
+    /* column may be missing on very old DB */
+  }
+  if (!managerId) {
+    const admin = await c.env.DB.prepare(
+      `SELECT id FROM users WHERE active = 1 AND role = 'admin' ORDER BY id LIMIT 1`
+    ).first<{ id: number }>();
+    managerId = admin?.id ?? null;
+  }
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO time_off_requests (
+         user_id, manager_user_id, start_date, end_date, request_type, reason,
+         status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+    )
+      .bind(user.id, managerId, start, end, requestType, reason)
+      .run();
+    const id = Number(ins.meta.last_row_id);
+
+    const range =
+      start === end ? start : `${start} → ${end}`;
+    const label = timeOffTypeLabel(requestType);
+
+    // Notify manager (+ admins if manager missing)
+    const notifyIds = new Set<number>();
+    if (managerId) notifyIds.add(managerId);
+    else {
+      const admins = await usersByRoles(c.env.DB, ["admin", "office"]);
+      for (const a of admins) notifyIds.add(a);
+    }
+    notifyIds.delete(user.id);
+
+    if (notifyIds.size) {
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          [...notifyIds],
+          "time_off_request",
+          `Time off request · ${user.display_name}`,
+          `${label} · ${range}${reason ? ` · ${reason.slice(0, 80)}` : ""}`,
+          { type: "time_off", id }
+        ).catch(() => {
+          /* non-fatal */
+        })
+      );
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "time_off_request",
+      id,
+      `${label} ${range}`
+    );
+
+    const row = await c.env.DB.prepare(
+      `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+       FROM time_off_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN users m ON m.id = r.manager_user_id
+       WHERE r.id = ?`
+    )
+      .bind(id)
+      .first();
+
+    return c.json({ ok: true, request: row }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+api.post("/time-off/:id/decide", async (c) => {
+  const user = c.get("user");
+  await ensureTimeOffTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    decision?: "approved" | "declined";
+    remarks?: string | null;
+  }>();
+  const decision = body.decision;
+  if (decision !== "approved" && decision !== "declined") {
+    return c.json({ error: "decision must be approved or declined" }, 400);
+  }
+  const remarks = (body.remarks || "").trim() || null;
+
+  const before = await c.env.DB.prepare(`SELECT * FROM time_off_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      manager_user_id: number | null;
+      status: string;
+      start_date: string;
+      end_date: string;
+      request_type: string;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "pending") {
+    return c.json({ error: "This request was already decided or cancelled" }, 400);
+  }
+  if (!canDecideTimeOff(user, before)) {
+    return c.json({ error: "Only the employee’s manager (or office/admin) can decide" }, 403);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE time_off_requests SET
+       status = ?,
+       manager_remarks = ?,
+       decided_by_user_id = ?,
+       decided_at = datetime('now'),
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(decision, remarks, user.id, id)
+    .run();
+
+  const range =
+    before.start_date === before.end_date
+      ? before.start_date
+      : `${before.start_date} → ${before.end_date}`;
+  const typeLabel = timeOffTypeLabel(before.request_type);
+  const decisionLabel = decision === "approved" ? "Approved" : "Declined";
+
+  scheduleWaitUntil(
+    c,
+    notifyUsers(
+      c.env.DB,
+      [before.user_id],
+      "time_off_decision",
+      `Time off ${decisionLabel.toLowerCase()} · ${typeLabel}`,
+      `${range}${remarks ? ` · Manager: ${remarks}` : ` · by ${user.display_name}`}`,
+      { type: "time_off", id }
+    ).catch(() => {
+      /* non-fatal */
+    })
+  );
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "time_off_request",
+    id,
+    `${decisionLabel} · ${typeLabel} ${range}`
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name,
+            d.display_name as decided_by_name
+     FROM time_off_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users m ON m.id = r.manager_user_id
+     LEFT JOIN users d ON d.id = r.decided_by_user_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, request: row });
+});
+
+api.post("/time-off/:id/cancel", async (c) => {
+  const user = c.get("user");
+  await ensureTimeOffTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const before = await c.env.DB.prepare(`SELECT * FROM time_off_requests WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; user_id: number; status: string; manager_user_id: number | null }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "pending") {
+    return c.json({ error: "Only pending requests can be cancelled" }, 400);
+  }
+  const isOwner = before.user_id === user.id;
+  const isAdmin = user.role === "admin" || user.role === "office";
+  if (!isOwner && !isAdmin) {
+    return c.json({ error: "Only you (or office/admin) can cancel this request" }, 403);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE time_off_requests SET
+       status = 'cancelled',
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(id)
+    .run();
+
+  if (before.manager_user_id && before.manager_user_id !== user.id) {
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.manager_user_id],
+        "time_off_request",
+        `Time off cancelled · ${user.display_name}`,
+        "Employee withdrew a pending request",
+        { type: "time_off", id }
+      ).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  await writeAudit(c.env.DB, user, "update", "time_off_request", id, "Cancelled");
+  return c.json({ ok: true });
+});
+
+// ——— Tool loan requests (employee → office only, company-use only) ———
+// After approval, office tracks part fulfillment: pending_order → ordered → arrived
+
+/** Minimum weekly payroll deduction for tool loans (even if 10% of balance is less). */
+const TOOL_LOAN_MIN_WEEKLY_PAYMENT = 50;
+
+/** Part fulfillment after loan is approved. */
+type ToolLoanPartStatus = "pending_order" | "ordered" | "arrived";
+
+let toolLoanTablesReady = false;
+async function ensureToolLoanTables(db: D1Database): Promise<void> {
+  if (toolLoanTablesReady) return;
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS tool_loan_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      manager_user_id INTEGER,
+      item_name TEXT NOT NULL,
+      item_url TEXT NOT NULL,
+      amount REAL NOT NULL,
+      weekly_pay REAL NOT NULL,
+      purpose TEXT NOT NULL,
+      disclaimer_accepted INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending_office',
+      manager_remarks TEXT,
+      office_remarks TEXT,
+      manager_decided_by_user_id INTEGER,
+      manager_decided_at TEXT,
+      office_decided_by_user_id INTEGER,
+      office_decided_at TEXT,
+      part_status TEXT,
+      ordered_at TEXT,
+      arrived_at TEXT,
+      part_note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_tool_loan_user ON tool_loan_requests(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_tool_loan_status ON tool_loan_requests(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_tool_loan_manager ON tool_loan_requests(manager_user_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_tool_loan_part ON tool_loan_requests(part_status, status)`,
+    // Legacy: manager step removed — open manager-queue items go to office
+    `UPDATE tool_loan_requests SET status = 'pending_office', updated_at = datetime('now')
+     WHERE status = 'pending_manager'`,
+    // Fulfillment columns (existing DBs created before 047)
+    `ALTER TABLE tool_loan_requests ADD COLUMN part_status TEXT`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN ordered_at TEXT`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN arrived_at TEXT`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN part_note TEXT`,
+    // Approved loans with no part track yet start as "waiting to order"
+    `UPDATE tool_loan_requests SET part_status = 'pending_order', updated_at = datetime('now')
+     WHERE status = 'approved' AND (part_status IS NULL OR part_status = '')`,
+  ];
+  for (const sql of stmts) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists / no-op */
+    }
+  }
+  toolLoanTablesReady = true;
+}
+
+function isOfficeRole(role: string): boolean {
+  return role === "admin" || role === "office";
+}
+
+api.get("/tool-loans/pending-count", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  try {
+    if (!isOfficeRole(user.role)) {
+      return c.json({ pending: 0 });
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM tool_loan_requests
+       WHERE status IN ('pending_office', 'pending_manager')`
+    ).first<{ c: number }>();
+    return c.json({ pending: row?.c ?? 0 });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
+/**
+ * ?view=mine | approvals
+ * approvals = office/admin queue + recent history
+ */
+api.get("/tool-loans", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  const view = (c.req.query("view") || "mine").toLowerCase();
+  const isApprover = isOfficeRole(user.role);
+  try {
+    let sql = `SELECT r.*,
+        u.display_name as employee_name,
+        m.display_name as manager_name,
+        md.display_name as manager_decided_by_name,
+        od.display_name as office_decided_by_name
+       FROM tool_loan_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN users m ON m.id = r.manager_user_id
+       LEFT JOIN users md ON md.id = r.manager_decided_by_user_id
+       LEFT JOIN users od ON od.id = r.office_decided_by_user_id`;
+    const binds: unknown[] = [];
+
+    if (view === "approvals") {
+      if (!isApprover) {
+        return c.json({
+          requests: [],
+          pending_for_me: 0,
+          is_approver: false,
+          min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
+          repayment_percent: 10,
+        });
+      }
+      // Include open approvals + approved loans still awaiting order/arrival + recent closed
+      sql += ` WHERE (
+            r.status IN ('pending_office', 'pending_manager')
+            OR (r.status = 'approved' AND COALESCE(r.part_status, 'pending_order') IN ('pending_order', 'ordered'))
+            OR (r.status IN ('approved', 'declined')
+              AND date(COALESCE(r.office_decided_at, r.updated_at)) >= date('now', '-90 days'))
+          )`;
+      sql += ` ORDER BY
+        CASE
+          WHEN r.status IN ('pending_office', 'pending_manager') THEN 0
+          WHEN r.status = 'approved' AND COALESCE(r.part_status, 'pending_order') = 'pending_order' THEN 1
+          WHEN r.status = 'approved' AND r.part_status = 'ordered' THEN 2
+          ELSE 3 END,
+        r.created_at DESC LIMIT 150`;
+    } else {
+      sql += ` WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 80`;
+      binds.push(user.id);
+    }
+
+    const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+
+    let pendingForMe = 0;
+    if (isApprover) {
+      const p = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM tool_loan_requests
+         WHERE status IN ('pending_office', 'pending_manager')`
+      ).first<{ c: number }>();
+      pendingForMe = p?.c ?? 0;
+    }
+
+    return c.json({
+      requests: rows.results || [],
+      pending_for_me: pendingForMe,
+      is_approver: isApprover,
+      min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
+      repayment_percent: 10,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        requests: [],
+        pending_for_me: 0,
+        is_approver: false,
+        min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
+        repayment_percent: 10,
+        error: "Run migration 046_tool_loan_requests.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/tool-loans", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  const body = await c.req.json<{
+    item_name?: string;
+    item_url?: string;
+    amount?: number;
+    purpose?: string;
+    disclaimer_accepted?: boolean;
+  }>();
+
+  const itemName = (body.item_name || "").trim();
+  const itemUrl = (body.item_url || "").trim();
+  const purpose = (body.purpose || "").trim();
+  const amount = Number(body.amount);
+
+  if (!itemName || itemName.length < 2) {
+    return c.json({ error: "Tool / part name is required" }, 400);
+  }
+  // item_url is optional free text (store name, partial link, full URL, or blank) — never require http(s)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return c.json({ error: "Enter a valid loan amount" }, 400);
+  }
+  if (!purpose || purpose.length < 2) {
+    return c.json(
+      {
+        error:
+          "Describe how this tool helps your company field work (required — loans are for job use only).",
+      },
+      400
+    );
+  }
+  if (body.disclaimer_accepted !== true) {
+    return c.json(
+      {
+        error:
+          "You must accept the tool loan terms (10% weekly payroll deduction, $50 minimum payment, total loans ≤ weekly pay, company use only).",
+      },
+      400
+    );
+  }
+
+  // manager_user_id kept for schema/history only — not used for approval routing
+  let managerId: number | null = null;
+  try {
+    const me = await c.env.DB.prepare(`SELECT manager_user_id FROM users WHERE id = ?`)
+      .bind(user.id)
+      .first<{ manager_user_id: number | null }>();
+    if (me?.manager_user_id) managerId = Number(me.manager_user_id);
+  } catch {
+    /* optional */
+  }
+
+  try {
+    // weekly_pay column kept for schema compat; office already knows pay — not collected from employee
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO tool_loan_requests (
+         user_id, manager_user_id, item_name, item_url, amount, weekly_pay, purpose,
+         disclaimer_accepted, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 'pending_office', datetime('now'), datetime('now'))`
+    )
+      .bind(user.id, managerId, itemName, itemUrl || "", amount, purpose)
+      .run();
+    const id = Number(ins.meta.last_row_id);
+
+    const office = await usersByRoles(c.env.DB, ["admin", "office"]);
+    const notifyIds = office.filter((uid) => uid !== user.id);
+
+    if (notifyIds.length) {
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          notifyIds,
+          "tool_loan_request",
+          `Tool loan request · ${user.display_name}`,
+          `${itemName} · $${amount.toFixed(2)} — needs office approval`,
+          { type: "tool_loan", id }
+        ).catch(() => {
+          /* non-fatal */
+        })
+      );
+    }
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "tool_loan_request",
+      id,
+      `${itemName} · $${amount.toFixed(2)}`
+    );
+
+    const row = await c.env.DB.prepare(
+      `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+       FROM tool_loan_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN users m ON m.id = r.manager_user_id
+       WHERE r.id = ?`
+    )
+      .bind(id)
+      .first();
+
+    return c.json({
+      ok: true,
+      request: row,
+      min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
+      repayment_percent: 10,
+    }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+/**
+ * Office/admin decision only.
+ * Body: decision = approved | declined, remarks?
+ * pending_office (or legacy pending_manager) → approved | declined
+ */
+api.post("/tool-loans/:id/decide", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    decision?: "approved" | "declined";
+    remarks?: string | null;
+  }>();
+  const decision = body.decision;
+  if (decision !== "approved" && decision !== "declined") {
+    return c.json({ error: "decision must be approved or declined" }, 400);
+  }
+  const remarks = (body.remarks || "").trim() || null;
+
+  if (!isOfficeRole(user.role)) {
+    return c.json({ error: "Only office or admin can approve tool loan requests" }, 403);
+  }
+
+  const before = await c.env.DB.prepare(`SELECT * FROM tool_loan_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      manager_user_id: number | null;
+      status: string;
+      item_name: string;
+      amount: number;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  if (before.status === "approved" || before.status === "declined" || before.status === "cancelled") {
+    return c.json({ error: "This request is already closed" }, 400);
+  }
+
+  // Accept legacy pending_manager as office queue
+  if (before.status !== "pending_office" && before.status !== "pending_manager") {
+    return c.json({ error: "This request cannot be decided in its current status" }, 400);
+  }
+
+  const nextStatus = decision === "approved" ? "approved" : "declined";
+  if (nextStatus === "approved") {
+    await c.env.DB.prepare(
+      `UPDATE tool_loan_requests SET
+         status = 'approved',
+         office_remarks = ?,
+         office_decided_by_user_id = ?,
+         office_decided_at = datetime('now'),
+         part_status = 'pending_order',
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(remarks, user.id, id)
+      .run();
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE tool_loan_requests SET
+         status = 'declined',
+         office_remarks = ?,
+         office_decided_by_user_id = ?,
+         office_decided_at = datetime('now'),
+         part_status = NULL,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(remarks, user.id, id)
+      .run();
+  }
+
+  const decisionLabel = nextStatus === "approved" ? "Approved" : "Declined";
+  const decisionBody =
+    nextStatus === "approved"
+      ? `$${Number(before.amount).toFixed(2)} · Loan approved — we'll order the part next${
+          remarks ? ` · ${remarks}` : ""
+        }`
+      : `$${Number(before.amount).toFixed(2)}${
+          remarks ? ` · Remarks: ${remarks}` : ` · by ${user.display_name}`
+        }`;
+  scheduleWaitUntil(
+    c,
+    notifyUsers(
+      c.env.DB,
+      [before.user_id],
+      "tool_loan_decision",
+      `Tool loan ${decisionLabel.toLowerCase()} · ${before.item_name}`,
+      decisionBody,
+      { type: "tool_loan", id }
+    ).catch(() => {
+      /* ignore */
+    })
+  );
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "tool_loan_request",
+    id,
+    `${nextStatus} · ${before.item_name}`
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+     FROM tool_loan_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users m ON m.id = r.manager_user_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, request: row });
+});
+
+/**
+ * Office updates part fulfillment after approval.
+ * Body: part_status = ordered | arrived, note? (optional tracking / store note)
+ * Flow: pending_order → ordered → arrived (can jump pending_order → arrived)
+ */
+api.post("/tool-loans/:id/part-status", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  if (!isOfficeRole(user.role)) {
+    return c.json({ error: "Only office or admin can update part status" }, 403);
+  }
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    part_status?: ToolLoanPartStatus;
+    note?: string | null;
+  }>();
+  const next = body.part_status;
+  if (next !== "ordered" && next !== "arrived" && next !== "pending_order") {
+    return c.json({ error: "part_status must be ordered, arrived, or pending_order" }, 400);
+  }
+  const note = (body.note || "").trim() || null;
+
+  const before = await c.env.DB.prepare(`SELECT * FROM tool_loan_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      status: string;
+      item_name: string;
+      amount: number;
+      part_status: string | null;
+      ordered_at: string | null;
+      arrived_at: string | null;
+      part_note: string | null;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "approved") {
+    return c.json({ error: "Part status can only be updated after the loan is approved" }, 400);
+  }
+
+  const cur = (before.part_status || "pending_order") as ToolLoanPartStatus;
+  // Allow forward moves and same-status note updates; block going backward except office can set pending_order only if not arrived
+  if (next === "pending_order" && (cur === "ordered" || cur === "arrived")) {
+    return c.json({ error: "Cannot move part status backward from ordered/arrived" }, 400);
+  }
+  if (next === "ordered" && cur === "arrived") {
+    return c.json({ error: "Part already marked arrived" }, 400);
+  }
+
+  let orderedAt = before.ordered_at;
+  let arrivedAt = before.arrived_at;
+  if (next === "ordered" && !orderedAt) orderedAt = new Date().toISOString();
+  if (next === "arrived") {
+    if (!orderedAt) orderedAt = new Date().toISOString();
+    if (!arrivedAt) arrivedAt = new Date().toISOString();
+  }
+
+  const partNote = note !== null ? note : before.part_note;
+
+  await c.env.DB.prepare(
+    `UPDATE tool_loan_requests SET
+       part_status = ?,
+       ordered_at = ?,
+       arrived_at = ?,
+       part_note = ?,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(next, orderedAt, arrivedAt, partNote, id)
+    .run();
+
+  if (next !== cur) {
+    const title =
+      next === "ordered"
+        ? `Tool ordered · ${before.item_name}`
+        : next === "arrived"
+          ? `Tool arrived · ${before.item_name}`
+          : `Tool loan update · ${before.item_name}`;
+    const detail =
+      next === "ordered"
+        ? `Your tool loan part has been ordered${partNote ? ` · ${partNote}` : ""}`
+        : next === "arrived"
+          ? `Your tool loan part has arrived and is ready${partNote ? ` · ${partNote}` : ""}`
+          : "Status updated";
+    scheduleWaitUntil(
+      c,
+      notifyUsers(c.env.DB, [before.user_id], "tool_loan_part", title, detail, {
+        type: "tool_loan",
+        id,
+      }).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "tool_loan_request",
+    id,
+    `part_status=${next} · ${before.item_name}`
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+     FROM tool_loan_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users m ON m.id = r.manager_user_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, request: row });
+});
+
+api.post("/tool-loans/:id/cancel", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const before = await c.env.DB.prepare(`SELECT * FROM tool_loan_requests WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; user_id: number; status: string; manager_user_id: number | null }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "pending_manager" && before.status !== "pending_office") {
+    return c.json({ error: "Only open requests can be cancelled" }, 400);
+  }
+  const isOwner = before.user_id === user.id;
+  if (!isOwner && !isOfficeRole(user.role)) {
+    return c.json({ error: "Only you (or office/admin) can cancel this request" }, 403);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE tool_loan_requests SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
+  )
+    .bind(id)
+    .run();
+
+  await writeAudit(c.env.DB, user, "update", "tool_loan_request", id, "Cancelled");
+  return c.json({ ok: true });
+});
 
 app.route("/api", api);
 

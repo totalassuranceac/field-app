@@ -126,6 +126,45 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "time-off",
+    title: "Time Off Request",
+    summary: "Ask for days off in the app; your manager approves or declines with remarks.",
+    roles: ["everyone"],
+    path: "/time-off",
+    steps: [
+      "Open Time Off Request under Company in the menu.",
+      "Choose type (PTO, sick, personal, unpaid, or other), start and end dates, and an optional reason.",
+      "Tap Submit for approval — your manager (or office/admin if none is set) is notified.",
+      "When they decide, you get a notification. Open Time Off Request to see Approved/Declined and any remarks.",
+      "Managers: use the Approvals tab to approve or decline with optional remarks for the employee.",
+    ],
+    tips: [
+      "Admin should set each person’s Manager under People so requests route to the right person.",
+      "You can cancel a request while it is still Pending.",
+    ],
+  },
+  {
+    id: "tool-loan",
+    title: "Tool Loan Request",
+    summary:
+      "Ask for a tool loan for field work. Office approves, then tracks ordered → arrived so you can follow your part. 10% weekly paycheck deduction (min $50/week).",
+    roles: ["everyone"],
+    path: "/tool-loans",
+    steps: [
+      "Open Tool Loan Request under Company.",
+      "Enter tool/part name, loan amount, and how it helps company field work. Product link is optional but preferred.",
+      "Read and check the terms: 10% weekly deduction (minimum $50/week), total open loans ≤ weekly pay, company use only.",
+      "Submit — office reviews. You get a notification when approved or declined.",
+      "On My requests, watch the progress bar: Requested → Approved → Ordered → Arrived (with dates).",
+      "Office/admin: Approvals → Approve/Decline. After approve, Parts to track → Mark ordered, then Mark arrived (optional note for tracking #).",
+    ],
+    tips: [
+      "Loans are only for tools that make Total Assurance field jobs easier — not personal use.",
+      "You are notified when office marks Ordered and when the part Arrives.",
+      "Office already knows your weekly pay — you do not enter it on the form.",
+    ],
+  },
+  {
     id: "settings-password",
     title: "Change your password or phone",
     summary: "Keep your login secure and contact info current.",

@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -84,6 +85,7 @@ function askNotNeededReason(label: string): string | null {
  */
 export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
+  const navigate = useNavigate();
   /** Counter actions: pick / not ready / partial */
   const canResolve =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
@@ -469,6 +471,13 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       void load().catch(() => {
         /* optimistic state already applied */
       });
+      // Close the loop: if parts are coming to the shop, log a drop-off
+      if (status === "picked" || status === "partial") {
+        const go = window.confirm(
+          "Parts coming back to the shop?\n\nLog a Parts drop-off so warehouse knows they’re on the counter and ready to issue."
+        );
+        if (go) navigate("/parts-dropoff");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed — try again");
       // Pull truth from server after failure

@@ -159,6 +159,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/audit") ||
     pathname.startsWith("/handbook") ||
     pathname.startsWith("/howto") ||
+    pathname.startsWith("/time-off") ||
+    pathname.startsWith("/tool-loans") ||
     pathname.startsWith("/reviews") ||
     pathname.startsWith("/notifications") ||
     pathname.startsWith("/settings")
@@ -190,6 +192,12 @@ export function Layout({ children }: { children: ReactNode }) {
   const [vendorWaiting, setVendorWaiting] = useState(0);
   /** Parts left at shop after field pickup — ready for warehouse */
   const [dropoffWaiting, setDropoffWaiting] = useState(0);
+  /** Fuel receipts needing OCR verify (admin/office) */
+  const [fuelOcrPending, setFuelOcrPending] = useState(0);
+  /** Time-off approvals waiting for this manager / office */
+  const [timeOffPending, setTimeOffPending] = useState(0);
+  /** Tool loan approvals waiting for manager / office */
+  const [toolLoanPending, setToolLoanPending] = useState(0);
   /** Open tech repair requests waiting for shop to schedule */
   const [openRepairsCount, setOpenRepairsCount] = useState(0);
   /** Open collapsible nav section (same Command Center style for every role) */
@@ -208,6 +216,7 @@ export function Layout({ children }: { children: ReactNode }) {
     isWarehouse || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
   const showRepairBadge =
     isMechanic || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
+  const showFuelOcrBadge = can(user, "editFuel") || adminShell;
 
   useEffect(() => {
     let cancelled = false;
@@ -251,6 +260,26 @@ export function Layout({ children }: { children: ReactNode }) {
           /* optional */
         }
       }
+      if (showFuelOcrBadge) {
+        try {
+          const fo = await api<{ pending?: number }>("/fuel/receipt-review/count");
+          if (!cancelled) setFuelOcrPending(Number(fo.pending) || 0);
+        } catch {
+          /* optional */
+        }
+      }
+      try {
+        const to = await api<{ pending?: number }>("/time-off/pending-count");
+        if (!cancelled) setTimeOffPending(Number(to.pending) || 0);
+      } catch {
+        /* optional */
+      }
+      try {
+        const tl = await api<{ pending?: number }>("/tool-loans/pending-count");
+        if (!cancelled) setToolLoanPending(Number(tl.pending) || 0);
+      } catch {
+        /* optional */
+      }
     }
     // Defer badge poll so first paint is not blocked (longer delay on cellular)
     const start = window.setTimeout(() => void poll(), 1200);
@@ -265,7 +294,7 @@ export function Layout({ children }: { children: ReactNode }) {
       window.removeEventListener("vendor-runs-changed", onVendorChange);
       window.removeEventListener("parts-dropoffs-changed", onVendorChange);
     };
-  }, [user?.id, showVendorCounter, showRepairBadge]);
+  }, [user?.id, showVendorCounter, showRepairBadge, showFuelOcrBadge]);
 
   useEffect(() => {
     document.title = "Total Assurance";
@@ -275,6 +304,58 @@ export function Layout({ children }: { children: ReactNode }) {
   useEffect(() => {
     setOpenCat(pathCategory(location.pathname));
   }, [location.pathname]);
+
+  // Close mobile menu after navigating to a page
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
+
+  // When the phone menu is open, lock page scroll so only the drawer list scrolls
+  useEffect(() => {
+    if (!open) return;
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const html = document.documentElement;
+    const body = document.body;
+    const prev = {
+      htmlOverflow: html.style.overflow,
+      bodyOverflow: body.style.overflow,
+      bodyPosition: body.style.position,
+      bodyTop: body.style.top,
+      bodyWidth: body.style.width,
+      bodyLeft: body.style.left,
+      bodyRight: body.style.right,
+    };
+    html.classList.add("nav-open");
+    body.classList.add("nav-open");
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    // position:fixed stops background scroll on iOS/Android without killing drawer touch
+    body.style.position = "fixed";
+    body.style.top = `-${scrollY}px`;
+    body.style.left = "0";
+    body.style.right = "0";
+    body.style.width = "100%";
+
+    // Ensure the scroll pane can receive touch (some WebViews need this)
+    const scroller = document.getElementById("app-nav-scroll");
+    if (scroller) {
+      scroller.style.overflowY = "scroll";
+      scroller.style.setProperty("-webkit-overflow-scrolling", "touch");
+    }
+
+    return () => {
+      html.classList.remove("nav-open");
+      body.classList.remove("nav-open");
+      html.style.overflow = prev.htmlOverflow;
+      body.style.overflow = prev.bodyOverflow;
+      body.style.position = prev.bodyPosition;
+      body.style.top = prev.bodyTop;
+      body.style.width = prev.bodyWidth;
+      body.style.left = prev.bodyLeft;
+      body.style.right = prev.bodyRight;
+      window.scrollTo(0, scrollY);
+    };
+  }, [open]);
 
   const vendorNavBadge = {
     badge: vendorWaiting,
@@ -334,6 +415,13 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/fuel/receipt-review",
       label: "Receipt verify",
       show: adminShell || can(user, "editFuel"),
+      ...(showFuelOcrBadge && fuelOcrPending > 0
+        ? {
+            badge: fuelOcrPending,
+            badgeAlways: false as const,
+            badgeLabel: `${fuelOcrPending} receipt${fuelOcrPending === 1 ? "" : "s"} need verify`,
+          }
+        : {}),
     },
     {
       to: "/inspections",
@@ -451,8 +539,31 @@ export function Layout({ children }: { children: ReactNode }) {
           : "Admin",
       show: adminShell || can(user, "manageUsers") || can(user, "manageEmployees"),
     },
+    {
+      to: "/time-off",
+      label: "Time Off Request",
+      show: true,
+      ...(timeOffPending > 0
+        ? {
+            badge: timeOffPending,
+            badgeAlways: false as const,
+            badgeLabel: `${timeOffPending} time-off request${timeOffPending === 1 ? "" : "s"} to review`,
+          }
+        : {}),
+    },
+    {
+      to: "/tool-loans",
+      label: "Tool Loan Request",
+      show: true,
+      ...(toolLoanPending > 0
+        ? {
+            badge: toolLoanPending,
+            badgeAlways: false as const,
+            badgeLabel: `${toolLoanPending} tool loan request${toolLoanPending === 1 ? "" : "s"} to review`,
+          }
+        : {}),
+    },
     { to: "/howto", label: "How-to", show: true },
-    { to: "/reviews", label: "Our reviews", show: true },
     { to: "/handbook", label: "Handbook", show: true },
     {
       to: "/notifications",
@@ -500,54 +611,56 @@ export function Layout({ children }: { children: ReactNode }) {
             ✕
           </button>
         </div>
-        <nav className="nav" onClick={() => setOpen(false)}>
-          {/* Same categorized menu as Command Center for every role */}
-          <NavGroup title="Home" items={homeNav} />
-          <NavCategory
-            id="fleet"
-            title="Fleet"
-            hint="Trucks · fuel · checks · map"
-            items={fleetNav}
-            open={openCat === "fleet"}
-            onToggle={toggleCat}
-          />
-          <NavCategory
-            id="warehouse"
-            title="Warehouse"
-            hint="Parts · bottles · warranties"
-            items={warehouseNav}
-            open={openCat === "warehouse"}
-            onToggle={toggleCat}
-          />
-          <NavCategory
-            id="shop"
-            title="Shop"
-            hint="Repairs · service"
-            items={shopNav}
-            open={openCat === "shop"}
-            onToggle={toggleCat}
-          />
-          <NavCategory
-            id="company"
-            title="Company"
-            hint="People · alerts · handbook"
-            items={companyNav}
-            open={openCat === "company"}
-            onToggle={toggleCat}
-          />
-        </nav>
-        <NavLink
-          to="/settings"
-          className={({ isActive }) => `user-box user-box-link${isActive ? " active" : ""}`}
-          onClick={() => setOpen(false)}
-          title="Open settings"
-        >
-          <div className="role">{roleLabel(user?.role)}</div>
-          <div className="user-box-name">{user?.display_name}</div>
-          <div className="user-box-hint">
-            {isOffice || isWarehouse ? "Settings · sign out" : "Tap for settings · sign out"}
-          </div>
-        </NavLink>
+        {/* Dedicated scroll pane — whole menu list + account row (Android-safe) */}
+        <div className="drawer-scroll" id="app-nav-scroll">
+          <nav className="nav">
+            <NavGroup title="Home" items={homeNav} />
+            <NavCategory
+              id="fleet"
+              title="Fleet"
+              hint="Trucks · fuel · checks · map"
+              items={fleetNav}
+              open={openCat === "fleet"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
+              id="warehouse"
+              title="Warehouse"
+              hint="Parts · bottles · warranties"
+              items={warehouseNav}
+              open={openCat === "warehouse"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
+              id="shop"
+              title="Shop"
+              hint="Repairs · service"
+              items={shopNav}
+              open={openCat === "shop"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
+              id="company"
+              title="Company"
+              hint="People · alerts · handbook"
+              items={companyNav}
+              open={openCat === "company"}
+              onToggle={toggleCat}
+            />
+          </nav>
+          <NavLink
+            to="/settings"
+            className={({ isActive }) => `user-box user-box-link${isActive ? " active" : ""}`}
+            onClick={() => setOpen(false)}
+            title="Open settings"
+          >
+            <div className="role">{roleLabel(user?.role)}</div>
+            <div className="user-box-name">{user?.display_name}</div>
+            <div className="user-box-hint">
+              {isOffice || isWarehouse ? "Settings · sign out" : "Tap for settings · sign out"}
+            </div>
+          </NavLink>
+        </div>
       </aside>
       <div className="content-column">
         <OfflineBanner />

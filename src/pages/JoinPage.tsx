@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, User } from "../api";
 import { useAuth } from "../auth";
+import { PasswordField } from "../components/PasswordField";
 
 type InviteInfo = {
   ok: boolean;
@@ -155,31 +156,25 @@ export function JoinPage() {
               <p className="muted" style={{ margin: "-0.35rem 0 0.65rem", fontSize: "0.8rem" }}>
                 Must match exactly (usually all lowercase).
               </p>
-              <label>
-                New password
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  autoComplete="new-password"
-                  required
-                  minLength={8}
-                  disabled={busy}
-                  placeholder="At least 8 characters"
-                />
-              </label>
-              <label>
-                Confirm password
-                <input
-                  type="password"
-                  value={password2}
-                  onChange={(e) => setPassword2(e.target.value)}
-                  autoComplete="new-password"
-                  required
-                  minLength={8}
-                  disabled={busy}
-                />
-              </label>
+              <PasswordField
+                label="New password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                required
+                minLength={8}
+                disabled={busy}
+                placeholder="At least 8 characters"
+              />
+              <PasswordField
+                label="Confirm password"
+                value={password2}
+                onChange={(e) => setPassword2(e.target.value)}
+                autoComplete="new-password"
+                required
+                minLength={8}
+                disabled={busy}
+              />
               <button className="btn" disabled={busy} type="submit">
                 {busy ? "Setting up…" : "Create password & sign in"}
               </button>

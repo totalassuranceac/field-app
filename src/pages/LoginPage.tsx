@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth";
+import { PasswordField } from "../components/PasswordField";
 
 export function LoginPage() {
   // Keep entry obvious for staff bookmarks / support
@@ -53,17 +54,14 @@ export function LoginPage() {
               disabled={busy}
             />
           </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-              disabled={busy}
-            />
-          </label>
+          <PasswordField
+            label="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            required
+            disabled={busy}
+          />
           <button className="btn" disabled={busy} type="submit">
             {busy ? "Signing in…" : "Sign in"}
           </button>

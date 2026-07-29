@@ -25,13 +25,52 @@ export function notificationLink(n: {
   }
 
   // Explicit kinds
+  if (
+    kind === "time_off_request" ||
+    kind === "time_off_decision" ||
+    entity === "time_off" ||
+    text.includes("time off")
+  ) {
+    if (kind === "time_off_request" || text.includes("request")) {
+      return "/time-off?tab=approvals";
+    }
+    return "/time-off";
+  }
+  if (
+    kind === "tool_loan_request" ||
+    kind === "tool_loan_decision" ||
+    kind === "tool_loan_part" ||
+    entity === "tool_loan" ||
+    text.includes("tool loan") ||
+    text.includes("tool ordered") ||
+    text.includes("tool arrived")
+  ) {
+    if (
+      kind === "tool_loan_request" ||
+      (text.includes("needs") && text.includes("approval"))
+    ) {
+      return "/tool-loans?tab=approvals";
+    }
+    return "/tool-loans";
+  }
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
   if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
     return "/warranties";
-  if (kind === "parts_dropoff" || entity === "parts_dropoff" || text.includes("parts at shop")) {
+  if (
+    kind === "parts_dropoff" ||
+    entity === "parts_dropoff" ||
+    text.includes("parts at shop") ||
+    text.includes("drop-off") ||
+    text.includes("dropoff")
+  ) {
     return "/parts-dropoff";
   }
-  if (kind === "pickup_waiting" || kind.includes("pickup")) return "/part-pickup";
+  if (kind === "pickup_waiting" || (kind.includes("pickup") && !text.includes("drop"))) {
+    return "/part-pickup";
+  }
+  if (kind.includes("fuel") && (text.includes("receipt") || text.includes("ocr"))) {
+    return "/fuel/receipt-review";
+  }
   if (kind === "asset_attention" || kind.includes("asset")) return "/assets";
   if (kind.startsWith("handbook") || entity === "handbook" || text.includes("handbook")) {
     return "/handbook";
