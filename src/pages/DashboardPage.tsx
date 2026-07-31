@@ -457,8 +457,8 @@ export function DashboardPage() {
         {
           key: "vendor",
           value: "→",
-          label: "Part pickup",
-          hint: "Vendor called you? Log it for warehouse",
+          label: "Part pickup request",
+          hint: "Parts ready at a store? Tell warehouse where to get them",
           to: "/part-pickup",
           tone: "info",
           weight: 7,
@@ -466,8 +466,8 @@ export function DashboardPage() {
         {
           key: "dropoff",
           value: "→",
-          label: "Parts drop-off",
-          hint: "Brought parts to the shop? Tell warehouse",
+          label: "Brought to shop",
+          hint: "Already dropped parts at the shop? Tell warehouse",
           to: "/parts-dropoff",
           tone: "info",
           weight: 6,
@@ -685,7 +685,7 @@ export function DashboardPage() {
       {
         key: "flags",
         value: s.open_alerts,
-        label: "Mileage flags",
+        label: "Fuel alerts",
         hint: "Odd odometer / fuel patterns",
         to: "/alerts",
         tone: toneForCount(s.open_alerts, 1, 2),
@@ -735,7 +735,7 @@ export function DashboardPage() {
       {
         key: "handbook",
         value: s.handbook,
-        label: "Handbook not signed",
+        label: "Employee handbook not signed",
         hint: "Staff still need to acknowledge",
         to: "/handbook",
         tone: toneForCount(s.handbook, 1, 3),
@@ -747,11 +747,17 @@ export function DashboardPage() {
   const actions = (() => {
     if (isDriver) {
       return [
-        { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Photo receipt · odometer", primary: true },
+        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Photo receipt · odometer", primary: true },
         { to: "/inspections", icon: "✓", title: "Weekly check", hint: "OK or report issue" },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Invoice / packing slip photo" },
+        {
+          to: "/parts-runs",
+          icon: "🚚",
+          title: "Warehouse delivery request",
+          hint: "Need materials on site",
+        },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Invoice / packing slip photo" },
         { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo shelf · write log # on box" },
-        { to: "/issues", icon: "🔧", title: "Request repair", hint: "Something’s wrong" },
+        { to: "/issues", icon: "🔧", title: "Report a problem", hint: "Something’s wrong on the truck" },
         { to: "/assets", icon: "🧰", title: "My truck gear", hint: "Bottles & tools" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations" },
       ];
@@ -761,55 +767,68 @@ export function DashboardPage() {
         {
           to: "/inventory",
           icon: "📋",
-          title: "Pickup / handoff",
+          title: "Stock room",
           hint: "Scan · custody · truck",
           primary: true,
         },
-        { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Receipt photo · any unit" },
-        { to: "/assets", icon: "🧪", title: "Bottles & gear", hint: "Swap gas · ladders" },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card photos" },
+        {
+          to: "/parts-runs",
+          icon: "🚚",
+          title: "Warehouse delivery request",
+          hint: "Field needs a run",
+        },
+        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · any unit" },
+        { to: "/assets", icon: "🧪", title: "Company assets", hint: "Bottles · ladders · tools" },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Company card photos" },
         { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
-        { to: "/inventory", icon: "📊", title: "Stock levels", hint: "Stage · order" },
+        { to: "/part-pickup", icon: "🏪", title: "Part pickup request", hint: "Parts ready at a store" },
       ];
     }
     if (isMechanic) {
       return [
-        { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs & schedule", primary: true },
+        { to: "/issues", icon: "🔧", title: "Shop board", hint: "Schedule · work · close", primary: true },
+        {
+          to: "/parts-runs",
+          icon: "🚚",
+          title: "Warehouse delivery request",
+          hint: "Field needs a run",
+        },
         {
           to: "/parts-orders",
           icon: "🛒",
-          title: "Order parts",
+          title: "Order for shop",
           hint: "AutoZone · First Call · track",
         },
-        { to: "/fuel", icon: "⛽", title: "Log fuel", hint: "Receipt photo · odometer" },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts receipts", hint: "Company card purchases" },
-        { to: "/yard", icon: "📋", title: "Yard walk", hint: "Stickers · cams · GPS" },
-        { to: "/vehicles", icon: "🚐", title: "Vehicles", hint: "Fleet registry" },
+        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · odometer" },
+        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Company card purchases" },
+        { to: "/yard", icon: "📋", title: "Yard", hint: "Stickers · cams · GPS" },
+        { to: "/vehicles", icon: "🚐", title: "Trucks", hint: "Fleet registry" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Where units are" },
-        { to: "/inspections", icon: "✓", title: "Weekly checks", hint: "Status board" },
+        { to: "/inspections", icon: "✓", title: "Weekly check", hint: "Status board" },
       ];
     }
     // Admin shell (admin + viewer) — same hub; viewer is read-only via API/UI gates
     if (isAdminShell) {
       return [
-        { to: "/issues", icon: "🔧", title: "Repairs", hint: "Shop + field requests", primary: true },
+        { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs + schedule", primary: true },
         {
           to: "/parts-orders",
           icon: "🛒",
-          title: "Order parts",
+          title: "Order for shop",
           hint: "AutoZone · First Call · track",
         },
-        { to: "/inventory", icon: "📦", title: "Warehouse", hint: "Stock · pickup · stage" },
+        { to: "/inventory", icon: "📦", title: "Stock room", hint: "Stock · pickup · stage" },
         { to: "/warranties", icon: "🧾", title: "Warranties", hint: "Drop-offs to process" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet on the road" },
-        { to: "/assets", icon: "🧰", title: "Assets", hint: "Bottles · ladders · tools" },
-        { to: "/alerts", icon: "🚩", title: "Flags", hint: "Mileage / fuel oddities" },
+        { to: "/assets", icon: "🧰", title: "Company assets", hint: "Bottles · ladders · tools" },
+        { to: "/alerts", icon: "🚩", title: "Fuel alerts", hint: "Mileage / fuel oddities" },
         { to: "/yard", icon: "📋", title: "Yard", hint: "Compliance walk" },
+        { to: "/tv", icon: "📺", title: "TV board", hint: "Office wall display" },
         ...(isAdmin
-          ? [{ to: "/roles", icon: "👁", title: "Role simulator", hint: "Preview staff screens" }]
+          ? [{ to: "/roles", icon: "👁", title: "Preview roles", hint: "See staff screens" }]
           : []),
-        { to: "/admin", icon: "👥", title: "People", hint: "Users · settings" },
-        { to: "/audit", icon: "📜", title: "Audit", hint: "Who changed what" },
+        { to: "/admin", icon: "👥", title: "People", hint: "Logins · roster" },
+        { to: "/audit", icon: "📜", title: "Change history", hint: "Who changed what" },
       ];
     }
     return [
@@ -820,8 +839,8 @@ export function DashboardPage() {
 
   const kicker = isAdminShell
     ? isViewer
-      ? "Explorer (read-only)"
-      : "Command center"
+      ? "Look only (no edits)"
+      : "Admin"
     : isWarehouse
       ? "Warehouse"
       : isMechanic
@@ -885,7 +904,7 @@ export function DashboardPage() {
         items={focusItems}
         title={
           isAdmin
-            ? "Command center"
+            ? "Needs attention"
             : isWarehouse
               ? "Warehouse at a glance"
               : isDriver
@@ -896,11 +915,11 @@ export function DashboardPage() {
         }
         subtitle={
           isAdmin
-            ? "Fleet · shop · warehouse · compliance — hot items first"
+            ? "Hot items first — fleet, shop, warehouse, compliance"
             : isWarehouse
-              ? "Pickups, warranties, bottles & damaged gear"
+              ? "Vendors, shop drop-offs, warranties, bottles"
               : isDriver
-                ? "Your checks, repairs, drop-offs & truck gear"
+                ? "Checks, repairs, parts & truck gear"
                 : isMechanic
                   ? "Urgent jobs, shop board, yard & tracking"
                   : "Status that matters for your role"
@@ -935,10 +954,20 @@ export function DashboardPage() {
                   {myRepairs.length ? "○" : "✓"}
                 </span>
                 <span>
-                  <strong>Open repairs on your units</strong>
+                  <strong>
+                    {myRepairs.some((r) => r.status === "scheduled")
+                      ? "Bring unit to shop (scheduled)"
+                      : "Open repairs on your units"}
+                  </strong>
                   <span className="muted">
                     {myRepairs.length
-                      ? `${myRepairs.length} open`
+                      ? myRepairs
+                          .map((r) =>
+                            r.status === "scheduled" && r.scheduled_date
+                              ? `Unit ${r.unit_number} · ${r.scheduled_date}`
+                              : `Unit ${r.unit_number} · ${r.status}`
+                          )
+                          .join(" · ")
                       : "None waiting on you"}
                   </span>
                 </span>
@@ -972,8 +1001,8 @@ export function DashboardPage() {
                   ○
                 </span>
                 <span>
-                  <strong>Part pickup</strong>
-                  <span className="muted">Parts still at the vendor? Log for warehouse</span>
+                  <strong>Part pickup request</strong>
+                  <span className="muted">Parts ready at a store? Tell warehouse where to get them</span>
                 </span>
               </Link>
             </li>
@@ -983,8 +1012,8 @@ export function DashboardPage() {
                   ○
                 </span>
                 <span>
-                  <strong>Parts drop-off</strong>
-                  <span className="muted">Already brought parts to the shop? Tell warehouse</span>
+                  <strong>Brought to shop</strong>
+                  <span className="muted">Already dropped parts at the shop? Tell warehouse</span>
                 </span>
               </Link>
             </li>
@@ -994,7 +1023,7 @@ export function DashboardPage() {
                   ○
                 </span>
                 <span>
-                  <strong>Time Off Request</strong>
+                  <strong>Time off request</strong>
                   <span className="muted">Manager approves in the app</span>
                 </span>
               </Link>
@@ -1005,8 +1034,8 @@ export function DashboardPage() {
                   ○
                 </span>
                 <span>
-                  <strong>Tool Loan Request</strong>
-                  <span className="muted">Company tools · manager + office</span>
+                  <strong>Tool loan request</strong>
+                  <span className="muted">Company tools · office approves</span>
                 </span>
               </Link>
             </li>
@@ -1020,9 +1049,15 @@ export function DashboardPage() {
                 </Link>
               ))}
               {myRepairs.map((r) => (
-                <Link key={`r-${r.id}`} className="home-pill alert" to="/issues">
+                <Link
+                  key={`r-${r.id}`}
+                  className="home-pill alert"
+                  to={`/issues?id=${r.id}`}
+                >
                   <strong>
-                    {r.unit_number} · {r.status}
+                    {r.status === "scheduled"
+                      ? `BRING IN ${r.unit_number}`
+                      : `${r.unit_number} · ${r.status}`}
                   </strong>
                   <span>
                     {r.title}

@@ -201,7 +201,7 @@ export function FuelReceiptReviewPage() {
     <div className="page fuel-ocr-review-page">
       <div className="page-header">
         <div>
-          <h1>Fuel receipt review</h1>
+          <h1>Fuel receipts</h1>
           <p>
             Open a receipt photo, correct any wrong fields, then <strong>Save &amp; verify</strong>.
             Corrections teach the app for the next scan.

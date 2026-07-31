@@ -38,16 +38,22 @@ const REPAYMENT_PERCENT = 10;
 
 const DISCLAIMER = `Tool loan terms (Total Assurance):
 
-• We deduct 10% of the loan amount from your paycheck every week.
-• Minimum weekly payment is $50, even if 10% of the loan is less than $50.
-• The total balance of all your open tool loans must not exceed what you make in a typical week (office already has your pay on file).
-• Loans are only for company-related tools that make field work easier — not personal use.
-• Providing a product link helps office verify the item.`;
+• Weekly payroll deduction = 10% of your remaining balance (including this loan), with a $50 minimum.
+• Example: $600 total owed → $60 per week. $400 total owed → $50 per week (minimum applies).
+• Bigger total balance means bigger weekly payments until paid off.
+• Open tool loans must not exceed a typical week’s pay (office has your pay on file).
+• Loans are only for tools needed for company field work — not personal spending.
+• The company is not a bank. Request only what you need for the job.`;
 
-/** Estimated weekly payroll deduction for a loan amount */
-function weeklyPaymentEstimate(loanAmount: number): number {
-  if (!Number.isFinite(loanAmount) || loanAmount <= 0) return 0;
-  return Math.max(loanAmount * (REPAYMENT_PERCENT / 100), MIN_WEEKLY_PAYMENT);
+/** Policy weekly payroll deduction: max($50, 10% of balance), never more than remaining. */
+function weeklyPaymentEstimate(totalBalance: number): number {
+  if (!Number.isFinite(totalBalance) || totalBalance <= 0) return 0;
+  const b = Math.round(totalBalance * 100) / 100;
+  return Math.min(b, Math.max(b * (REPAYMENT_PERCENT / 100), MIN_WEEKLY_PAYMENT));
+}
+
+function moneyFmt(n: number): string {
+  return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 }
 
 function statusLabel(s: string): string {
@@ -243,6 +249,9 @@ export function ToolLoanPage() {
   const [partNoteId, setPartNoteId] = useState<number | null>(null);
   const [partNoteAction, setPartNoteAction] = useState<"ordered" | "arrived">("ordered");
   const [partNote, setPartNote] = useState("");
+  /** What they already owe on the ledger (before this new request). */
+  const [currentBalance, setCurrentBalance] = useState(0);
+  const [ledgerPersonName, setLedgerPersonName] = useState<string | null>(null);
 
   const isOffice = user?.role === "admin" || user?.role === "office";
 
@@ -254,6 +263,9 @@ export function ToolLoanPage() {
           requests: ToolLoanRequest[];
           is_approver?: boolean;
           pending_for_me?: number;
+          current_balance?: number;
+          ledger_person_name?: string | null;
+          account_display_name?: string | null;
           error?: string;
         }>("/tool-loans?view=mine"),
         isOffice
@@ -273,6 +285,8 @@ export function ToolLoanPage() {
       setApprovals(a.requests || []);
       setIsApprover(Boolean(isOffice || a.is_approver));
       setPendingForMe(a.pending_for_me ?? 0);
+      setCurrentBalance(Math.max(0, Number(m.current_balance) || 0));
+      setLedgerPersonName(m.ledger_person_name || null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load tool loans");
     }
@@ -288,8 +302,19 @@ export function ToolLoanPage() {
   }, [isApprover]);
 
   const amountNum = Number(amount);
-  const estWeekly =
-    Number.isFinite(amountNum) && amountNum > 0 ? weeklyPaymentEstimate(amountNum) : 0;
+  const newLoan = Number.isFinite(amountNum) && amountNum > 0 ? amountNum : 0;
+  const projectedBalance = Math.round((currentBalance + newLoan) * 100) / 100;
+  const estWeekly = newLoan > 0 ? weeklyPaymentEstimate(projectedBalance) : 0;
+  const weeksEstimate =
+    estWeekly > 0 && projectedBalance > 0
+      ? Math.max(1, Math.ceil(projectedBalance / estWeekly - 1e-9))
+      : 0;
+  /** Current balance only (before any new request) — always show on Home of this page */
+  const currentWeeklyOnly = weeklyPaymentEstimate(currentBalance);
+  const currentWeeksLeft =
+    currentWeeklyOnly > 0 && currentBalance > 0.009
+      ? Math.max(1, Math.ceil(currentBalance / currentWeeklyOnly - 1e-9))
+      : 0;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -439,7 +464,7 @@ export function ToolLoanPage() {
     <div className="page tool-loan-page">
       <div className="page-header">
         <div>
-          <h1>Tool Loan Request</h1>
+          <h1>Tool loan request</h1>
           <p>
             Request a company tool loan for field work. Office approves, then you can track when
             the part is ordered and when it arrives.
@@ -456,6 +481,41 @@ export function ToolLoanPage() {
 
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
+
+      {/* Always-visible balance — hard to miss, above form/lists */}
+      {tab === "mine" && (
+        <section
+          className={`tool-loan-balance-hero card${currentBalance > 0.009 ? " has-balance" : " is-clear"}`}
+          aria-label="Your tool loan balance"
+        >
+          <div className="tool-loan-balance-hero-label">
+            Your tool loan balance
+            {ledgerPersonName ? (
+              <span className="tool-loan-balance-hero-who"> · {ledgerPersonName}</span>
+            ) : null}
+          </div>
+          <div className="tool-loan-balance-hero-amount">
+            {moneyFmt(currentBalance)}
+          </div>
+          {currentBalance > 0.009 ? (
+            <div className="tool-loan-balance-hero-meta">
+              <span>
+                About <strong>{moneyFmt(currentWeeklyOnly)}</strong> / week from paycheck
+              </span>
+              {currentWeeksLeft > 0 ? (
+                <span>
+                  · ~{currentWeeksLeft} week{currentWeeksLeft === 1 ? "" : "s"} left if nothing
+                  new is added
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <p className="tool-loan-balance-hero-zero muted">
+              You don&apos;t currently owe anything on tool loans.
+            </p>
+          )}
+        </section>
+      )}
 
       <div className="filters no-print" style={{ marginBottom: "0.75rem" }}>
         <button
@@ -492,22 +552,31 @@ export function ToolLoanPage() {
             <strong>Important — read before you submit</strong>
             <ul>
               <li>
-                We deduct <strong>10% of the loan amount</strong> from your paycheck every week.
+                Weekly paycheck deduction = <strong>10% of your total balance owed</strong> (what
+                you already owe + this new item), with a{" "}
+                <strong>${MIN_WEEKLY_PAYMENT} minimum</strong>.
               </li>
               <li>
-                <strong>Minimum weekly payment is ${MIN_WEEKLY_PAYMENT}</strong>, even if 10% of the
-                loan is less than that.
+                Example: <strong>$600 total owed → $60/week</strong>. Under $500 still pays at least $
+                {MIN_WEEKLY_PAYMENT}/week.
               </li>
               <li>
-                The <strong>total balance of all your open tool loans</strong> must not exceed what
-                you make in a typical week (office already has your pay on file).
+                <strong>Higher total balance = higher weekly payment</strong> until paid off. Only
+                request what you need for company field work.
               </li>
               <li>
-                Loans are for <strong>company-related tools</strong> that make field work easier —
-                not personal use.
+                Total open tool loans must not exceed a typical week’s pay (office has your pay on
+                file).
               </li>
             </ul>
           </div>
+
+          {currentBalance > 0.009 && (
+            <p className="muted" style={{ marginTop: 0, fontSize: "0.9rem" }}>
+              Any new loan adds to the <strong>{moneyFmt(currentBalance)}</strong> you already
+              owe — weekly deduction updates below when you enter an amount.
+            </p>
+          )}
 
           <label>
             Tool / part name
@@ -546,11 +615,34 @@ export function ToolLoanPage() {
             />
           </label>
           {estWeekly > 0 && (
-            <p className="muted" style={{ margin: "-0.35rem 0 0", fontSize: "0.85rem" }}>
-              Estimated weekly paycheck deduction: <strong>${estWeekly.toFixed(2)}</strong>
-              {" "}
-              (10% of loan, or ${MIN_WEEKLY_PAYMENT} minimum — whichever is higher)
-            </p>
+            <div
+              className="tool-loan-weekly-preview"
+              style={{
+                margin: "-0.25rem 0 0.75rem",
+                padding: "0.75rem 0.9rem",
+                borderRadius: "10px",
+                background: "rgba(225, 29, 46, 0.08)",
+                border: "1px solid rgba(225, 29, 46, 0.2)",
+              }}
+            >
+              <p style={{ margin: 0, fontWeight: 700 }}>
+                Your weekly paycheck deduction: {moneyFmt(estWeekly)}
+              </p>
+              <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.88rem" }}>
+                Based on total balance after this request:{" "}
+                <strong>{moneyFmt(projectedBalance)}</strong>
+                {currentBalance > 0.009
+                  ? ` (${moneyFmt(currentBalance)} already owed + ${moneyFmt(newLoan)} new)`
+                  : ` (this ${moneyFmt(newLoan)} request)`}
+                .
+                {estWeekly <= MIN_WEEKLY_PAYMENT + 0.001 && projectedBalance > MIN_WEEKLY_PAYMENT
+                  ? ` Minimum ${moneyFmt(MIN_WEEKLY_PAYMENT)}/week applies.`
+                  : ` That’s 10% of the total (min ${moneyFmt(MIN_WEEKLY_PAYMENT)}).`}
+                {weeksEstimate > 0
+                  ? ` About ${weeksEstimate} week${weeksEstimate === 1 ? "" : "s"} if nothing else is added.`
+                  : ""}
+              </p>
+            </div>
           )}
           <label>
             How this helps your field work (required)
@@ -571,9 +663,10 @@ export function ToolLoanPage() {
               required
             />
             <span>
-              I understand: 10% of the loan is deducted weekly (minimum ${MIN_WEEKLY_PAYMENT}/week);
-              total open tool loan balances must not exceed my weekly pay; this is for company/field
-              work only.
+              I understand my weekly deduction is 10% of my total tool loan balance (minimum $
+              {MIN_WEEKLY_PAYMENT}/week), that a larger balance means larger weekly payments, that
+              total open loans must not exceed my weekly pay, and that this is for company field
+              tools only — not personal spending.
             </span>
           </label>
 

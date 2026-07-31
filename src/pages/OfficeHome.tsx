@@ -104,15 +104,24 @@ export function OfficeHome() {
             <span className="office-action-hint">See every unit on the road</span>
           </span>
         </Link>
+        <Link to="/tv" className="office-action">
+          <span className="office-action-icon" aria-hidden>
+            📺
+          </span>
+          <span>
+            <strong>TV board</strong>
+            <span className="office-action-hint">Full-screen for the office TV</span>
+          </span>
+        </Link>
         <Link to="/issues" className="office-action">
           <span className="office-action-icon" aria-hidden>
             🔧
           </span>
           <span>
-            <strong>Scheduled repairs</strong>
+            <strong>Shop board</strong>
             <span className="office-action-hint">
               {scheduled.length
-                ? `${scheduled.length} on the shop board`
+                ? `${scheduled.length} scheduled or in progress`
                 : "Nothing scheduled right now"}
             </span>
           </span>
@@ -142,11 +151,11 @@ export function OfficeHome() {
             🏪
           </span>
           <span>
-            <strong>Part pickup</strong>
+            <strong>Part pickup request</strong>
             <span className="office-action-hint">
               {vendorWaiting
                 ? `${vendorWaiting} waiting for warehouse pickup`
-                : "Log parts ready at supply houses"}
+                : "Parts ready at a store — request pickup"}
             </span>
           </span>
         </Link>

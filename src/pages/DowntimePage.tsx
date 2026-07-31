@@ -51,7 +51,7 @@ export function DowntimePage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Vehicle downtime</h1>
+          <h1>Trucks down</h1>
           <p>Accountability for units out of service — duration, reason, and ownership</p>
         </div>
         <button className="btn secondary no-print" type="button" onClick={() => window.print()}>

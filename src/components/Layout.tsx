@@ -161,6 +161,7 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/howto") ||
     pathname.startsWith("/time-off") ||
     pathname.startsWith("/tool-loans") ||
+    pathname.startsWith("/tool-loan-ledger") ||
     pathname.startsWith("/reviews") ||
     pathname.startsWith("/notifications") ||
     pathname.startsWith("/settings")
@@ -170,6 +171,9 @@ function pathCategory(pathname: string): string {
   if (pathname.startsWith("/parts-orders")) {
     return "shop";
   }
+  if (pathname.startsWith("/parts-runs")) {
+    return "warehouse";
+  }
   return "home";
 }
 
@@ -178,6 +182,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  /** Full-screen TV wallboard — no sidebar / top chrome */
+  const isTvBoard = location.pathname === "/tv" || location.pathname.startsWith("/tv/");
 
   const navReturn = readNavReturn(location.state);
   const returnPath = navReturn?.returnTo?.split("?")[0] || "";
@@ -203,6 +209,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const [toolLoanPending, setToolLoanPending] = useState(0);
   /** Open parts orders (needed / ordered / arriving) */
   const [partsOrderPending, setPartsOrderPending] = useState(0);
+  /** Open field parts delivery runs */
+  const [partsRunPending, setPartsRunPending] = useState(0);
   /** Open tech repair requests waiting for shop to schedule */
   const [openRepairsCount, setOpenRepairsCount] = useState(0);
   /** Open collapsible nav section (same Command Center style for every role) */
@@ -289,6 +297,14 @@ export function Layout({ children }: { children: ReactNode }) {
         try {
           const po = await api<{ pending?: number }>("/parts-orders/pending-count");
           if (!cancelled) setPartsOrderPending(Number(po.pending) || 0);
+        } catch {
+          /* optional */
+        }
+      }
+      if (isMechanic || isOffice || isWarehouse || adminShell || user?.role === "admin") {
+        try {
+          const pr = await api<{ pending?: number }>("/parts-runs/pending-count");
+          if (!cancelled) setPartsRunPending(Number(pr.pending) || 0);
         } catch {
           /* optional */
         }
@@ -405,7 +421,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const homeNav: NavItem[] = [
     {
       to: "/",
-      label: adminShell ? "Command center" : "Home",
+      // One word for everyone — “Command center” sounded like a different app
+      label: "Home",
       show: true,
     },
   ];
@@ -414,7 +431,7 @@ export function Layout({ children }: { children: ReactNode }) {
   const fleetNav: NavItem[] = [
     {
       to: "/vehicles",
-      label: isWarehouse ? "Trucks" : "Vehicles",
+      label: "Trucks",
       // Admin, warehouse (trucks), mechanic — not field/office clutter
       show: adminShell || isWarehouse || isMechanic,
     },
@@ -426,39 +443,39 @@ export function Layout({ children }: { children: ReactNode }) {
     },
     {
       to: "/yard",
-      label: "Yard walk",
+      label: "Yard",
       show: adminShell || isMechanic,
     },
     {
       to: "/fuel",
-      label: can(user, "logFuel") ? "Log fuel" : "Fuel log",
+      label: "Fuel",
       show: adminShell || can(user, "logFuel") || can(user, "viewReports"),
     },
     {
       to: "/fuel/receipt-review",
-      label: "Receipt verify",
+      label: "Fuel receipts",
       show: adminShell || can(user, "editFuel"),
       ...(showFuelOcrBadge && fuelOcrPending > 0
         ? {
             badge: fuelOcrPending,
             badgeAlways: false as const,
-            badgeLabel: `${fuelOcrPending} receipt${fuelOcrPending === 1 ? "" : "s"} need verify`,
+            badgeLabel: `${fuelOcrPending} fuel receipt${fuelOcrPending === 1 ? "" : "s"} need review`,
           }
         : {}),
     },
     {
       to: "/inspections",
-      label: "Weekly checks",
+      label: "Weekly check",
       show: adminShell || isDriver || isMechanic || isOffice,
     },
     {
       to: "/alerts",
-      label: "Mileage flags",
+      label: "Fuel alerts",
       show: adminShell || isMechanic || (isOffice && can(user, "viewAlerts")),
     },
     {
       to: "/downtime",
-      label: "Downtime",
+      label: "Trucks down",
       show:
         adminShell ||
         isMechanic ||
@@ -475,40 +492,49 @@ export function Layout({ children }: { children: ReactNode }) {
   const warehouseNav: NavItem[] = [
     {
       to: "/inventory",
-      label: adminShell ? "Inventory & pickup" : "Inventory",
+      label: "Stock room",
       show: adminShell || can(user, "viewInventory") || isWarehouse,
     },
     {
       to: "/part-pickup",
-      label: "Part pickup",
+      // Parts ready at a supply house — request a pickup
+      label: "Part pickup request",
       show: true,
       ...(showVendorCounter ? vendorNavBadge : {}),
     },
     {
       to: "/parts-dropoff",
-      label: "Parts drop-off",
+      // Tech already brought parts into the shop for warehouse
+      label: "Brought to shop",
       show: true,
       ...(showVendorCounter ? dropoffNavBadge : {}),
     },
     {
+      to: "/parts-runs",
+      // Tech needs warehouse to bring materials out to a job
+      label: "Warehouse delivery request",
+      show: true,
+      ...(partsRunPending > 0
+        ? {
+            badge: partsRunPending,
+            badgeAlways: false as const,
+            badgeLabel: `${partsRunPending} warehouse delivery request${partsRunPending === 1 ? "" : "s"} open`,
+          }
+        : {}),
+    },
+    {
       to: "/truck-stock",
-      label: "Truck stock count",
+      label: "Count truck stock",
       show: true,
     },
     {
       to: "/parts-receipts",
-      label: "Parts receipts",
+      label: "Parts invoices",
       show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
     },
     {
       to: "/assets",
-      label: isDriver
-        ? "My truck gear"
-        : isWarehouse
-          ? "Bottles & gear"
-          : adminShell
-            ? "Bottles & equipment"
-            : "Assets",
+      label: isDriver ? "My truck gear" : "Company assets",
       show: can(user, "viewCompanyAssets"),
     },
     {
@@ -524,9 +550,9 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/issues",
       label:
         can(user, "manageIssues") || adminShell
-          ? "Repairs & shop"
+          ? "Shop board"
           : can(user, "reportIssues")
-            ? "Request repair"
+            ? "Report a problem"
             : "Repairs",
       show:
         adminShell ||
@@ -546,12 +572,13 @@ export function Layout({ children }: { children: ReactNode }) {
     },
     {
       to: "/service",
-      label: "Oil / service",
+      label: "Oil changes",
       show: adminShell || isMechanic,
     },
     {
       to: "/parts-orders",
-      label: "Order parts",
+      // Shop/office ordering — not the same as “at the vendor” or “warehouse delivery request”
+      label: "Order for shop",
       show:
         adminShell ||
         isMechanic ||
@@ -563,7 +590,7 @@ export function Layout({ children }: { children: ReactNode }) {
         ? {
             badge: partsOrderPending,
             badgeAlways: false as const,
-            badgeLabel: `${partsOrderPending} open parts order${partsOrderPending === 1 ? "" : "s"}`,
+            badgeLabel: `${partsOrderPending} open shop order${partsOrderPending === 1 ? "" : "s"}`,
           }
         : {}),
     },
@@ -573,16 +600,12 @@ export function Layout({ children }: { children: ReactNode }) {
   const companyNav: NavItem[] = [
     {
       to: "/admin",
-      label: adminShell
-        ? "People & settings"
-        : can(user, "manageEmployees")
-          ? "People"
-          : "Admin",
+      label: "People",
       show: adminShell || can(user, "manageUsers") || can(user, "manageEmployees"),
     },
     {
       to: "/time-off",
-      label: "Time Off Request",
+      label: "Time off request",
       show: true,
       ...(timeOffPending > 0
         ? {
@@ -594,7 +617,7 @@ export function Layout({ children }: { children: ReactNode }) {
     },
     {
       to: "/tool-loans",
-      label: "Tool Loan Request",
+      label: "Tool loan request",
       show: true,
       ...(toolLoanPending > 0
         ? {
@@ -604,28 +627,43 @@ export function Layout({ children }: { children: ReactNode }) {
           }
         : {}),
     },
-    { to: "/howto", label: "How-to", show: true },
-    { to: "/handbook", label: "Handbook", show: true },
+    {
+      to: "/tool-loan-ledger",
+      label: "Tool loan payroll",
+      show: user.role === "admin" || user.role === "office",
+    },
+    { to: "/feedback", label: "App feedback", show: true },
+    { to: "/howto", label: "How-to guides", show: true },
+    { to: "/handbook", label: "Employee handbook", show: true },
     {
       to: "/notifications",
-      label: "Notifications",
+      label: "Inbox",
       show: true,
       badge: unread,
     },
     {
+      to: "/tv",
+      label: "TV board",
+      show: adminShell || isOffice || isMechanic,
+    },
+    {
       to: "/roles",
-      label: "Role simulator",
+      label: "Preview roles",
       show: isTrueAdmin && !viewAsRole,
     },
     {
       to: "/audit",
-      label: "Audit log",
+      label: "Change history",
       show: can(user, "viewAudit"),
     },
   ];
 
   function toggleCat(id: string) {
     setOpenCat((prev) => (prev === id ? "" : id));
+  }
+
+  if (isTvBoard) {
+    return <div className="tv-shell">{children}</div>;
   }
 
   return (
@@ -667,7 +705,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <NavCategory
               id="warehouse"
               title="Warehouse"
-              hint="Parts · bottles · warranties"
+              hint="Stock · vendors · warranties"
               items={warehouseNav}
               open={openCat === "warehouse"}
               onToggle={toggleCat}
@@ -675,7 +713,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <NavCategory
               id="shop"
               title="Shop"
-              hint="Repairs · service"
+              hint="Shop board · oil · orders"
               items={shopNav}
               open={openCat === "shop"}
               onToggle={toggleCat}
@@ -683,7 +721,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <NavCategory
               id="company"
               title="Company"
-              hint="People · alerts · handbook"
+              hint="People · requests · handbook · guides"
               items={companyNav}
               open={openCat === "company"}
               onToggle={toggleCat}
@@ -783,13 +821,13 @@ export function Layout({ children }: { children: ReactNode }) {
                   className={`topbar-vendor-chip${vendorWaiting > 0 ? " is-hot" : " is-clear"}`}
                   title={
                     vendorWaiting > 0
-                      ? `${vendorWaiting} parts waiting for pickup`
-                      : "Part pickup clear — nothing waiting"
+                      ? `${vendorWaiting} part pickup request${vendorWaiting === 1 ? "" : "s"} open`
+                      : "No open part pickup requests"
                   }
                   aria-label={
                     vendorWaiting > 0
-                      ? `${vendorWaiting} parts to pick up`
-                      : "Part pickup clear"
+                      ? `${vendorWaiting} part pickup requests`
+                      : "No part pickup requests"
                   }
                 >
                   <span className="topbar-vendor-chip-label">Pickup</span>

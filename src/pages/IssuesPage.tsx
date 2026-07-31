@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
-import { PartsReceiptUploadPanel } from "../components/PartsReceiptUploadPanel";
+import { ShopJobPartsPanel } from "../components/ShopJobPartsPanel";
 import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
 import {
   DRIVER_ISSUE_OPTIONS,
@@ -204,6 +204,13 @@ export function IssuesPage() {
   const [workList, setWorkList] = useState<Issue[]>([]);
   /** Sync lock — React state alone can miss double-taps before re-render */
   const submitLock = useRef(false);
+  /** Receipts on file for soft prompt when completing */
+  const [jobReceiptCount, setJobReceiptCount] = useState(0);
+  /** After complete — offer unit parts history */
+  const [postComplete, setPostComplete] = useState<{
+    vehicleId: number;
+    unitNumber: string;
+  } | null>(null);
 
   async function load() {
     // Deep-link always loads the shop board so the target ticket is present
@@ -421,6 +428,8 @@ export function IssuesPage() {
 
   function openManage(issue: Issue) {
     setManage(issue);
+    setJobReceiptCount(0);
+    setPostComplete(null);
     setMStatus(issue.status === "open" ? "scheduled" : issue.status);
     setMDate(issue.scheduled_date || "");
     setMNotes(issue.schedule_notes || "");
@@ -491,6 +500,13 @@ export function IssuesPage() {
         setError("Enter diagnostics/troubleshooting and/or work performed.");
         return;
       }
+      // Soft prompt — don't block complete if no receipt
+      if (jobReceiptCount === 0) {
+        const go = window.confirm(
+          `No parts receipts uploaded for unit ${manage.unit_number} on this job.\n\nComplete anyway? (You can still add receipts later under Parts receipts.)`
+        );
+        if (!go) return;
+      }
     }
     // Oil mileage only when completing an oil change
     const didOil = mStatus === "completed" && isOilChangeWork;
@@ -502,7 +518,12 @@ export function IssuesPage() {
     }
 
     try {
-      await api(`/issues/${manage.id}`, {
+      const vehicleIdDone = manage.vehicle_id;
+      const unitDone = manage.unit_number;
+      const result = await api<{
+        field_notified?: number;
+        field_notify_warning?: string | null;
+      }>(`/issues/${manage.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           status: mStatus,
@@ -537,16 +558,33 @@ export function IssuesPage() {
         }),
       });
       setManage(null);
+      const n = result.field_notified ?? 0;
+      const notifyBit =
+        n > 0
+          ? ` Notified ${n} person${n === 1 ? "" : "s"} on the unit (app inbox).`
+          : "";
       const statusOk: Record<string, string> = {
         open: "Saved — still open / waiting.",
-        scheduled: mDate ? `Scheduled for ${mDate}.` : "Marked scheduled.",
-        in_progress: "Marked in progress.",
+        scheduled: mDate
+          ? `Scheduled for ${mDate}.${notifyBit || " (No app user linked — call the tech.)"}`
+          : `Marked scheduled.${notifyBit}`,
+        in_progress: `Marked in progress — unit is out of service in the app.${notifyBit}`,
         completed: didOil && oilOdo
-          ? `Job complete. Oil tracking — next ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.`
-          : "Job marked complete.",
-        cancelled: "Job cancelled.",
+          ? `Job complete. Oil tracking — next ~${(Number(oilOdo) + (Number(oilInterval) || 5000)).toLocaleString()} mi.${notifyBit}`
+          : `Job marked complete.${notifyBit}`,
+        cancelled: `Job cancelled.${notifyBit}`,
       };
-      setOk(statusOk[mStatus] || "Repair record saved.");
+      if (result.field_notify_warning) {
+        setError(result.field_notify_warning);
+        setOk(statusOk[mStatus] || "Repair record saved.");
+      } else {
+        setOk(statusOk[mStatus] || "Repair record saved.");
+      }
+      if (mStatus === "completed" && vehicleIdDone) {
+        setPostComplete({ vehicleId: vehicleIdDone, unitNumber: unitDone });
+      } else {
+        setPostComplete(null);
+      }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -684,13 +722,13 @@ export function IssuesPage() {
         <div>
           <h1>
             {isDriver
-              ? "Request a repair"
-              : "Repairs & shop board"}
+              ? "Report a problem"
+              : "Shop board"}
           </h1>
           <p>
             {isDriver
-              ? "Tell us what’s wrong — pick from the list. Flat tires go out as emergency."
-              : "New tech requests show under Needs scheduling. Book a date so the unit is on the shop board — all inside this app (no ntfy required)."}
+              ? "Tell us what’s wrong — pick from the list. Flat tires go out as emergency. When the shop books a day, you’ll get an alert to bring the unit in."
+              : "Needs scheduling first. Book a date and the tech is notified. Mark In progress when the van is in the bay."}
           </p>
         </div>
         <div className="toolbar no-print">
@@ -711,6 +749,32 @@ export function IssuesPage() {
           )}
         </div>
       </div>
+
+      {postComplete && canShop && (
+        <div className="shop-post-complete card no-print" role="status">
+          <div>
+            <strong>Unit {postComplete.unitNumber} job finished</strong>
+            <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.88rem" }}>
+              Review all parts receipts and costs for this vehicle.
+            </p>
+          </div>
+          <div className="toolbar">
+            <Link
+              className="btn btn-sm"
+              to={`/parts-receipts?vehicle=${postComplete.vehicleId}`}
+            >
+              Unit parts history
+            </Link>
+            <button
+              type="button"
+              className="btn secondary btn-sm"
+              onClick={() => setPostComplete(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Print: one continuous list — units numerical, all issues under each unit */}
       {canShop && (
@@ -1162,13 +1226,24 @@ export function IssuesPage() {
                 {mStatus === "open" &&
                   "Keep open if the unit isn’t booked. Add a note if you’re waiting on the tech or parts."}
                 {mStatus === "scheduled" &&
-                  "Set the day the van comes in. You can fill diagnosis when work starts or when done."}
+                  (manage.assigned_driver || manage.reporter_name
+                    ? `Set the day the van comes in. Alert goes to: ${[
+                        manage.assigned_driver
+                          ? `driver “${manage.assigned_driver}”`
+                          : null,
+                        manage.reporter_name
+                          ? `reporter “${manage.reporter_name}”`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" + ")}. Truck stays on the road until you mark In progress.`
+                    : "Set the day the van comes in. No assigned driver on this unit — after save, call the tech and set the driver under Vehicles.")}
                 {mStatus === "in_progress" &&
-                  "Unit is in the shop. Log concerns and diagnostics as you go — finish details on complete."}
+                  "Unit is in the shop now — marks it out of service. Log concerns and diagnostics as you go — finish details on complete."}
                 {mStatus === "completed" &&
-                  "Record what was wrong, what you fixed, and upload parts receipts for this unit before you complete."}
+                  "Record what was wrong, what you fixed, and upload parts receipts for this unit before you complete. Tech gets a done alert."}
                 {mStatus === "cancelled" &&
-                  "This job will leave the active board. Enter why it was cancelled."}
+                  "This job will leave the active board. Enter why — the tech is notified so they don’t still bring it in."}
               </p>
 
               {/* Book / wait */}
@@ -1331,10 +1406,13 @@ export function IssuesPage() {
                           />
                         </label>
                       </div>
-                      <PartsReceiptUploadPanel
+                      <ShopJobPartsPanel
                         vehicleId={manage.vehicle_id}
                         unitNumber={manage.unit_number}
                         issueId={manage.id}
+                        issueTitle={manage.title}
+                        showReceipts
+                        onReceiptCount={setJobReceiptCount}
                       />
                     </>
                   )}
@@ -1358,6 +1436,14 @@ export function IssuesPage() {
                           rows={2}
                         />
                       </label>
+                      <ShopJobPartsPanel
+                        vehicleId={manage.vehicle_id}
+                        unitNumber={manage.unit_number}
+                        issueId={manage.id}
+                        issueTitle={manage.title}
+                        showReceipts
+                        onReceiptCount={setJobReceiptCount}
+                      />
                     </>
                   )}
                   {mStatus === "completed" && isOilChangeWork && (
@@ -1414,16 +1500,18 @@ export function IssuesPage() {
                   {mStatus === "completed" && "Complete job"}
                   {mStatus === "cancelled" && "Cancel job"}
                 </button>
-                <Link
-                  className="btn secondary"
-                  to={`/parts-orders?vehicle=${manage.vehicle_id}&unit=${encodeURIComponent(
-                    manage.unit_number || ""
-                  )}&issue=${manage.id}&desc=${encodeURIComponent(
-                    (manage.title || manage.description || "").slice(0, 80)
-                  )}`}
-                >
-                  Order parts for unit
-                </Link>
+                {mStatus !== "completed" && mStatus !== "in_progress" && (
+                  <Link
+                    className="btn secondary"
+                    to={`/parts-orders?vehicle=${manage.vehicle_id}&unit=${encodeURIComponent(
+                      manage.unit_number || ""
+                    )}&issue=${manage.id}&desc=${encodeURIComponent(
+                      (manage.title || manage.description || "").slice(0, 80)
+                    )}`}
+                  >
+                    Order parts for unit
+                  </Link>
+                )}
                 <button className="btn secondary" type="button" onClick={() => setManage(null)}>
                   Close
                 </button>

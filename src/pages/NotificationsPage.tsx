@@ -361,7 +361,7 @@ export function NotificationsPage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Notifications</h1>
+          <h1>Inbox</h1>
           <p>
             {unread ? `${unread} unread` : "You’re caught up"} · bold = unread · swipe left to mark
             read

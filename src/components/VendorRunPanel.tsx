@@ -22,11 +22,13 @@ interface Ticket {
   id: number;
   vendor_name: string;
   needed_for_date: string | null;
+  /** Contact person (who to ask about the part) for simple tickets */
   purchase_order: string | null;
   notes: string | null;
   qty_unknown: number;
   expected_parts: number | null;
   status: string;
+  logged_by_user_id?: number | null;
   logged_by_name?: string | null;
   source: string;
   created_at: string;
@@ -36,19 +38,17 @@ interface Ticket {
   lines: TicketLine[];
 }
 
+interface StaffOption {
+  /** user id if from users list; otherwise 0 for employee-only */
+  id: number;
+  display_name: string;
+  role?: string;
+}
+
 interface VendorGroup {
   vendor_name: string;
   waiting: number;
   tickets: Ticket[];
-}
-
-function tomorrowLocal(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 const LINE_STATUSES: { value: LineStatus; label: string }[] = [
@@ -80,8 +80,8 @@ function askNotNeededReason(label: string): string | null {
 }
 
 /**
- * Part pickup tickets: vendor + PO + how many parts → blank lines for part #s.
- * Warehouse marks each line picked / not ready / partial.
+ * Part pickup request: vendor + part description + address it’s needed for.
+ * Only the person who logged it can change that text; warehouse marks picked up.
  */
 export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
@@ -96,7 +96,6 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [filter, setFilter] = useState<"open" | "all">("open");
   const [groups, setGroups] = useState<VendorGroup[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [vendorNames, setVendorNames] = useState<string[]>([]);
   const [waiting, setWaiting] = useState(0);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
@@ -112,16 +111,16 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Create form
+  // Create form — vendor + description + address (+ contact for office/admin)
   const [vendor, setVendor] = useState("");
-  const [needed, setNeeded] = useState(tomorrowLocal);
-  const [po, setPo] = useState("");
-  const [notes, setNotes] = useState("");
-  const [partCount, setPartCount] = useState("1");
-  const [qtyUnknown, setQtyUnknown] = useState(false);
-  const [partSlots, setPartSlots] = useState<{ code: string; name: string; qty: string }[]>([
-    { code: "", name: "", qty: "1" },
-  ]);
+  const [partDescription, setPartDescription] = useState("");
+  const [jobAddress, setJobAddress] = useState("");
+  const [contactUserId, setContactUserId] = useState("");
+  const [contactName, setContactName] = useState("");
+  const [staff, setStaff] = useState<StaffOption[]>([]);
+  const [vendorNames, setVendorNames] = useState<string[]>([]);
+
+  const isOfficeEntry = user?.role === "admin" || user?.role === "office";
 
   const defaultSource = useMemo(() => {
     const r = user?.role;
@@ -151,23 +150,25 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   }, [load]);
 
   useEffect(() => {
-    if (qtyUnknown) return;
-    const n = Math.min(40, Math.max(1, Math.floor(Number(partCount) || 1)));
-    setPartSlots((prev) => {
-      if (prev.length === n) return prev;
-      if (prev.length < n) {
-        return [
-          ...prev,
-          ...Array.from({ length: n - prev.length }, () => ({
-            code: "",
-            name: "",
-            qty: "1",
-          })),
-        ];
-      }
-      return prev.slice(0, n);
-    });
-  }, [partCount, qtyUnknown]);
+    if (!isOfficeEntry) return;
+    // Employees list is available to office; users list is admin-only
+    void api<{ employees?: Array<{ id: number; name: string; active?: number }> }>(
+      "/employees"
+    )
+      .then((r) => {
+        const list = (r.employees || [])
+          .filter((e) => e.name?.trim())
+          .map((e) => ({
+            id: e.id,
+            display_name: e.name.trim(),
+          }))
+          .sort((a, b) => a.display_name.localeCompare(b.display_name));
+        setStaff(list);
+      })
+      .catch(() => {
+        /* free-text contact still works */
+      });
+  }, [isOfficeEntry]);
 
   function scrollToList() {
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -203,9 +204,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               ticketId: t.id,
               qty: Number(l.qty_requested) || 1,
               code: code || "—",
-              name: name || (code ? code : "Part # not filled in yet"),
-              po: t.purchase_order,
-              needed: t.needed_for_date,
+              name: name || (code ? code : "Part description pending"),
+              po: null,
+              needed: null,
               notes: lineNote || ticketNote,
               status: l.status,
             });
@@ -298,33 +299,37 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     setError("");
     setOk("");
     try {
-      const parts = qtyUnknown
-        ? []
-        : partSlots.map((s) => ({
-            part_code: s.code.trim() || null,
-            part_name: s.name.trim() || null,
-            qty_requested: Number(s.qty) > 0 ? Number(s.qty) : 1,
-          }));
+      const vend = vendor.trim();
+      const desc = partDescription.trim();
+      const addr = jobAddress.trim();
+      if (vend.length < 2) throw new Error("Enter the store / vendor where the part is waiting.");
+      if (desc.length < 2) throw new Error("Describe the part that needs to be picked up.");
+      if (addr.length < 3) throw new Error("Enter the address this part is needed for.");
+      let contact = contactName.trim();
+      const eid = contactUserId ? Number(contactUserId) : null;
+      if (eid && staff.length) {
+        const hit = staff.find((s) => s.id === eid);
+        if (hit) contact = hit.display_name;
+      }
+      if (isOfficeEntry && !contact) {
+        throw new Error("Select who this is for (contact) so warehouse knows who to ask.");
+      }
       await api("/inventory/part-pickups", {
         method: "POST",
         body: JSON.stringify({
-          vendor_name: vendor.trim(),
-          needed_for_date: needed || tomorrowLocal(),
-          purchase_order: po.trim() || null,
-          notes: notes.trim() || null,
-          qty_unknown: qtyUnknown,
-          part_count: qtyUnknown ? undefined : Math.max(1, Math.floor(Number(partCount) || 1)),
-          parts,
+          vendor_name: vend,
+          part_description: desc,
+          job_address: addr,
+          contact_name: contact || undefined,
           source: defaultSource,
         }),
       });
-      setOk("Added to part pickup list.");
+      setOk("Part pickup request submitted.");
       setVendor("");
-      setPo("");
-      setNotes("");
-      setPartCount("1");
-      setQtyUnknown(false);
-      setPartSlots([{ code: "", name: "", qty: "1" }]);
+      setPartDescription("");
+      setJobAddress("");
+      setContactUserId("");
+      setContactName("");
       setShowForm(false);
       await load();
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
@@ -335,19 +340,15 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
-  async function saveLineDetails(ticketId: number, lines: TicketLine[], drafts: Record<number, { code: string; name: string; qty: string }>) {
+  async function saveOwnerDetails(
+    ticketId: number,
+    payload: { lineId: number; part_name: string; job_address: string }
+  ) {
     await api(`/inventory/part-pickups/${ticketId}/lines`, {
       method: "PUT",
       body: JSON.stringify({
-        lines: lines.map((l) => {
-          const d = drafts[l.id];
-          return {
-            id: l.id,
-            part_code: d?.code ?? l.part_code,
-            part_name: d?.name ?? l.part_name,
-            qty_requested: d?.qty ? Number(d.qty) : l.qty_requested,
-          };
-        }),
+        job_address: payload.job_address,
+        lines: [{ id: payload.lineId, part_name: payload.part_name }],
       }),
     });
   }
@@ -474,7 +475,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       // Close the loop: if parts are coming to the shop, log a drop-off
       if (status === "picked" || status === "partial") {
         const go = window.confirm(
-          "Parts coming back to the shop?\n\nLog a Parts drop-off so warehouse knows they’re on the counter and ready to issue."
+          "Parts coming back to the shop?\n\nLog Brought to shop so warehouse knows they’re on the counter and ready to issue."
         );
         if (go) navigate("/parts-dropoff");
       }
@@ -494,10 +495,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div className="page-header vendor-run-page-head">
           <div>
-            <h2 style={{ margin: 0 }}>Part pickup</h2>
+            <h2 style={{ margin: 0 }}>Part pickup request</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
-              Log vendor parts. Counter: Picked / Not ready / Partial. Drop a line with{" "}
-              <strong>Not needed</strong>.
+              Parts ready at a store (Gemaire, Johnstone, etc.)? Tell warehouse which store, what
+              the part is, and where it needs to go. Only you can edit your request; warehouse marks
+              it picked up.
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -522,7 +524,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               All recent
             </button>
             <button type="button" className="btn ghost btn-sm" onClick={() => setShowForm((v) => !v)}>
-              {showForm ? "Hide form" : "Log parts ready"}
+              {showForm ? "Hide form" : "New pickup request"}
             </button>
           </div>
         </div>
@@ -678,34 +680,16 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                   .join(" · ")}
                               </span>
                             )}
-                            {l.lineId != null && (
+                            {l.lineId != null && canResolve && (
                               <span className="vendor-run-sheet-actions">
-                                {canResolve && (
-                                  <button
-                                    type="button"
-                                    className="btn btn-sm"
-                                    disabled={resolvingId === l.lineId || busy}
-                                    onClick={() => void resolveLine(l.lineId!, "picked")}
-                                  >
-                                    {resolvingId === l.lineId ? "Saving…" : "Picked up"}
-                                  </button>
-                                )}
-                                {canNotNeeded && (
-                                  <button
-                                    type="button"
-                                    className="btn secondary btn-sm pp-not-needed-btn vendor-run-sheet-drop"
-                                    disabled={resolvingId === l.lineId || busy}
-                                    onClick={() => {
-                                      const reason = askNotNeededReason(
-                                        `${l.qty}× ${l.name || "Part"}`
-                                      );
-                                      if (!reason) return;
-                                      void resolveLine(l.lineId!, "cancelled", null, reason);
-                                    }}
-                                  >
-                                    Not needed
-                                  </button>
-                                )}
+                                <button
+                                  type="button"
+                                  className="btn btn-sm"
+                                  disabled={resolvingId === l.lineId || busy}
+                                  onClick={() => void resolveLine(l.lineId!, "picked")}
+                                >
+                                  {resolvingId === l.lineId ? "Saving…" : "Picked up"}
+                                </button>
                               </span>
                             )}
                           </span>
@@ -744,6 +728,10 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               <button type="button" className="btn" onClick={closeRunSheet}>
                 Done
               </button>
+              <p className="muted" style={{ margin: "0.5rem 0 0", fontSize: "0.8rem", width: "100%" }}>
+                To mark something Not needed, open the full request below — keeps accidental taps
+                from dropping parts.
+              </p>
             </div>
           </div>
         </div>
@@ -752,121 +740,94 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {showForm && (
         <form className="card vendor-run-form" onSubmit={submitTicket}>
           <p className="muted vendor-run-form-hint">
-            Enter vendor and how many different parts. We create one line per part for part numbers.
+            Tell warehouse where to get the part, what it is, and where it needs to go.
+            {isOfficeEntry
+              ? " As office/admin, also pick who to contact if we need more info."
+              : ""}
           </p>
-          <div className="vendor-run-form-grid">
-            <label>
-              Vendor
-              <input
-                list="vendor-run-vendors"
-                value={vendor}
-                onChange={(e) => setVendor(e.target.value)}
-                placeholder="Gemaire, Johnstone, Lennox…"
-                required
-              />
-              <datalist id="vendor-run-vendors">
-                {vendorNames.map((n) => (
-                  <option key={n} value={n} />
-                ))}
-              </datalist>
-            </label>
-            <label>
-              Date needed
-              <input type="date" value={needed} onChange={(e) => setNeeded(e.target.value)} />
-            </label>
-            <label>
-              Purchase order / address
-              <input
-                value={po}
-                onChange={(e) => setPo(e.target.value)}
-                placeholder="PO # or job address"
-              />
-            </label>
-          </div>
-
-          <label className="pp-qty-unknown">
-            <input
-              type="checkbox"
-              checked={qtyUnknown}
-              onChange={(e) => setQtyUnknown(e.target.checked)}
-            />
-            <span>Don&apos;t know how many parts yet (add lines later)</span>
-          </label>
-
-          {!qtyUnknown && (
-            <label className="pp-part-count-label">
-              How many parts on this ticket?
-              <input
-                type="number"
-                min={1}
-                max={40}
-                step={1}
-                value={partCount}
-                onChange={(e) => setPartCount(e.target.value)}
-                required
-              />
-            </label>
-          )}
-
-          {!qtyUnknown && partSlots.length > 0 && (
-            <div className="pp-part-slots">
-              <div className="pp-part-slots-head">
-                <span>Part #</span>
-                <span>Description</span>
-                <span>Qty</span>
-              </div>
-              {partSlots.map((slot, i) => (
-                <div key={i} className="pp-part-slot-row">
-                  <span className="pp-line-no">{i + 1}</span>
-                  <input
-                    placeholder="Part #"
-                    value={slot.code}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setPartSlots((rows) =>
-                        rows.map((r, j) => (j === i ? { ...r, code: v } : r))
-                      );
-                    }}
-                  />
-                  <input
-                    placeholder="Description"
-                    value={slot.name}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setPartSlots((rows) =>
-                        rows.map((r, j) => (j === i ? { ...r, name: v } : r))
-                      );
-                    }}
-                  />
-                  <input
-                    type="number"
-                    min={0.01}
-                    step="any"
-                    className="pp-slot-qty"
-                    title="Qty for this part"
-                    value={slot.qty}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setPartSlots((rows) =>
-                        rows.map((r, j) => (j === i ? { ...r, qty: v } : r))
-                      );
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-
           <label>
-            Notes
+            Store / vendor *{" "}
+            <span className="muted">(where to pick it up)</span>
             <input
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Will-call name, counter, special instructions…"
+              list="part-pickup-vendors"
+              value={vendor}
+              onChange={(e) => setVendor(e.target.value)}
+              required
+              minLength={2}
+              placeholder="Gemaire, Johnstone, Lennox, Ferguson…"
+              autoFocus
+              autoComplete="off"
+            />
+            <datalist id="part-pickup-vendors">
+              {vendorNames.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+          </label>
+          <label>
+            Part description *
+            <textarea
+              value={partDescription}
+              onChange={(e) => setPartDescription(e.target.value)}
+              required
+              rows={2}
+              minLength={2}
+              placeholder="e.g. 3-ton contactor, 50 ft 3/8 copper, TXV for unit…"
             />
           </label>
+          <label>
+            Address it&apos;s needed for *
+            <input
+              value={jobAddress}
+              onChange={(e) => setJobAddress(e.target.value)}
+              required
+              minLength={3}
+              placeholder="Job site address or clear meetup location"
+              autoComplete="street-address"
+            />
+          </label>
+          {isOfficeEntry && (
+            <>
+              <label>
+                Contact person *{" "}
+                <span className="muted">(who to call if we need more info)</span>
+                <select
+                  value={contactUserId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setContactUserId(id);
+                    if (id) {
+                      const hit = staff.find((s) => String(s.id) === id);
+                      if (hit) setContactName(hit.display_name);
+                    } else {
+                      setContactName("");
+                    }
+                  }}
+                  required={!contactName.trim()}
+                >
+                  <option value="">Select employee…</option>
+                  {staff.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.display_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Or type contact name
+                <input
+                  value={contactName}
+                  onChange={(e) => {
+                    setContactName(e.target.value);
+                    if (e.target.value.trim()) setContactUserId("");
+                  }}
+                  placeholder="If not in the list above"
+                />
+              </label>
+            </>
+          )}
           <button className="btn" type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Add to pickup list"}
+            {busy ? "Saving…" : "Submit pickup request"}
           </button>
         </form>
       )}
@@ -875,8 +836,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         {!tickets.length && (
           <div className="card muted">
             {filter === "open"
-              ? "Nothing waiting. Log parts ready when a vendor calls."
-              : "No recent tickets."}
+              ? "Nothing waiting for pickup. Use New pickup request when parts are ready at a store."
+              : "No recent pickup requests."}
           </div>
         )}
 
@@ -914,6 +875,10 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                   <TicketCard
                     key={t.id}
                     ticket={t}
+                    isOwner={
+                      user?.role === "admin" ||
+                      (t.logged_by_user_id != null && t.logged_by_user_id === user?.id)
+                    }
                     canResolve={canResolve}
                     canNotNeeded={canNotNeeded}
                     busy={busy}
@@ -923,29 +888,15 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                       setExpandedTicket((p) => ({ ...p, [t.id]: !p[t.id] }))
                     }
                     onResolve={resolveLine}
-                    onSaveDetails={async (drafts) => {
+                    onSaveOwner={async (payload) => {
                       setBusy(true);
                       setError("");
                       try {
-                        await saveLineDetails(t.id, t.lines, drafts);
-                        setOk("Part details saved.");
+                        await saveOwnerDetails(t.id, payload);
+                        setOk("Your request updated.");
                         await load();
                       } catch (err) {
                         setError(err instanceof Error ? err.message : "Save failed");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                    onAddLine={async () => {
-                      setBusy(true);
-                      try {
-                        await api(`/inventory/part-pickups/${t.id}/lines`, {
-                          method: "PUT",
-                          body: JSON.stringify({ add_lines: 1 }),
-                        });
-                        await load();
-                      } catch (err) {
-                        setError(err instanceof Error ? err.message : "Could not add line");
                       } finally {
                         setBusy(false);
                       }
@@ -962,6 +913,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
 function TicketCard({
   ticket: t,
+  isOwner,
   canResolve,
   canNotNeeded,
   busy,
@@ -969,10 +921,11 @@ function TicketCard({
   expanded,
   onToggle,
   onResolve,
-  onSaveDetails,
-  onAddLine,
+  onSaveOwner,
 }: {
   ticket: Ticket;
+  /** Creator (or admin) may edit description / address */
+  isOwner: boolean;
   canResolve: boolean;
   canNotNeeded: boolean;
   busy: boolean;
@@ -985,54 +938,53 @@ function TicketCard({
     qtyReceived?: number | null,
     notes?: string
   ) => Promise<void>;
-  onSaveDetails: (
-    drafts: Record<number, { code: string; name: string; qty: string }>
-  ) => Promise<void>;
-  onAddLine: () => Promise<void>;
+  onSaveOwner: (payload: {
+    lineId: number;
+    part_name: string;
+    job_address: string;
+  }) => Promise<void>;
 }) {
-  const [drafts, setDrafts] = useState<Record<number, { code: string; name: string; qty: string }>>(
-    () => {
-      const d: Record<number, { code: string; name: string; qty: string }> = {};
-      for (const l of t.lines) {
-        d[l.id] = {
-          code: l.part_code || "",
-          name: l.part_name || "",
-          qty: String(l.qty_requested ?? 1),
-        };
-      }
-      return d;
-    }
-  );
+  const primaryLine = t.lines[0];
+  const partText =
+    (primaryLine?.part_name || primaryLine?.part_code || "").trim() ||
+    t.lines
+      .map((l) => l.part_name || l.part_code)
+      .filter(Boolean)
+      .join("; ") ||
+    "Part";
+  const addressText = (t.notes || "").trim();
+  /** Contact for questions (office-entered); purchase_order column holds the name */
+  const contactText = (t.purchase_order || "").trim();
+
+  const [editDesc, setEditDesc] = useState(partText);
+  const [editAddr, setEditAddr] = useState(addressText);
   const [partialQty, setPartialQty] = useState<Record<number, string>>({});
 
   useEffect(() => {
-    const d: Record<number, { code: string; name: string; qty: string }> = {};
-    for (const l of t.lines) {
-      d[l.id] = {
-        code: l.part_code || "",
-        name: l.part_name || "",
-        qty: String(l.qty_requested ?? 1),
-      };
-    }
-    setDrafts(d);
-  }, [t.lines]);
+    setEditDesc(partText);
+    setEditAddr(addressText);
+  }, [partText, addressText, t.id]);
 
   const openCount = t.lines.filter((l) =>
     ["pending", "not_ready", "partial"].includes(l.status)
   ).length;
+  const canEditText =
+    isOwner &&
+    t.lines.some((l) => l.status === "pending" || l.status === "not_ready" || l.status === "partial");
 
   return (
     <div className="pp-ticket">
       <button type="button" className="pp-ticket-head" onClick={onToggle}>
         <span>
-          <strong>
-            {t.purchase_order || "No PO / address"}
-          </strong>
+          <strong>{partText}</strong>
           <span className="muted pp-ticket-meta">
-            {" "}
-            · need {t.needed_for_date || "—"}
-            {t.qty_unknown ? " · qty TBD" : ` · ${t.lines.length || t.expected_parts || "?"} parts`}
-            {t.logged_by_name ? ` · ${t.logged_by_name}` : ""}
+            {addressText ? ` · ${addressText}` : ""}
+            {contactText ? ` · contact ${contactText}` : ""}
+            {t.logged_by_name && t.logged_by_name !== contactText
+              ? ` · logged by ${t.logged_by_name}`
+              : t.logged_by_name && !contactText
+                ? ` · ${t.logged_by_name}`
+                : ""}
           </span>
         </span>
         <span className={`pp-ticket-badge st-${t.status}`}>
@@ -1043,33 +995,69 @@ function TicketCard({
 
       {expanded && (
         <div className="pp-ticket-body">
-          {t.notes ? <p className="muted pp-ticket-notes">{t.notes}</p> : null}
-
-          {!t.lines.length && (
-            <p className="muted pp-empty-lines">
-              No part lines yet.
-              {canResolve ? (
-                <button
-                  type="button"
-                  className="btn ghost btn-sm"
-                  disabled={busy}
-                  onClick={() => void onAddLine()}
-                >
-                  Add line
-                </button>
+          {canEditText && primaryLine ? (
+            <div className="pp-owner-edit" style={{ marginBottom: "0.75rem" }}>
+              <label>
+                Part description
+                <textarea
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  rows={2}
+                />
+              </label>
+              <label>
+                Address needed for
+                <input value={editAddr} onChange={(e) => setEditAddr(e.target.value)} />
+              </label>
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  void onSaveOwner({
+                    lineId: primaryLine.id,
+                    part_name: editDesc.trim(),
+                    job_address: editAddr.trim(),
+                  })
+                }
+              >
+                Save my request
+              </button>
+            </div>
+          ) : (
+            <div className="pp-readonly" style={{ marginBottom: "0.65rem" }}>
+              <p style={{ margin: 0, fontWeight: 600 }}>{partText}</p>
+              {addressText ? (
+                <p className="muted" style={{ margin: "0.25rem 0 0" }}>
+                  Needed for: {addressText}
+                </p>
               ) : null}
-            </p>
+              {contactText ? (
+                <p style={{ margin: "0.25rem 0 0", fontWeight: 600 }}>
+                  Contact: {contactText}
+                </p>
+              ) : null}
+              {t.logged_by_name && t.logged_by_name !== contactText ? (
+                <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.82rem" }}>
+                  Logged by {t.logged_by_name}
+                </p>
+              ) : null}
+              {!isOwner && (
+                <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}>
+                  Only the person who logged this can edit the description or address.
+                </p>
+              )}
+            </div>
           )}
 
           <ul className="pp-lines">
             {t.lines.map((line) => {
-              const d = drafts[line.id] || { code: "", name: "", qty: "1" };
-              const needsDetail = !line.part_code && !line.part_name;
               const locked = line.status === "picked" || line.status === "cancelled";
+              const label =
+                (line.part_name || line.part_code || "").trim() || `Line #${line.line_no}`;
               return (
                 <li key={line.id} className={`pp-line st-${line.status}`}>
                   <div className="pp-line-top">
-                    <span className="pp-line-num">#{line.line_no}</span>
                     <span className={`pp-status-pill st-${line.status}`}>
                       {statusLabel(line.status)}
                       {line.qty_received != null ? ` · ${line.qty_received}` : ""}
@@ -1078,48 +1066,6 @@ function TicketCard({
                   {line.status === "cancelled" && line.notes ? (
                     <p className="pp-cancel-reason muted">Why: {line.notes}</p>
                   ) : null}
-                  <div className="pp-line-fields">
-                    <input
-                      className="pp-code"
-                      placeholder="Part #"
-                      value={d.code}
-                      disabled={locked}
-                      onChange={(e) =>
-                        setDrafts((prev) => ({
-                          ...prev,
-                          [line.id]: { ...d, code: e.target.value },
-                        }))
-                      }
-                    />
-                    <input
-                      className="pp-name"
-                      placeholder={needsDetail ? "Description" : "Description"}
-                      value={d.name}
-                      disabled={locked}
-                      onChange={(e) =>
-                        setDrafts((prev) => ({
-                          ...prev,
-                          [line.id]: { ...d, name: e.target.value },
-                        }))
-                      }
-                    />
-                    <input
-                      className="pp-qty"
-                      type="number"
-                      min={0}
-                      step="any"
-                      title="Qty"
-                      aria-label="Qty"
-                      value={d.qty}
-                      disabled={locked}
-                      onChange={(e) =>
-                        setDrafts((prev) => ({
-                          ...prev,
-                          [line.id]: { ...d, qty: e.target.value },
-                        }))
-                      }
-                    />
-                  </div>
                   {!locked && (
                     <div className="pp-line-actions">
                       {canResolve && (
@@ -1172,10 +1118,6 @@ function TicketCard({
                           disabled={busy || resolvingId === line.id}
                           title="Drop this part — you’ll type why"
                           onClick={() => {
-                            const label =
-                              (drafts[line.id]?.name || line.part_name || "").trim() ||
-                              (drafts[line.id]?.code || line.part_code || "").trim() ||
-                              `Line #${line.line_no}`;
                             const reason = askNotNeededReason(label);
                             if (!reason) return;
                             void onResolve(line.id, "cancelled", null, reason);
@@ -1190,27 +1132,6 @@ function TicketCard({
               );
             })}
           </ul>
-
-          {canResolve && (
-            <div className="pp-ticket-actions">
-              <button
-                type="button"
-                className="btn secondary btn-sm"
-                disabled={busy}
-                onClick={() => void onSaveDetails(drafts)}
-              >
-                Save details
-              </button>
-              <button
-                type="button"
-                className="btn ghost btn-sm"
-                disabled={busy}
-                onClick={() => void onAddLine()}
-              >
-                + Line
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>

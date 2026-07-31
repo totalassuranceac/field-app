@@ -79,6 +79,22 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     ],
   },
   {
+    id: "app-feedback",
+    title: "Send app feedback",
+    summary: "Suggest improvements or report something that is hard to use.",
+    roles: ["everyone"],
+    path: "/feedback",
+    steps: [
+      "Open App feedback under Company.",
+      "Pick a type (suggestion, bug, praise, or other).",
+      "Write what would help — which screen if you can.",
+      "Send — office and admin see it in their feedback inbox.",
+    ],
+    tips: [
+      "No idea is too small. Specific examples help us fix things faster.",
+    ],
+  },
+  {
     id: "menu-nav",
     title: "Find your way around",
     summary: "Menu on the left (desktop) or the menu button (phone).",
@@ -147,21 +163,42 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     id: "tool-loan",
     title: "Tool Loan Request",
     summary:
-      "Ask for a tool loan for field work. Office approves, then tracks ordered → arrived so you can follow your part. 10% weekly paycheck deduction (min $50/week).",
+      "Ask for a company tool loan for field work. Weekly deduction is 10% of the loan (minimum $50). Example: $600 loan → $60/week until paid off.",
     roles: ["everyone"],
     path: "/tool-loans",
     steps: [
       "Open Tool Loan Request under Company.",
       "Enter tool/part name, loan amount, and how it helps company field work. Product link is optional but preferred.",
-      "Read and check the terms: 10% weekly deduction (minimum $50/week), total open loans ≤ weekly pay, company use only.",
+      "Read the terms: 10% weekly (min $50). Higher loans = higher weekly payments. Only request what you need for the job.",
       "Submit — office reviews. You get a notification when approved or declined.",
       "On My requests, watch the progress bar: Requested → Approved → Ordered → Arrived (with dates).",
       "Office/admin: Approvals → Approve/Decline. After approve, Parts to track → Mark ordered, then Mark arrived (optional note for tracking #).",
     ],
     tips: [
-      "Loans are only for tools that make Total Assurance field jobs easier — not personal use.",
+      "Loans are for company field tools only — not personal spending. The company is not a bank.",
+      "Example: $400 → $50/week (minimum); $600 → $60/week; $1,000 → $100/week.",
       "You are notified when office marks Ordered and when the part Arrives.",
-      "Office already knows your weekly pay — you do not enter it on the form.",
+    ],
+  },
+  {
+    id: "tool-loan-ledger",
+    title: "Tool loan balances (office)",
+    summary:
+      "Track what each person owes: record charges and payroll/spiff payments, download the weekly sheet for the owner.",
+    roles: ["admin", "office"],
+    path: "/tool-loan-ledger",
+    steps: [
+      "Open Tool loan balances (office/admin only).",
+      "Review the owner payroll report: amount owed and weekly deduction per employee.",
+      "Print weekly report for payroll.",
+      "Open a person to add a new charge or payment (Payroll vs Spiff).",
+      "Optional: set Weekly payroll amount for that person (office only — employees always see the standard 10% / $50 min estimate on their request form).",
+    ],
+    tips: [
+      "Balances are calculated (charges − payments). History is permanent.",
+      "Spiff payments show in blue type so they stand out from payroll deductions.",
+      "Former employees are excluded from the weekly payroll list; balances stay on file.",
+      "Activate/deactivate logins in People & settings when someone leaves or returns.",
     ],
   },
   {
@@ -254,10 +291,11 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Choose the unit and describe the problem clearly (what, where, when it started).",
       "Pick severity / urgency so the shop can prioritize.",
       "Add photos if they help (leak, dash light, damage).",
-      "Submit and watch Notifications / Home for schedule updates.",
+      "Submit. When the shop books a day, you get a notification and a Home checklist item — bring the unit in on that date.",
     ],
     tips: [
       "If it is unsafe to drive, say so in the description and contact shop/dispatch by phone too.",
+      "Also check Notifications and Home — scheduled jobs say “Bring unit to shop” with the date.",
     ],
   },
   {
@@ -276,6 +314,25 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     tips: [
       "Plate data comes from the fleet registry — keep plates updated under Vehicles.",
       "On oil change log, matching a unit can also suggest the current odometer.",
+    ],
+  },
+  {
+    id: "parts-delivery-run",
+    title: "Warehouse delivery request",
+    summary:
+      "Need materials brought to a job? Request a delivery, explain why it wasn’t on the truck, and keep a shared log.",
+    roles: ["everyone"],
+    path: "/parts-runs",
+    steps: [
+      "Open Warehouse delivery request under Warehouse.",
+      "Describe what you need.",
+      "Say why it wasn’t already on the truck.",
+      "Enter the address / job site it needs to go to — submit.",
+      "Warehouse: Open runs → On the way → Delivered when it’s out.",
+    ],
+    tips: [
+      "Be specific in the description so warehouse knows what to grab.",
+      "A clear address (or meetup spot) speeds the run.",
     ],
   },
   {
@@ -327,14 +384,14 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     roles: ["driver", "mechanic", "warehouse", "office", "admin"],
     path: "/parts-receipts",
     steps: [
-      "On the shop board, open the job and set status to Completed.",
-      "Fill work performed / parts used, then use Parts receipts for this job — Upload parts receipt.",
-      "Photo the invoice, enter vendor + invoice #, save (tied to that unit and ticket).",
-      "Add more receipts if needed, then tap Complete job.",
-      "Office can also browse Parts receipts grouped by vehicle.",
+      "On the shop board, open the job (In progress or Completed).",
+      "Parts for unit shows open orders — mark Ordered / Arriving / Received without leaving.",
+      "Upload parts receipts on the same screen (tied to that unit + ticket).",
+      "On Complete job: if no receipt yet, you’ll get a soft confirm — complete anyway if nothing was bought.",
+      "After complete, use Unit parts history to review all receipts for that vehicle.",
     ],
     tips: [
-      "Upload receipts on the completed job screen so they stay with that repair and unit.",
+      "Multi-day jobs: upload receipts while In progress, not only on the last day.",
       "Each correction you make teaches the scanner where invoice # and vendor sit on that vendor’s slip.",
     ],
   },
@@ -431,24 +488,20 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   },
   {
     id: "wh-vendor-runs",
-    title: "Part pickup — parts ready at the supply house",
+    title: "Part pickup request",
     summary:
-      "When a vendor calls (office or tech), put parts on the pickup list so warehouse can pick by vendor before EOD.",
+      "Parts ready at a store? Request a pickup — store name, what the part is, and where it needs to go.",
     roles: ["everyone"],
     path: "/part-pickup",
     steps: [
-      "Open Part pickup from the menu (or Inventory → Vendor / part-ready list).",
-      "Log vendor name, part, qty, needed-for date (usually tomorrow), and job address if known.",
-      "Anyone can log it — office after a vendor call, or a tech if the vendor called them.",
-      "Tap Stops needed (or a vendor chip) for the Pickup run sheet — big qty × part list by company so you can see if it fits the truck.",
-      "Warehouse uses full tickets to mark each line picked / not ready / partial.",
-      "If a part is cancelled or no longer needed: open that line → Not needed and type why (required). One part at a time.",
-      "Marking picked receives catalog parts into warehouse stock when linked to the catalog.",
+      "Open Part pickup request under Warehouse.",
+      "Enter the store / vendor (Gemaire, Johnstone, etc.).",
+      "Describe the part and the address it’s needed for.",
+      "Office/admin: also pick the contact person if logging for someone else.",
+      "Submit — warehouse sees open requests by store and marks them picked up.",
     ],
     tips: [
-      "Include job address whenever possible — warehouse uses it to find where a warranty part was bought.",
-      "Tech handoff from warehouse to truck is Inventory → Pickup (issue + truck scan).",
-      "If you already picked up at the vendor and left parts at the shop, use Parts drop-off instead.",
+      "If you already picked up and left parts at the shop, use Brought to shop instead.",
     ],
   },
   {
@@ -466,8 +519,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Warehouse taps Received · ready to issue when they have the parts.",
     ],
     tips: [
-      "Use Part pickup when parts are still at the supply house waiting to be collected.",
-      "Use Parts drop-off when the parts are already on the counter / in the cage at the shop.",
+      "Use Part pickup request when parts are still at a store waiting to be collected.",
+      "Use Brought to shop when the parts are already on the counter / in the cage at the shop.",
     ],
   },
   {
@@ -477,7 +530,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     roles: ["warehouse", "admin", "office"],
     path: "/assets",
     steps: [
-      "Open Bottles & gear / Company assets (Warehouse menu).",
+      "Open Company assets (Warehouse menu).",
       "Bottle totals sit at the top; Warehouse swap and Set counts are collapsible tools.",
       "Equipment groups by person first (With Adam…), then warehouse available gear.",
       "To return: open the person → tap the item or Return → set condition + date → Mark returned → warehouse.",
@@ -515,9 +568,13 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     steps: [
       "Open Repairs & shop.",
       "Filter open / scheduled work for your bay or day.",
-      "Update status as you diagnose, wait on parts, or finish.",
-      "Record what you fixed and parts used when closing.",
-      "Use notes so office and the tech know next steps.",
+      "Set Scheduled and pick the date the van should come in — the tech gets an in-app alert automatically.",
+      "If the app says no user is linked to the unit, call them and fix the assigned driver under Vehicles.",
+      "Mark In progress only when the unit is actually in the bay (that marks it out of service).",
+      "Record what you fixed and parts used when closing — tech is notified when done or cancelled.",
+    ],
+    tips: [
+      "Booking a future date does not take the truck off the road — only In progress does.",
     ],
   },
   {
@@ -569,8 +626,12 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Home (Command center for admin) shows counts that need attention.",
       "Open Live map — search a tech by name, then Map or Call (phone from their profile).",
       "Jump into Scheduled repairs for the repair calendar / list.",
+      "Open TV board on the office TV (full screen / F11) for a live glance at shop + counts.",
       "Use Inventory to browse stock; warehouse changes quantities.",
       "Warranties: search by address or log #; process claim / vendor return statuses.",
+    ],
+    tips: [
+      "TV board: sign in as office/admin on the TV browser, open /tv, leave it full screen. It refreshes itself.",
     ],
   },
   {

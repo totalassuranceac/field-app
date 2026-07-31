@@ -90,7 +90,7 @@ export function AlertsPage() {
     <div className="alerts-page">
       <div className="page-header">
         <div>
-          <h1>Mileage red flags</h1>
+          <h1>Fuel alerts</h1>
           <p>Automatic checks when odometer readings look wrong</p>
         </div>
         <div className="filters no-print">

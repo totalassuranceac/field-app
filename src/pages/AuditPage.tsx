@@ -33,7 +33,7 @@ export function AuditPage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Audit log</h1>
+          <h1>Change history</h1>
           <p>Who changed what, and when — tap a row for the full summary.</p>
         </div>
       </div>

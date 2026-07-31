@@ -287,7 +287,7 @@ export function YardPage() {
     <div className="yard-page">
       <div className="page-header yard-page-header">
         <div>
-          <h1>Yard walk</h1>
+          <h1>Yard</h1>
           <p>
             Reg · insurance · cam · GPS. Not working or missing cam/GPS is saved to the{" "}
             <Link to="/issues">shop board</Link> automatically.

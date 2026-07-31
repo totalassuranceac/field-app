@@ -101,7 +101,7 @@ export function HowToPage() {
     <div className="page howto-page">
       <div className="page-header">
         <div>
-          <h1>How-to</h1>
+          <h1>How-to guides</h1>
           <p>
             Short walkthroughs for everyday Field App work. Start with{" "}
             <strong>{roleLabel(myRole) || "your"}</strong> guides — switch roles below if you cover

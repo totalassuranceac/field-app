@@ -11,7 +11,7 @@ const ROLES: Role[] = ["admin", "warehouse", "office", "driver", "mechanic", "vi
 
 const FEATURES: Array<{ path: string; label: string; need?: string; note?: string }> = [
   { path: "/inventory", label: "Inventory / pickup / stock", need: "viewInventory" },
-  { path: "/assets", label: "Bottles & company equipment", need: "viewCompanyAssets" },
+  { path: "/assets", label: "Company assets", need: "viewCompanyAssets" },
   { path: "/warranties", label: "Warranty drop-off", note: "All signed-in roles" },
   { path: "/fuel", label: "Fuel log", need: "logFuel" },
   { path: "/inspections", label: "Weekly checks", note: "Field + shop" },

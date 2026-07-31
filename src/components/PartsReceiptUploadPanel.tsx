@@ -55,6 +55,8 @@ type Props = {
   issueId?: number | null;
   /** Called after a receipt is saved */
   onSaved?: () => void;
+  /** Report how many receipts are on file (for soft complete prompts) */
+  onCountChange?: (count: number) => void;
 };
 
 /**
@@ -65,6 +67,7 @@ export function PartsReceiptUploadPanel({
   unitNumber,
   issueId,
   onSaved,
+  onCountChange,
 }: Props) {
   const [receipts, setReceipts] = useState<LinkedPartsReceipt[]>([]);
   const [vendorName, setVendorName] = useState("");
@@ -84,22 +87,23 @@ export function PartsReceiptUploadPanel({
 
   const loadReceipts = useCallback(async () => {
     try {
-      const d = await api<{ receipts: LinkedPartsReceipt[] }>(
+      const d = await api<{ receipts: (LinkedPartsReceipt & { issue_id?: number })[] }>(
         `/parts-purchases?vehicle_id=${vehicleId}`
       );
       let list = d.receipts || [];
       if (issueId) {
-        const forIssue = list.filter(
-          (r) => (r as { issue_id?: number }).issue_id === issueId
-        );
-        // Prefer issue-linked; if none yet, still show recent vehicle receipts for context
-        if (forIssue.length) list = forIssue;
+        const forIssue = list.filter((r) => r.issue_id === issueId);
+        // Prefer issue-linked; fall back to unit history so mechanic sees context
+        list = forIssue.length ? forIssue : list;
       }
-      setReceipts(list.slice(0, 20));
+      const sliced = list.slice(0, 20);
+      setReceipts(sliced);
+      onCountChange?.(sliced.length);
     } catch {
-      /* optional */
+      setReceipts([]);
+      onCountChange?.(0);
     }
-  }, [vehicleId, issueId]);
+  }, [vehicleId, issueId, onCountChange]);
 
   useEffect(() => {
     void loadReceipts();
@@ -240,9 +244,10 @@ export function PartsReceiptUploadPanel({
   return (
     <div className="shop-receipt-panel">
       <div className="shop-receipt-panel-head">
-        <strong>Parts receipts for this job</strong>
+        <strong>Parts receipts</strong>
         <span className="muted" style={{ fontSize: "0.8rem" }}>
-          Upload before you complete — tied to unit {unitNumber || vehicleId}
+          Tied to unit {unitNumber || vehicleId}
+          {issueId ? ` · this job` : ""}
         </span>
       </div>
 

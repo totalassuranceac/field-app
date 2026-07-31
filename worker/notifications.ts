@@ -55,6 +55,180 @@ export async function usersByRoles(db: D1Database, roles: string[]): Promise<num
   return [...ids];
 }
 
+function normPersonName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\(.*?\)/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Field users who should hear about shop work on a vehicle:
+ * assigned employee, helper, assigned_driver name match, active logins only.
+ */
+export async function userIdsForVehicle(db: D1Database, vehicleId: number): Promise<number[]> {
+  const ids = new Set<number>();
+  let assignedDriver: string | null = null;
+  let assignedEmployeeId: number | null = null;
+  let helperEmployeeId: number | null = null;
+
+  try {
+    const v = await db
+      .prepare(
+        `SELECT assigned_driver, assigned_employee_id, helper_employee_id
+         FROM vehicles WHERE id = ?`
+      )
+      .bind(vehicleId)
+      .first<{
+        assigned_driver: string | null;
+        assigned_employee_id: number | null;
+        helper_employee_id: number | null;
+      }>();
+    if (!v) return [];
+    assignedDriver = v.assigned_driver;
+    assignedEmployeeId = v.assigned_employee_id;
+    helperEmployeeId = v.helper_employee_id;
+  } catch {
+    const v = await db
+      .prepare(`SELECT assigned_driver FROM vehicles WHERE id = ?`)
+      .bind(vehicleId)
+      .first<{ assigned_driver: string | null }>();
+    if (!v) return [];
+    assignedDriver = v.assigned_driver;
+  }
+
+  const empIds = [assignedEmployeeId, helperEmployeeId].filter(
+    (x): x is number => x != null && x > 0
+  );
+  if (empIds.length) {
+    const ph = empIds.map(() => "?").join(",");
+    const byEmp = await db
+      .prepare(`SELECT id FROM users WHERE active = 1 AND employee_id IN (${ph})`)
+      .bind(...empIds)
+      .all<{ id: number }>();
+    for (const r of byEmp.results || []) ids.add(r.id);
+  }
+
+  const ad = normPersonName(assignedDriver || "");
+  if (ad) {
+    const drivers = await db
+      .prepare(
+        `SELECT u.id, u.display_name, e.name as employee_name
+         FROM users u
+         LEFT JOIN employees e ON e.id = u.employee_id
+         WHERE u.active = 1 AND u.role IN ('driver','mechanic','office','admin')`
+      )
+      .all<{ id: number; display_name: string; employee_name: string | null }>();
+    for (const d of drivers.results || []) {
+      const names = [d.display_name, d.employee_name]
+        .filter(Boolean)
+        .map((n) => normPersonName(String(n)));
+      if (names.some((n) => n && (ad === n || ad.includes(n) || n.includes(ad)))) {
+        ids.add(d.id);
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+/** People who must know about a repair ticket: vehicle crew + original reporter. */
+export async function userIdsForIssue(
+  db: D1Database,
+  opts: { vehicleId: number; reportedByUserId?: number | null; excludeUserId?: number | null }
+): Promise<number[]> {
+  const ids = new Set(await userIdsForVehicle(db, opts.vehicleId));
+  if (opts.reportedByUserId && opts.reportedByUserId > 0) {
+    ids.add(opts.reportedByUserId);
+  }
+  if (opts.excludeUserId) ids.delete(opts.excludeUserId);
+  return [...ids];
+}
+
+/** Calendar date YYYY-MM-DD in America/Chicago (shop timezone). */
+export function shopTodayIso(): string {
+  try {
+    return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Morning (or first open) reminder: vans scheduled for *today* — tell the tech once per day.
+ */
+export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
+  const today = shopTodayIso();
+  let jobs: Array<{
+    id: number;
+    title: string;
+    scheduled_date: string | null;
+    schedule_notes: string | null;
+    reported_by_user_id: number | null;
+    vehicle_id: number;
+    unit_number: string;
+  }> = [];
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT i.id, i.title, i.scheduled_date, i.schedule_notes, i.reported_by_user_id,
+                i.vehicle_id, v.unit_number
+         FROM vehicle_issues i
+         JOIN vehicles v ON v.id = i.vehicle_id
+         WHERE i.status = 'scheduled'
+           AND i.scheduled_date IS NOT NULL
+           AND substr(i.scheduled_date, 1, 10) = ?`
+      )
+      .bind(today)
+      .all<{
+        id: number;
+        title: string;
+        scheduled_date: string | null;
+        schedule_notes: string | null;
+        reported_by_user_id: number | null;
+        vehicle_id: number;
+        unit_number: string;
+      }>();
+    jobs = rows.results || [];
+  } catch {
+    return 0;
+  }
+
+  let created = 0;
+  for (const job of jobs) {
+    const notifyIds = await userIdsForIssue(db, {
+      vehicleId: job.vehicle_id,
+      reportedByUserId: job.reported_by_user_id,
+    });
+    const notes = (job.schedule_notes || "").trim();
+    const title = `Today: bring unit ${job.unit_number} to the shop`;
+    const body = [job.title, notes || null, "Open Repairs in the app for details."]
+      .filter(Boolean)
+      .join(" · ");
+
+    for (const uid of notifyIds) {
+      const existing = await db
+        .prepare(
+          `SELECT id FROM notifications
+           WHERE user_id = ? AND kind = 'repair_bring_in_today' AND entity_id = ?
+             AND date(created_at) = date('now')
+           LIMIT 1`
+        )
+        .bind(uid, String(job.id))
+        .first();
+      if (existing) continue;
+      await notifyUsers(db, [uid], "repair_bring_in_today", title, body, {
+        type: "issue",
+        id: job.id,
+      });
+      created++;
+    }
+  }
+  return created;
+}
+
 /** Drivers with weekly check overdue on their assigned unit (by assigned_driver name match). */
 export async function notifyWeeklyChecksDue(db: D1Database): Promise<number> {
   const due = await db

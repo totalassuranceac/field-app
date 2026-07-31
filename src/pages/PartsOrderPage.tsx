@@ -419,7 +419,7 @@ export function PartsOrderPage() {
     <div className="page parts-order-page">
       <div className="page-header">
         <div>
-          <h1>Order parts</h1>
+          <h1>Order for shop</h1>
           <p>Log what you need, then open AutoZone or First Call to order.</p>
         </div>
         {canCreate && (

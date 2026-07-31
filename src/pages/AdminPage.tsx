@@ -947,7 +947,7 @@ export function AdminPage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>{can(user, "manageUsers") ? "Admin" : "People"}</h1>
+          <h1>People</h1>
           <p>
             {can(user, "manageUsers")
               ? "Everyone is listed as an employee. Logins use Field, Mechanic, Office, Warehouse, or Admin."

@@ -168,12 +168,13 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div className="page-header vendor-run-page-head">
           <div>
-            <h2 style={{ margin: 0 }}>Parts drop-off</h2>
+            <h2 style={{ margin: 0 }}>Brought to shop</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
               Picked up parts from a vendor while you were out? Log them here so warehouse knows
               they’re <strong>at the shop</strong> and ready to put away or issue to a truck.
               {" "}
-              Still at the vendor? Use <Link to="/part-pickup">Part pickup</Link> instead.
+              Still at the store? Use{" "}
+              <Link to="/part-pickup">Part pickup request</Link> instead.
             </p>
           </div>
           <div className="vendor-run-toolbar">

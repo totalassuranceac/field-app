@@ -89,9 +89,21 @@ const TimeOffPage = lazy(() =>
 );
 const ToolLoanPage = lazy(() =>
   import("./pages/ToolLoanPage").then((m) => ({ default: m.ToolLoanPage }))
+)
+const ToolLoanLedgerPage = lazy(() =>
+  import("./pages/ToolLoanLedgerPage").then((m) => ({ default: m.ToolLoanLedgerPage }))
 );
 const PartsOrderPage = lazy(() =>
   import("./pages/PartsOrderPage").then((m) => ({ default: m.PartsOrderPage }))
+);
+const PartsRunPage = lazy(() =>
+  import("./pages/PartsRunPage").then((m) => ({ default: m.PartsRunPage }))
+);
+const TvBoardPage = lazy(() =>
+  import("./pages/TvBoardPage").then((m) => ({ default: m.TvBoardPage }))
+);
+const FeedbackPage = lazy(() =>
+  import("./pages/FeedbackPage").then((m) => ({ default: m.FeedbackPage }))
 );
 
 function PageFallback() {
@@ -223,7 +235,7 @@ export default function App() {
                     />
                     <Route
                       path="/alerts"
-                      element={<LazyPage title="Mileage flags" Page={AlertsPage} />}
+                      element={<LazyPage title="Fuel alerts" Page={AlertsPage} />}
                     />
                     <Route
                       path="/inspections"
@@ -233,10 +245,10 @@ export default function App() {
                       path="/vehicles"
                       element={<LazyPage title="Vehicles" Page={VehiclesPage} />}
                     />
-                    <Route path="/yard" element={<LazyPage title="Yard walk" Page={YardPage} />} />
+                    <Route path="/yard" element={<LazyPage title="Yard" Page={YardPage} />} />
                     <Route
                       path="/issues"
-                      element={<LazyPage title="Repairs" Page={IssuesPage} />}
+                      element={<LazyPage title="Shop board" Page={IssuesPage} />}
                     />
                     <Route
                       path="/service"
@@ -244,21 +256,21 @@ export default function App() {
                     />
                     <Route
                       path="/notifications"
-                      element={<LazyPage title="Notifications" Page={NotificationsPage} />}
+                      element={<LazyPage title="Inbox" Page={NotificationsPage} />}
                     />
                     <Route path="/messages" element={<Navigate to="/notifications" replace />} />
                     <Route
                       path="/part-pickup"
-                      element={<LazyPage title="Part pickup" Page={VendorRunsPage} />}
+                      element={<LazyPage title="Part pickup request" Page={VendorRunsPage} />}
                     />
                     <Route path="/vendor-runs" element={<Navigate to="/part-pickup" replace />} />
                     <Route
                       path="/parts-dropoff"
-                      element={<LazyPage title="Parts drop-off" Page={PartsDropOffPage} />}
+                      element={<LazyPage title="Brought to shop" Page={PartsDropOffPage} />}
                     />
                     <Route
                       path="/truck-stock"
-                      element={<LazyPage title="Truck stock count" Page={TruckStockCountPage} />}
+                      element={<LazyPage title="Count truck stock" Page={TruckStockCountPage} />}
                     />
                     <Route
                       path="/warranties"
@@ -288,33 +300,56 @@ export default function App() {
                       path="/handbook"
                       element={<LazyPage title="Employee handbook" Page={HandbookPage} />}
                     />
-                    <Route path="/howto" element={<LazyPage title="How-to" Page={HowToPage} />} />
+                    <Route
+                      path="/howto"
+                      element={<LazyPage title="How-to guides" Page={HowToPage} />}
+                    />
+                    <Route
+                      path="/feedback"
+                      element={<LazyPage title="App feedback" Page={FeedbackPage} />}
+                    />
                     <Route
                       path="/time-off"
-                      element={<LazyPage title="Time Off Request" Page={TimeOffPage} />}
+                      element={<LazyPage title="Time off request" Page={TimeOffPage} />}
                     />
                     <Route
                       path="/tool-loans"
-                      element={<LazyPage title="Tool Loan Request" Page={ToolLoanPage} />}
+                      element={<LazyPage title="Tool loan request" Page={ToolLoanPage} />}
+                    />
+                    <Route
+                      path="/tool-loan-ledger"
+                      element={
+                        <LazyPage title="Tool loan payroll" Page={ToolLoanLedgerPage} />
+                      }
                     />
                     <Route
                       path="/parts-orders"
-                      element={<LazyPage title="Order parts" Page={PartsOrderPage} />}
+                      element={<LazyPage title="Order for shop" Page={PartsOrderPage} />}
+                    />
+                    <Route
+                      path="/parts-runs"
+                      element={
+                        <LazyPage title="Warehouse delivery request" Page={PartsRunPage} />
+                      }
                     />
                     <Route
                       path="/reviews"
                       element={<LazyPage title="Our reviews" Page={ReviewsPage} />}
                     />
                     <Route
+                      path="/tv"
+                      element={<LazyPage title="TV board" Page={TvBoardPage} />}
+                    />
+                    <Route
                       path="/roles"
-                      element={<LazyPage title="Role simulator" Page={RolesPage} />}
+                      element={<LazyPage title="Preview roles" Page={RolesPage} />}
                     />
                     <Route
                       path="/settings"
                       element={<LazyPage title="Settings" Page={SettingsPage} />}
                     />
-                    <Route path="/admin" element={<LazyPage title="Admin" Page={AdminPage} />} />
-                    <Route path="/audit" element={<LazyPage title="Audit" Page={AuditPage} />} />
+                    <Route path="/admin" element={<LazyPage title="People" Page={AdminPage} />} />
+                    <Route path="/audit" element={<LazyPage title="Change history" Page={AuditPage} />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </Layout>

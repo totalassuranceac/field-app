@@ -26,6 +26,18 @@ export function notificationLink(n: {
 
   // Explicit kinds
   if (
+    kind === "app_feedback" ||
+    kind === "app_feedback_update" ||
+    entity === "app_feedback" ||
+    text.includes("app feedback") ||
+    text.includes("your app feedback")
+  ) {
+    if (kind === "app_feedback" || text.includes("app feedback ·")) {
+      return "/feedback?tab=inbox";
+    }
+    return "/feedback?tab=mine";
+  }
+  if (
     kind === "time_off_request" ||
     kind === "time_off_decision" ||
     entity === "time_off" ||
@@ -63,6 +75,20 @@ export function notificationLink(n: {
   ) {
     return "/parts-orders";
   }
+  if (
+    kind === "parts_run_request" ||
+    kind === "parts_run_status" ||
+    entity === "parts_run" ||
+    text.includes("parts delivery") ||
+    text.includes("warehouse delivery") ||
+    text.includes("parts are on the way") ||
+    text.includes("parts delivered")
+  ) {
+    if (kind === "parts_run_request" || text.includes("needed")) {
+      return "/parts-runs?tab=open";
+    }
+    return "/parts-runs";
+  }
   if (kind === "weekly_check" || kind.includes("weekly")) return "/inspections";
   if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
     return "/warranties";
@@ -99,17 +125,26 @@ export function notificationLink(n: {
   if (
     kind === "flat_emergency" ||
     kind === "repair_request" ||
+    kind === "repair_scheduled" ||
+    kind === "repair_bring_in_today" ||
+    kind === "repair_in_progress" ||
+    kind === "repair_completed" ||
+    kind === "repair_cancelled" ||
+    kind === "repair_update" ||
     kind === "oil_change_due" ||
     kind.includes("repair") ||
     kind.includes("issue") ||
     entity === "issue" ||
     entity === "vehicle_issue"
   ) {
-    // Deep-link to that ticket so shop can schedule without hunting
+    // Deep-link to that ticket (schedule, complete, or shop board)
     if (n.entity_id != null && String(n.entity_id).trim() !== "") {
       return `/issues?id=${encodeURIComponent(String(n.entity_id))}`;
     }
-    return "/issues?tab=needs";
+    if (kind === "repair_request" || kind === "flat_emergency") {
+      return "/issues?tab=needs";
+    }
+    return "/issues";
   }
   if (
     kind === "vendor_run" ||

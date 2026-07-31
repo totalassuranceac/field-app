@@ -31,8 +31,10 @@ import {
   ensureOilChangeScheduled,
   markNotificationRead,
   notifyOpsActionItems,
+  notifyShopBringInsToday,
   notifyUsers,
   notifyWeeklyChecksDue,
+  userIdsForIssue,
   usersByRoles,
 } from "./notifications";
 import { logSms, normalizePhone, sendSms, smsConfigured } from "./sms";
@@ -95,6 +97,11 @@ import {
   applyStUsageDeductions,
 } from "./servicetitan";
 import type { Env, PublicUser, Role, UserRow, Variables } from "./types";
+import {
+  ledgerBalanceForUserId,
+  policyWeeklyDeduction,
+  registerToolLoanLedger,
+} from "./toolLoanLedger";
 
 /**
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
@@ -3606,6 +3613,10 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
     vehicle_id: number;
     status: string;
     title: string;
+    scheduled_date: string | null;
+    schedule_notes: string | null;
+    reported_by_user_id: number | null;
+    mechanic_diagnosis: string | null;
   }>();
   if (!before) return c.json({ error: "Not found" }, 404);
   const user = c.get("user");
@@ -3660,7 +3671,15 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
       .bind(...values)
       .run();
   }
-  const after = await c.env.DB.prepare("SELECT * FROM vehicle_issues WHERE id = ?").bind(id).first();
+  const after = await c.env.DB.prepare("SELECT * FROM vehicle_issues WHERE id = ?").bind(id).first<{
+    id: number;
+    vehicle_id: number;
+    status: string;
+    title: string;
+    scheduled_date: string | null;
+    schedule_notes: string | null;
+    reported_by_user_id: number | null;
+  }>();
 
   const diagnosisText = String(body.mechanic_diagnosis || before.mechanic_diagnosis || "");
   if (
@@ -3706,13 +3725,10 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
       .run();
   }
 
-  // Downtime accountability when work starts / ends
-  const nextStatus = String(body.status || before.status);
-  if (
-    (nextStatus === "in_progress" || nextStatus === "scheduled") &&
-    before.status !== "in_progress" &&
-    before.status !== "scheduled"
-  ) {
+  // Downtime / out-of-service: only when the van is actually in the shop (in progress).
+  // Booking a future schedule must NOT mark the unit down — tech still drives until then.
+  const nextStatus = String((after as { status?: string } | null)?.status || body.status || before.status);
+  if (nextStatus === "in_progress" && before.status !== "in_progress") {
     const open = await c.env.DB.prepare(
       `SELECT id FROM downtime_events WHERE vehicle_id = ? AND ended_at IS NULL LIMIT 1`
     )
@@ -3723,7 +3739,13 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
         `INSERT INTO downtime_events (vehicle_id, issue_id, reason, started_at, started_by_user_id, notes)
          VALUES (?, ?, ?, datetime('now'), ?, ?)`
       )
-        .bind(before.vehicle_id, id, before.title, user.id, body.schedule_notes || null)
+        .bind(
+          before.vehicle_id,
+          id,
+          before.title,
+          user.id,
+          body.schedule_notes || body.completion_notes || null
+        )
         .run();
       await c.env.DB.prepare(
         `UPDATE vehicles SET status = 'out_of_service', updated_at = datetime('now') WHERE id = ?`
@@ -3754,8 +3776,90 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
     }
   }
 
+  // Tell the tech / assigned driver when the shop books, changes, finishes, or cancels work
+  let fieldNotified = 0;
+  let fieldNotifyWarning: string | null = null;
+  const afterRow = after as {
+    status: string;
+    scheduled_date: string | null;
+    schedule_notes: string | null;
+    title: string;
+    reported_by_user_id: number | null;
+  } | null;
+  if (afterRow) {
+    const prevDate = (before.scheduled_date || "").slice(0, 10);
+    const nextDate = (afterRow.scheduled_date || "").slice(0, 10);
+    const becameScheduled =
+      afterRow.status === "scheduled" &&
+      (before.status !== "scheduled" || prevDate !== nextDate);
+    const becameInProgress =
+      afterRow.status === "in_progress" && before.status !== "in_progress";
+    const becameCompleted =
+      afterRow.status === "completed" && before.status !== "completed";
+    const becameCancelled =
+      afterRow.status === "cancelled" && before.status !== "cancelled";
+
+    if (becameScheduled || becameInProgress || becameCompleted || becameCancelled) {
+      const unit = await c.env.DB.prepare("SELECT unit_number FROM vehicles WHERE id = ?")
+        .bind(before.vehicle_id)
+        .first<{ unit_number: string }>();
+      const unitNo = unit?.unit_number || "?";
+      const notes = (afterRow.schedule_notes || "").trim();
+      let kind = "repair_update";
+      let title = `Repair update · Unit ${unitNo}`;
+      let detail = afterRow.title;
+
+      if (becameScheduled) {
+        kind = "repair_scheduled";
+        title = nextDate
+          ? `Bring unit ${unitNo} to shop · ${nextDate}`
+          : `Unit ${unitNo} scheduled for shop`;
+        detail = [
+          afterRow.title,
+          nextDate ? `Shop date: ${nextDate}` : null,
+          notes || null,
+          "Open the app → Repairs for details.",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      } else if (becameInProgress) {
+        kind = "repair_in_progress";
+        title = `Unit ${unitNo} is in the shop`;
+        detail = `${afterRow.title}${notes ? ` · ${notes}` : ""}`;
+      } else if (becameCompleted) {
+        kind = "repair_completed";
+        title = `Unit ${unitNo} repair complete`;
+        detail = afterRow.title;
+      } else if (becameCancelled) {
+        kind = "repair_cancelled";
+        title = `Shop job cancelled · Unit ${unitNo}`;
+        detail = [afterRow.title, notes || null].filter(Boolean).join(" · ");
+      }
+
+      const notifyIds = await userIdsForIssue(c.env.DB, {
+        vehicleId: before.vehicle_id,
+        reportedByUserId: afterRow.reported_by_user_id ?? before.reported_by_user_id,
+        excludeUserId: user.id,
+      });
+      if (notifyIds.length) {
+        await notifyUsers(c.env.DB, notifyIds, kind, title, detail, {
+          type: "issue",
+          id,
+        });
+        fieldNotified = notifyIds.length;
+      } else if (becameScheduled) {
+        fieldNotifyWarning =
+          "Scheduled, but no Field App user is linked to this unit (assigned driver / reporter). Call or text them manually, and fix vehicle assignment under Vehicles.";
+      }
+    }
+  }
+
   await writeAudit(c.env.DB, user, "update", "vehicle_issue", id, "Updated issue", before, after);
-  return c.json({ issue: after });
+  return c.json({
+    issue: after,
+    field_notified: fieldNotified,
+    field_notify_warning: fieldNotifyWarning,
+  });
 });
 
 // ——— Service records (oil changes) ———
@@ -3945,9 +4049,14 @@ api.patch("/service/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
 // ——— In-app notifications ———
 api.get("/notifications", async (c) => {
   const user = c.get("user");
-  // Light-touch: weekly checks + aging warranties / pickups / equipment
+  // Light-touch: weekly checks + shop bring-in today + aging ops items
   try {
     await notifyWeeklyChecksDue(c.env.DB);
+  } catch {
+    /* optional */
+  }
+  try {
+    await notifyShopBringInsToday(c.env.DB);
   } catch {
     /* optional */
   }
@@ -3994,6 +4103,120 @@ api.post("/notifications/read", async (c) => {
 api.post("/notifications/weekly-remind", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   const n = await notifyWeeklyChecksDue(c.env.DB);
   return c.json({ created: n });
+});
+
+api.post("/notifications/shop-bring-in-remind", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
+  const n = await notifyShopBringInsToday(c.env.DB);
+  return c.json({ created: n });
+});
+
+/** Office TV wallboard — one payload for glance view (auto-refresh client). */
+api.get("/tv-board", requireRoles(["admin", "office", "viewer", "mechanic"] as Role[]), async (c) => {
+  const today = (() => {
+    try {
+      return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+    } catch {
+      return new Date().toISOString().slice(0, 10);
+    }
+  })();
+
+  const shopToday = await c.env.DB.prepare(
+    `SELECT i.id, i.title, i.status, i.severity, i.scheduled_date, i.schedule_notes,
+            i.is_emergency, v.unit_number, v.assigned_driver, u.display_name as reporter_name
+     FROM vehicle_issues i
+     JOIN vehicles v ON v.id = i.vehicle_id
+     LEFT JOIN users u ON u.id = i.reported_by_user_id
+     WHERE i.status IN ('scheduled', 'in_progress')
+       AND (
+         i.status = 'in_progress'
+         OR (i.scheduled_date IS NOT NULL AND substr(i.scheduled_date, 1, 10) = ?)
+       )
+     ORDER BY
+       CASE WHEN i.status = 'in_progress' THEN 0 ELSE 1 END,
+       CASE WHEN IFNULL(i.is_emergency,0) = 1 THEN 0 ELSE 1 END,
+       i.scheduled_date IS NULL, i.scheduled_date, i.id
+     LIMIT 40`
+  )
+    .bind(today)
+    .all();
+
+  const needsSchedule = await c.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM vehicle_issues WHERE status = 'open'`
+  ).first<{ c: number }>();
+
+  const emergencies = await c.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM vehicle_issues
+     WHERE status IN ('open','scheduled','in_progress')
+       AND (IFNULL(is_emergency,0) = 1 OR severity = 'critical')`
+  ).first<{ c: number }>();
+
+  const oos = await c.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM vehicles WHERE status = 'out_of_service'`
+  ).first<{ c: number }>();
+
+  const weeklyDue = await c.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM vehicles v
+     WHERE v.status = 'active'
+       AND NOT EXISTS (
+         SELECT 1 FROM inspections i
+         WHERE i.vehicle_id = v.id AND i.inspection_date >= date('now', '-7 days')
+       )`
+  ).first<{ c: number }>();
+
+  let warranties = 0;
+  let pickups = 0;
+  let dropoffs = 0;
+  let vendorRuns = 0;
+  try {
+    const w = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM warranty_claims
+       WHERE status IN ('dropped_off','claim_submitted','return_to_vendor','delivered')`
+    ).first<{ c: number }>();
+    warranties = w?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+  try {
+    const p = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM part_pickup_tickets WHERE status IN ('open','partial')`
+    ).first<{ c: number }>();
+    pickups = p?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+  try {
+    const d = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM parts_dropoffs WHERE status = 'waiting'`
+    ).first<{ c: number }>();
+    dropoffs = d?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+  try {
+    const vr = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM vendor_runs WHERE status IN ('open','waiting','ready')`
+    ).first<{ c: number }>();
+    vendorRuns = vr?.c ?? 0;
+  } catch {
+    /* optional */
+  }
+
+  return c.json({
+    generated_at: new Date().toISOString(),
+    shop_date: today,
+    company: "Total Assurance A/C & Heating",
+    shop_today: shopToday.results || [],
+    counts: {
+      emergencies: emergencies?.c ?? 0,
+      needs_schedule: needsSchedule?.c ?? 0,
+      out_of_service: oos?.c ?? 0,
+      weekly_checks_due: weeklyDue?.c ?? 0,
+      open_warranties: warranties,
+      pickups_waiting: pickups,
+      parts_dropoffs: dropoffs,
+      vendor_runs: vendorRuns,
+    },
+  });
 });
 
 // ——— Company reviews board (Google highlights + team celebration) ———
@@ -9033,97 +9256,98 @@ api.get("/inventory/part-pickups", async (c) => {
 });
 
 /**
- * Create a pickup ticket.
- * Body: vendor_name, needed_for_date, purchase_order, notes,
- *       qty_unknown?, part_count? (creates empty lines), parts?: [{part_code, part_name, qty_requested}]
+ * Create a pickup ticket — part description + address.
+ * Office/admin may set contact_name (who to ask about the item) — stored in purchase_order.
  */
 api.post("/inventory/part-pickups", async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
+    part_description?: string;
+    job_address?: string;
+    /** Who to contact for questions (office/admin entry) */
+    contact_name?: string | null;
+    contact_user_id?: number | null;
     vendor_name?: string;
     needed_for_date?: string | null;
     purchase_order?: string | null;
     notes?: string | null;
-    qty_unknown?: boolean;
-    part_count?: number;
-    parts?: Array<{
-      part_id?: number | null;
-      part_code?: string | null;
-      part_name?: string | null;
-      qty_requested?: number;
-    }>;
+    parts?: Array<{ part_name?: string | null; part_code?: string | null }>;
     source?: "office" | "tech" | "warehouse" | "other";
   }>();
 
-  const vendor = (body.vendor_name || "").trim();
-  if (!vendor) return c.json({ error: "Vendor is required" }, 400);
+  const description = (
+    body.part_description ||
+    body.parts?.[0]?.part_name ||
+    body.parts?.[0]?.part_code ||
+    ""
+  ).trim();
+  const address = (body.job_address || body.notes || "").trim();
 
-  let needed = (body.needed_for_date || "").trim() || tomorrowIsoDate();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(needed)) needed = tomorrowIsoDate();
-
-  const qtyUnknown = body.qty_unknown === true;
-  const partsIn = body.parts || [];
-  let partCount = Number(body.part_count);
-  if (!qtyUnknown) {
-    if (partsIn.length > 0) partCount = partsIn.length;
-    if (!Number.isFinite(partCount) || partCount < 1) {
-      return c.json({ error: "How many parts? Enter a number or check “Don’t know yet”" }, 400);
-    }
-    if (partCount > 40) return c.json({ error: "Max 40 parts per ticket" }, 400);
-  } else {
-    partCount = partsIn.length > 0 ? partsIn.length : 0;
+  if (!description || description.length < 2) {
+    return c.json({ error: "Describe the part that needs to be picked up." }, 400);
+  }
+  if (!address || address.length < 3) {
+    return c.json({ error: "Enter the address this part is needed for." }, 400);
   }
 
+  const vendor = (body.vendor_name || "").trim();
+  if (!vendor || vendor.length < 2) {
+    return c.json(
+      { error: "Enter the store / vendor where the part is waiting (e.g. Gemaire, Johnstone)." },
+      400
+    );
+  }
+
+  const isOfficeEntry = user.role === "admin" || user.role === "office";
+  let contactName = (body.contact_name || "").trim() || null;
+  const contactUserId =
+    body.contact_user_id != null && Number(body.contact_user_id) > 0
+      ? Number(body.contact_user_id)
+      : null;
+  if (contactUserId && !contactName) {
+    const cu = await c.env.DB.prepare(
+      `SELECT display_name FROM users WHERE id = ? AND active = 1`
+    )
+      .bind(contactUserId)
+      .first<{ display_name: string }>();
+    contactName = cu?.display_name?.trim() || null;
+  }
+  // Office/admin logging for someone else — require a contact so warehouse knows who to call
+  if (isOfficeEntry && !contactName) {
+    return c.json(
+      {
+        error:
+          "Select who this is for (contact person) so warehouse knows who to ask about the part.",
+      },
+      400
+    );
+  }
+  // Field techs logging themselves — contact defaults to them
+  if (!contactName) contactName = user.display_name || null;
+
+  const needed = tomorrowIsoDate();
   const source = body.source || defaultVendorRunSource(user.role);
-  const po = (body.purchase_order || "").trim() || null;
-  const notes = (body.notes || "").trim() || null;
+  // purchase_order column repurposed as contact person label for these simple tickets
+  const contactStored = contactName;
 
   try {
     const ins = await c.env.DB.prepare(
       `INSERT INTO part_pickup_tickets (
          vendor_name, needed_for_date, purchase_order, notes, qty_unknown, expected_parts,
          status, logged_by_user_id, source, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, datetime('now'), datetime('now'))`
+       ) VALUES (?, ?, ?, ?, 0, 1, 'open', ?, ?, datetime('now'), datetime('now'))`
     )
-      .bind(vendor, needed, po, notes, qtyUnknown ? 1 : 0, partCount || null, user.id, source)
+      .bind(vendor, needed, contactStored, address, user.id, source)
       .run();
     const ticketId = Number(ins.meta.last_row_id);
 
-    const slots = qtyUnknown && !partsIn.length ? 0 : Math.max(partCount, partsIn.length);
-    for (let i = 0; i < slots; i++) {
-      const p = partsIn[i] || {};
-      let partId = p.part_id ? Number(p.part_id) : null;
-      let partCode = (p.part_code || "").trim() || null;
-      let partName = (p.part_name || "").trim() || null;
-      if (partId) {
-        try {
-          const row = await c.env.DB.prepare(`SELECT id, code, name FROM parts WHERE id = ?`)
-            .bind(partId)
-            .first<{ id: number; code: string; name: string }>();
-          if (row) {
-            partCode = row.code;
-            if (!partName) partName = row.name;
-          }
-        } catch {
-          partId = null;
-        }
-      }
-      const qtyReq = Number(p.qty_requested);
-      await c.env.DB.prepare(
-        `INSERT INTO part_pickup_ticket_lines (
-           ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
-         ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`
-      )
-        .bind(
-          ticketId,
-          i + 1,
-          partId,
-          partCode,
-          partName,
-          Number.isFinite(qtyReq) && qtyReq > 0 ? qtyReq : 1
-        )
-        .run();
-    }
+    await c.env.DB.prepare(
+      `INSERT INTO part_pickup_ticket_lines (
+         ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
+       ) VALUES (?, 1, NULL, NULL, ?, 1, 'pending')`
+    )
+      .bind(ticketId, description)
+      .run();
 
     const bg = (async () => {
       try {
@@ -9132,8 +9356,10 @@ api.post("/inventory/part-pickups", async (c) => {
           c.env.DB,
           notifyIds.filter((uid) => uid !== user.id).slice(0, 40),
           "vendor_run",
-          `Part pickup · ${vendor}`,
-          `${qtyUnknown ? "Parts TBD" : `${partCount} part(s)`}${po ? ` · ${po}` : ""} · need ${needed} — ${user.display_name}`,
+          `Part at vendor · ${contactStored || user.display_name}`,
+          `${description.slice(0, 70)} · for ${address.slice(0, 40)}${
+            contactStored ? ` · contact ${contactStored}` : ""
+          }`,
           { type: "part_pickup", id: ticketId }
         );
       } catch {
@@ -9142,7 +9368,7 @@ api.post("/inventory/part-pickups", async (c) => {
     })();
     scheduleWaitUntil(c, bg);
 
-    return c.json({ ok: true, id: ticketId });
+    return c.json({ ok: true, id: ticketId, contact_name: contactStored });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) {
@@ -9152,7 +9378,10 @@ api.post("/inventory/part-pickups", async (c) => {
   }
 });
 
-/** Update part # / name on lines (office fills details). */
+/**
+ * Update part description / address — only the person who logged the request (or admin).
+ * Warehouse still marks picked / not ready via resolve.
+ */
 api.put("/inventory/part-pickups/:id/lines", async (c) => {
   const user = c.get("user");
   const ticketId = Number(c.req.param("id"));
@@ -9164,57 +9393,57 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
       part_id?: number | null;
       qty_requested?: number;
     }>;
+    job_address?: string | null;
     add_lines?: number;
   }>();
 
   try {
-    const ticket = await c.env.DB.prepare(`SELECT id, status FROM part_pickup_tickets WHERE id = ?`)
+    const ticket = await c.env.DB.prepare(
+      `SELECT id, status, logged_by_user_id FROM part_pickup_tickets WHERE id = ?`
+    )
       .bind(ticketId)
-      .first<{ id: number; status: string }>();
+      .first<{ id: number; status: string; logged_by_user_id: number | null }>();
     if (!ticket) return c.json({ error: "Ticket not found" }, 404);
     if (ticket.status === "done" || ticket.status === "cancelled") {
       return c.json({ error: "Ticket is closed" }, 400);
     }
 
+    const isOwner = ticket.logged_by_user_id != null && ticket.logged_by_user_id === user.id;
+    const isAdmin = user.role === "admin";
+    if (!isOwner && !isAdmin) {
+      return c.json(
+        {
+          error:
+            "Only the person who logged this request can change the part description or address.",
+        },
+        403
+      );
+    }
+
     if (body.add_lines && body.add_lines > 0) {
-      const maxLine = await c.env.DB.prepare(
-        `SELECT COALESCE(MAX(line_no),0) as m FROM part_pickup_ticket_lines WHERE ticket_id = ?`
-      )
-        .bind(ticketId)
-        .first<{ m: number }>();
-      let n = Number(maxLine?.m) || 0;
-      const add = Math.min(20, Math.floor(body.add_lines));
-      for (let i = 0; i < add; i++) {
-        n++;
+      return c.json({ error: "Cannot add lines to this request." }, 400);
+    }
+
+    if (body.job_address != null) {
+      const addr = String(body.job_address).trim();
+      if (addr.length >= 3) {
         await c.env.DB.prepare(
-          `INSERT INTO part_pickup_ticket_lines (ticket_id, line_no, qty_requested, status)
-           VALUES (?, ?, 1, 'pending')`
+          `UPDATE part_pickup_tickets SET notes = ?, updated_at = datetime('now') WHERE id = ?`
         )
-          .bind(ticketId, n)
+          .bind(addr, ticketId)
           .run();
       }
     }
 
     for (const line of body.lines || []) {
       if (!line.id) continue;
+      const name = line.part_name != null ? String(line.part_name).trim() || null : null;
+      if (!name) continue;
       await c.env.DB.prepare(
-        `UPDATE part_pickup_ticket_lines SET
-           part_id = COALESCE(?, part_id),
-           part_code = COALESCE(?, part_code),
-           part_name = COALESCE(?, part_name),
-           qty_requested = COALESCE(?, qty_requested)
-         WHERE id = ? AND ticket_id = ?`
+        `UPDATE part_pickup_ticket_lines SET part_name = ?
+         WHERE id = ? AND ticket_id = ? AND status = 'pending'`
       )
-        .bind(
-          line.part_id ?? null,
-          line.part_code != null ? String(line.part_code).trim() || null : null,
-          line.part_name != null ? String(line.part_name).trim() || null : null,
-          line.qty_requested != null && Number.isFinite(Number(line.qty_requested))
-            ? Number(line.qty_requested)
-            : null,
-          line.id,
-          ticketId
-        )
+        .bind(name, line.id, ticketId)
         .run();
     }
 
@@ -11811,6 +12040,492 @@ function isOfficeRole(role: string): boolean {
   return role === "admin" || role === "office";
 }
 
+// Money ledger (charges / payments / payroll export) — office & admin
+registerToolLoanLedger(api);
+
+/**
+ * Inline ledger GETs — self-contained so the owner report always works even if
+ * the toolLoanLedger module path has issues on a given deploy.
+ */
+async function toolLoanBalanceRows(db: D1Database) {
+  const rows = await db
+    .prepare(
+      `SELECT p.id as person_id, p.user_id, p.display_name, p.weekly_deduction, p.status, p.notes,
+        COALESCE(ch.total_charged, 0) as total_charged,
+        COALESCE(py.total_paid, 0) as total_paid
+       FROM tool_loan_people p
+       LEFT JOIN (
+         SELECT person_id, SUM(amount) as total_charged
+         FROM tool_loan_charges WHERE IFNULL(voided, 0) = 0 GROUP BY person_id
+       ) ch ON ch.person_id = p.id
+       LEFT JOIN (
+         SELECT person_id, SUM(amount) as total_paid
+         FROM tool_loan_payments WHERE IFNULL(voided, 0) = 0 GROUP BY person_id
+       ) py ON py.person_id = p.id
+       ORDER BY p.display_name`
+    )
+    .all<{
+      person_id: number;
+      user_id: number | null;
+      display_name: string;
+      weekly_deduction: number | null;
+      status: string;
+      notes: string | null;
+      total_charged: number;
+      total_paid: number;
+    }>();
+  return (rows.results || []).map((r) => {
+    const charged = Number(r.total_charged) || 0;
+    const paid = Number(r.total_paid) || 0;
+    const balance = Math.round((charged - paid) * 100) / 100;
+    const autoWeekly =
+      balance > 0 ? Math.min(balance, Math.max(50, Math.round(balance * 0.1 * 100) / 100)) : 0;
+    const weekly =
+      r.weekly_deduction != null && r.weekly_deduction > 0
+        ? Math.min(r.weekly_deduction, Math.max(balance, 0))
+        : autoWeekly;
+    return {
+      person_id: r.person_id,
+      user_id: r.user_id,
+      display_name: r.display_name,
+      weekly_deduction: r.weekly_deduction,
+      status: r.status,
+      notes: r.notes,
+      total_charged: charged,
+      total_paid: paid,
+      balance,
+      suggested_weekly: weekly,
+      /** Amount to deduct this payroll week (for owner sheet) */
+      weekly_this_week: Math.round(Math.min(weekly, Math.max(balance, 0)) * 100) / 100,
+    };
+  });
+}
+
+api.get("/tool-loan-ledger/health", async (c) => {
+  const user = c.get("user");
+  try {
+    const people = await c.env.DB.prepare(`SELECT COUNT(*) as c FROM tool_loan_people`).first<{
+      c: number;
+    }>();
+    const charges = await c.env.DB.prepare(`SELECT COUNT(*) as c FROM tool_loan_charges`).first<{
+      c: number;
+    }>();
+    const payments = await c.env.DB.prepare(`SELECT COUNT(*) as c FROM tool_loan_payments`).first<{
+      c: number;
+    }>();
+    return c.json({
+      ok: true,
+      role: user.role,
+      people: people?.c ?? 0,
+      charges: charges?.c ?? 0,
+      payments: payments?.c ?? 0,
+      t: Date.now(),
+    });
+  } catch (e) {
+    return c.json({
+      ok: false,
+      role: user.role,
+      error: e instanceof Error ? e.message : String(e),
+      t: Date.now(),
+    });
+  }
+});
+
+/** Owner-ready report: same columns as the old Google Sheet summary, cleaner layout. */
+api.get("/tool-loan-ledger/owner-report", async (c) => {
+  const user = c.get("user");
+  if (!isOfficeRole(user.role)) return c.json({ error: "Office or admin only" }, 403);
+  try {
+    const includeZero = c.req.query("include_zero") === "1";
+    const weekOf = (c.req.query("week_of") || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    // Payroll sheet: only people who can be deducted this week (not former/left)
+    let rows = (await toolLoanBalanceRows(c.env.DB)).filter((r) => r.status !== "former");
+    if (!includeZero) rows = rows.filter((r) => r.balance > 0.009);
+    const totalBalance = rows.reduce((s, r) => s + r.balance, 0);
+    const totalWeekly = rows.reduce((s, r) => s + r.weekly_this_week, 0);
+    return c.json({
+      company: "Total Assurance A/C & Heating",
+      title: "Tool Loan Payroll Deduction Report",
+      week_of: weekOf,
+      generated_at: new Date().toISOString(),
+      prepared_by: user.display_name,
+      columns: ["Employee Name", "Amount Owed", "Weekly Deduction"],
+      lines: rows.map((r) => ({
+        person_id: r.person_id,
+        employee_name: r.display_name,
+        total_loan_amount: r.total_charged,
+        total_amount_paid: r.total_paid,
+        remaining_balance: r.balance,
+        weekly_deduction: r.weekly_this_week,
+        status: r.status,
+      })),
+      totals: {
+        total_loan_amount: 0,
+        total_amount_paid: 0,
+        remaining_balance: Math.round(totalBalance * 100) / 100,
+        weekly_deduction: Math.round(totalWeekly * 100) / 100,
+        employee_count: rows.length,
+      },
+      policy_note:
+        "Weekly deduction = 10% of remaining balance, minimum $50 (e.g. $600 → $60/week). Former employees excluded (balances remain on file).",
+    });
+  } catch (e) {
+    return c.json(
+      { error: e instanceof Error ? e.message : "Owner report failed" },
+      500
+    );
+  }
+});
+
+/** Alias used by the ledger UI (same data as owner-report + full people list). */
+api.get("/tool-loan-ledger/summary", async (c) => {
+  const user = c.get("user");
+  if (!isOfficeRole(user.role)) return c.json({ error: "Office or admin only" }, 403);
+  try {
+    const includeZero = c.req.query("include_zero") === "1";
+    let rows = await toolLoanBalanceRows(c.env.DB);
+    const all = rows;
+    if (!includeZero) rows = rows.filter((r) => Math.abs(r.balance) > 0.009);
+    const open = all.filter((r) => r.balance > 0.009);
+    const totalOwed = open.reduce((s, r) => s + r.balance, 0);
+    return c.json({
+      people: rows,
+      open_count: open.length,
+      total_owed: Math.round(totalOwed * 100) / 100,
+    });
+  } catch (e) {
+    return c.json(
+      { error: `Ledger summary failed: ${e instanceof Error ? e.message : String(e)}` },
+      500
+    );
+  }
+});
+
+api.get("/tool-loan-ledger/payroll-week", async (c) => {
+  const user = c.get("user");
+  if (!isOfficeRole(user.role)) return c.json({ error: "Office or admin only" }, 403);
+  try {
+    const weekOf = (c.req.query("week_of") || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const rows = (await toolLoanBalanceRows(c.env.DB)).filter(
+      (r) => r.status !== "former" && r.balance > 0.009
+    );
+    const lines = rows.map((r) => ({
+      person_id: r.person_id,
+      display_name: r.display_name,
+      status: r.status,
+      balance: r.balance,
+      total_charged: r.total_charged,
+      total_paid: r.total_paid,
+      weekly_deduction: r.weekly_this_week,
+      weekly_deduction_setting: r.weekly_deduction,
+    }));
+    const totalDeduct = lines.reduce((s, l) => s + l.weekly_deduction, 0);
+    return c.json({
+      week_of: weekOf,
+      lines,
+      total_deduction: Math.round(totalDeduct * 100) / 100,
+      count: lines.length,
+    });
+  } catch (e) {
+    return c.json(
+      { error: `Payroll sheet failed: ${e instanceof Error ? e.message : String(e)}` },
+      500
+    );
+  }
+});
+
+/**
+ * Server-rendered HTML for owner print — does not depend on React state.
+ * Open in a new tab; cookies are sent same-origin so auth works.
+ */
+api.get("/tool-loan-ledger/owner-report-print", async (c) => {
+  const user = c.get("user");
+  if (!isOfficeRole(user.role)) {
+    return c.html(
+      `<!DOCTYPE html><html><body><p>Office or admin only.</p></body></html>`,
+      403
+    );
+  }
+  try {
+    const includeZero = c.req.query("include_zero") === "1";
+    const weekOf = (c.req.query("week_of") || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    // Payroll print: current employees only (hide former — e.g. Willie, Valdez)
+    let rows = (await toolLoanBalanceRows(c.env.DB)).filter((r) => r.status !== "former");
+    if (!includeZero) rows = rows.filter((r) => r.balance > 0.009);
+
+    const money = (n: number) =>
+      n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+    const esc = (s: string) =>
+      s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    const totalBal = rows.reduce((s, r) => s + r.balance, 0);
+    const totalWeek = rows.reduce((s, r) => s + r.weekly_this_week, 0);
+
+    const weekLabel = (() => {
+      try {
+        return new Date(weekOf + "T12:00:00").toLocaleDateString("en-US", {
+          weekday: "short",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+        });
+      } catch {
+        return weekOf;
+      }
+    })();
+
+    // Preferred full wordmark for white / print backgrounds
+    const origin = new URL(c.req.url).origin;
+    const logoUrl = `${origin}/logo-print.jpg`;
+
+    const bodyRows =
+      rows.length === 0
+        ? `<tr><td colspan="3" style="text-align:center;padding:28px;color:#64748b">No open balances for current employees.</td></tr>`
+        : rows
+            .map(
+              (r, i) => `<tr class="${i % 2 === 0 ? "row-even" : "row-odd"}">
+        <td class="name">${esc(r.display_name)}</td>
+        <td class="num owed"><strong>${money(r.balance)}</strong></td>
+        <td class="num weekly"><strong>${money(r.weekly_this_week)}</strong></td>
+      </tr>`
+            )
+            .join("");
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Tool Loan Payroll — ${esc(weekOf)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      color: #0f172a;
+      margin: 0.5in 0.55in;
+      font-size: 13px;
+      line-height: 1.4;
+      background: #fff;
+    }
+    .head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1.25rem;
+      padding-bottom: 0.95rem;
+      margin-bottom: 1rem;
+      border-bottom: 3px solid #0c1f4a;
+    }
+    .brand { min-width: 0; flex: 1; }
+    .logo {
+      height: 58px;
+      width: auto;
+      max-width: min(340px, 100%);
+      object-fit: contain;
+      display: block;
+      margin-bottom: 0.45rem;
+    }
+    .brand .sub {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0c1f4a;
+      letter-spacing: -0.01em;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      font-size: 11px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .meta div { display: flex; flex-direction: column; gap: 2px; min-width: 5.5rem; }
+    .meta span {
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #64748b;
+      font-size: 9px;
+      font-weight: 700;
+    }
+    .meta strong { font-size: 12px; color: #0f172a; font-weight: 600; }
+    .summary-bar {
+      display: flex;
+      gap: 0.75rem;
+      margin: 0 0 0.9rem;
+    }
+    .summary-bar .box {
+      flex: 1;
+      border: 1px solid #d5dee8;
+      border-radius: 8px;
+      padding: 0.7rem 0.9rem;
+      background: #f8fafc;
+    }
+    .summary-bar .box.accent {
+      background: #fff5f5;
+      border-color: #f5c2c2;
+    }
+    .summary-bar .label {
+      display: block;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 0.15rem;
+    }
+    .summary-bar .value {
+      font-size: 1.3rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #0c1f4a;
+    }
+    .summary-bar .accent .value { color: #b91c1c; }
+    .note {
+      color: #64748b;
+      font-size: 11px;
+      margin: 0 0 12px;
+      line-height: 1.45;
+    }
+    /* Clear grid lines so payroll can check off each person safely */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 2px solid #0c1f4a;
+    }
+    th {
+      text-align: left;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #0c1f4a;
+      border: 1px solid #0c1f4a;
+      padding: 10px 10px;
+      background: #e8eef6;
+    }
+    th.num { text-align: right; }
+    td {
+      padding: 12px 10px;
+      border: 1px solid #94a3b8;
+      vertical-align: middle;
+    }
+    tr.row-even td { background: #ffffff; }
+    tr.row-odd td { background: #f1f5f9; }
+    td.name { font-weight: 700; font-size: 13.5px; }
+    .num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      font-size: 13.5px;
+    }
+    .owed { color: #0f172a; }
+    .weekly {
+      background: #fff1f1 !important;
+      color: #991b1b;
+    }
+    tfoot td {
+      border: 2px solid #0c1f4a;
+      font-weight: 800;
+      padding: 12px 10px;
+      background: #e8eef6 !important;
+      font-size: 13.5px;
+    }
+    .foot {
+      margin-top: 16px;
+      padding-top: 10px;
+      border-top: 1px solid #cbd5e1;
+      font-size: 10px;
+      color: #64748b;
+    }
+    .noprint { margin: 0 0 14px; }
+    .noprint button {
+      font: inherit;
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: none;
+      background: #0c1f4a;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    @media print {
+      .noprint { display: none !important; }
+      body { margin: 0.4in 0.45in; }
+      table, th, td, tr.row-odd td, tr.row-even td, .weekly, .summary-bar .box, thead th, tfoot td {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+    }
+    @page { margin: 0.4in; size: letter; }
+  </style>
+</head>
+<body>
+  <div class="noprint"><button type="button" onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="head">
+    <div class="brand">
+      <img class="logo" src="${esc(logoUrl)}" alt="Total Assurance A/C &amp; Heating"
+        onerror="this.onerror=null;this.src='${esc(origin)}/logo-light.png'" />
+      <p class="sub">Tool Loan Payroll Deduction Report</p>
+    </div>
+    <div class="meta">
+      <div><span>Week of</span><strong>${esc(weekLabel)}</strong></div>
+      <div><span>Prepared</span><strong>${esc(new Date().toLocaleString())}</strong></div>
+      <div><span>By</span><strong>${esc(user.display_name || "Office")}</strong></div>
+    </div>
+  </div>
+  <div class="summary-bar">
+    <div class="box">
+      <span class="label">Employees</span>
+      <span class="value">${rows.length}</span>
+    </div>
+    <div class="box">
+      <span class="label">Total amount owed</span>
+      <span class="value">${money(totalBal)}</span>
+    </div>
+    <div class="box accent">
+      <span class="label">Total this week&apos;s deduction</span>
+      <span class="value">${money(totalWeek)}</span>
+    </div>
+  </div>
+  <p class="note">Use each row for one person only — lines separate employees so deductions are not mixed. Amount owed is remaining balance; weekly deduction is what to take this paycheck (10% of balance, min $50).</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Employee Name</th>
+        <th class="num">Amount Owed</th>
+        <th class="num">Weekly Deduction</th>
+      </tr>
+    </thead>
+    <tbody>${bodyRows}</tbody>
+    <tfoot>
+      <tr>
+        <td>Totals (${rows.length})</td>
+        <td class="num">${money(totalBal)}</td>
+        <td class="num weekly">${money(totalWeek)}</td>
+      </tr>
+    </tfoot>
+  </table>
+  <p class="foot">Confidential — for payroll use only · Total Assurance A/C &amp; Heating · Week of ${esc(weekOf)}</p>
+  <script>
+    window.addEventListener("load", function () {
+      setTimeout(function () { window.focus(); window.print(); }, 450);
+    });
+  </script>
+</body>
+</html>`;
+    return c.html(html);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.html(
+      `<!DOCTYPE html><html><body><p>Report failed: ${msg.replace(/</g, "")}</p></body></html>`,
+      500
+    );
+  }
+});
+
 api.get("/tool-loans/pending-count", async (c) => {
   const user = c.get("user");
   await ensureToolLoanTables(c.env.DB);
@@ -11890,12 +12605,27 @@ api.get("/tool-loans", async (c) => {
       pendingForMe = p?.c ?? 0;
     }
 
+    // Employee-facing balance for accurate weekly estimate (policy formula only — never office override)
+    let ledgerBalance = 0;
+    let ledgerPersonName: string | null = null;
+    if (view !== "approvals") {
+      const bal = await ledgerBalanceForUserId(c.env.DB, user.id);
+      ledgerBalance = Math.max(0, bal.balance);
+      ledgerPersonName = bal.display_name;
+    }
+
     return c.json({
       requests: rows.results || [],
       pending_for_me: pendingForMe,
       is_approver: isApprover,
       min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
       repayment_percent: 10,
+      current_balance: ledgerBalance,
+      ledger_person_name: ledgerPersonName,
+      // Who the app thinks you are (should match ledger name for correct balance)
+      account_display_name: user.display_name,
+      // Projected weekly if they add $0 more (existing balance only)
+      current_weekly: policyWeeklyDeduction(ledgerBalance),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -11906,6 +12636,10 @@ api.get("/tool-loans", async (c) => {
         is_approver: false,
         min_weekly_payment: TOOL_LOAN_MIN_WEEKLY_PAYMENT,
         repayment_percent: 10,
+        current_balance: 0,
+        current_weekly: 0,
+        ledger_person_name: null,
+        account_display_name: null,
         error: "Run migration 046_tool_loan_requests.sql",
       });
     }
@@ -11949,7 +12683,7 @@ api.post("/tool-loans", async (c) => {
     return c.json(
       {
         error:
-          "You must accept the tool loan terms (10% weekly payroll deduction, $50 minimum payment, total loans ≤ weekly pay, company use only).",
+          "You must accept the tool loan terms (10% of loan weekly, $50 minimum — e.g. $600 → $60/week; total loans ≤ weekly pay; company field tools only).",
       },
       400
     );
@@ -12403,6 +13137,8 @@ api.get("/parts-orders", async (c) => {
   }
   await ensurePartsOrderTables(c.env.DB);
   const view = (c.req.query("view") || "open").toLowerCase();
+  const vehicleId = Number(c.req.query("vehicle_id") || 0);
+  const issueId = Number(c.req.query("issue_id") || 0);
   try {
     let sql = `SELECT r.*,
         u.display_name as requested_by_name,
@@ -12411,20 +13147,37 @@ api.get("/parts-orders", async (c) => {
        JOIN users u ON u.id = r.user_id
        LEFT JOIN vehicles v ON v.id = r.vehicle_id`;
     const binds: unknown[] = [];
+    const where: string[] = [];
 
     if (view === "mine") {
-      sql += ` WHERE r.user_id = ?`;
+      where.push(`r.user_id = ?`);
       binds.push(user.id);
     } else if (view === "open") {
-      sql += ` WHERE r.status IN ('needed', 'ordered', 'arriving')`;
-      if (user.role === "mechanic" && !canManageAllPartsOrders(user.role)) {
-        /* mechanics see all open — they order for the shop */
-      }
+      where.push(`r.status IN ('needed', 'ordered', 'arriving')`);
+    } else if (view === "vehicle") {
+      // Open + recent closed for one unit (shop job panel)
+      where.push(
+        `(r.status IN ('needed', 'ordered', 'arriving')
+          OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days'))`
+      );
     } else {
       // all — last 90 days closed + all open
-      sql += ` WHERE r.status IN ('needed', 'ordered', 'arriving')
-        OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days')`;
+      where.push(
+        `(r.status IN ('needed', 'ordered', 'arriving')
+          OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days'))`
+      );
     }
+
+    if (vehicleId > 0) {
+      where.push(`r.vehicle_id = ?`);
+      binds.push(vehicleId);
+    }
+    if (issueId > 0) {
+      where.push(`(r.issue_id = ? OR r.issue_id IS NULL)`);
+      binds.push(issueId);
+    }
+
+    if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
 
     sql += ` ORDER BY
       CASE r.status
@@ -12773,6 +13526,925 @@ api.post("/parts-orders/:id/cancel", async (c) => {
   return c.json({ ok: true });
 });
 
+// ——— Field parts delivery runs (accountability when tech needs materials brought out) ———
+
+const PARTS_RUN_REASONS = [
+  { id: "forgot_load", label: "Forgot to load from the shop" },
+  { id: "stock_out", label: "Used the last one / truck stock empty" },
+  { id: "wrong_part", label: "Wrong part was loaded" },
+  { id: "scope_changed", label: "Job needs changed mid-call" },
+  { id: "unknown_need", label: "Didn’t know it would be needed" },
+  { id: "other", label: "Other" },
+] as const;
+
+type PartsRunReason = (typeof PARTS_RUN_REASONS)[number]["id"];
+type PartsRunStatus = "requested" | "en_route" | "delivered" | "cancelled";
+
+let partsRunTablesReady = false;
+async function ensurePartsRunTables(db: D1Database): Promise<void> {
+  if (partsRunTablesReady) return;
+  for (const sql of [
+    `CREATE TABLE IF NOT EXISTS parts_run_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      vehicle_id INTEGER,
+      vehicle_label TEXT,
+      job_address TEXT,
+      part_needed TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      reason_detail TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'requested',
+      delivery_notes TEXT,
+      delivered_by_user_id INTEGER,
+      delivered_at TEXT,
+      inventory_transferred INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_run_user ON parts_run_requests(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_run_status ON parts_run_requests(status, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS parts_run_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL,
+      line_no INTEGER NOT NULL DEFAULT 1,
+      part_id INTEGER,
+      part_code TEXT,
+      part_name TEXT NOT NULL,
+      qty REAL NOT NULL DEFAULT 1,
+      transferred INTEGER NOT NULL DEFAULT 0,
+      transfer_note TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_run_lines_run ON parts_run_lines(run_id, line_no)`,
+    `ALTER TABLE parts_run_requests ADD COLUMN inventory_transferred INTEGER NOT NULL DEFAULT 0`,
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  partsRunTablesReady = true;
+}
+
+async function resolvePartByCode(
+  db: D1Database,
+  code: string
+): Promise<{ id: number; code: string; name: string } | null> {
+  const c = code.trim();
+  if (!c) return null;
+  const row = await db
+    .prepare(
+      `SELECT id, code, name FROM parts
+       WHERE active = 1 AND (upper(code) = upper(?) OR upper(code) = upper(?))
+       LIMIT 1`
+    )
+    .bind(c, c.replace(/\s+/g, ""))
+    .first<{ id: number; code: string; name: string }>();
+  if (row) return row;
+  return db
+    .prepare(
+      `SELECT id, code, name FROM parts
+       WHERE active = 1 AND upper(code) LIKE upper(?)
+       ORDER BY length(code) ASC LIMIT 1`
+    )
+    .bind(c + "%")
+    .first<{ id: number; code: string; name: string }>();
+}
+
+async function loadPartsRunLines(db: D1Database, runId: number) {
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT * FROM parts_run_lines WHERE run_id = ? ORDER BY line_no, id`
+      )
+      .bind(runId)
+      .all();
+    return rows.results || [];
+  } catch {
+    return [];
+  }
+}
+
+/** Attach lines to run rows for API responses */
+async function withPartsRunLines<T extends { id: number }>(
+  db: D1Database,
+  runs: T[]
+): Promise<(T & { lines: unknown[] })[]> {
+  const out: (T & { lines: unknown[] })[] = [];
+  for (const r of runs) {
+    out.push({ ...r, lines: await loadPartsRunLines(db, r.id) });
+  }
+  return out;
+}
+
+/**
+ * Move stock warehouse → truck (or issue from warehouse) for a delivered parts run.
+ */
+async function transferPartsRunInventory(
+  db: D1Database,
+  run: {
+    id: number;
+    user_id: number;
+    vehicle_id: number | null;
+    part_needed: string;
+  },
+  actorUserId: number,
+  techName: string
+): Promise<{ transferred: number; errors: string[] }> {
+  await ensureStockLocations(db);
+  const wh = await db
+    .prepare(
+      `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1 LIMIT 1`
+    )
+    .first<{ id: number }>();
+  if (!wh) {
+    return { transferred: 0, errors: ["No warehouse location configured"] };
+  }
+
+  let destLocId: number | null = null;
+  let destLabel = `tech ${techName}`;
+  if (run.vehicle_id) {
+    const v = await db
+      .prepare(`SELECT id, unit_number FROM vehicles WHERE id = ?`)
+      .bind(run.vehicle_id)
+      .first<{ id: number; unit_number: string }>();
+    if (v) {
+      destLocId = await ensureVehicleStockLocation(db, v.id, v.unit_number, {
+        seedTruckParts: false,
+      });
+      destLabel = `Unit ${v.unit_number}`;
+    }
+  }
+
+  const lines = (await loadPartsRunLines(db, run.id)) as Array<{
+    id: number;
+    part_id: number | null;
+    part_code: string | null;
+    part_name: string;
+    qty: number;
+    transferred: number;
+  }>;
+
+  const errors: string[] = [];
+  let transferred = 0;
+  const note = `Parts run #${run.id}: ${techName} · ${run.part_needed.slice(0, 60)} → ${destLabel}`;
+
+  for (const line of lines) {
+    if (line.transferred) {
+      transferred += 1;
+      continue;
+    }
+    let partId = line.part_id ? Number(line.part_id) : 0;
+    if (!partId && line.part_code) {
+      const hit = await resolvePartByCode(db, line.part_code);
+      if (hit) {
+        partId = hit.id;
+        await db
+          .prepare(`UPDATE parts_run_lines SET part_id = ? WHERE id = ?`)
+          .bind(partId, line.id)
+          .run();
+      }
+    }
+    if (!partId) {
+      errors.push(
+        `${line.part_code || line.part_name}: not found in inventory catalog (add part # or skip transfer)`
+      );
+      await db
+        .prepare(
+          `UPDATE parts_run_lines SET transfer_note = ? WHERE id = ?`
+        )
+        .bind("No catalog match", line.id)
+        .run();
+      continue;
+    }
+    const qty = Math.max(0.01, Number(line.qty) || 1);
+    try {
+      if (destLocId) {
+        await transferStock(db, partId, wh.id, destLocId, qty, actorUserId, note);
+      } else {
+        // No truck — issue out of warehouse (still documents custody leave)
+        await adjustStockQty(
+          db,
+          partId,
+          wh.id,
+          -qty,
+          actorUserId,
+          "issue",
+          note
+        );
+      }
+      await db
+        .prepare(
+          `UPDATE parts_run_lines SET transferred = 1, transfer_note = ?, part_id = ? WHERE id = ?`
+        )
+        .bind(destLocId ? `→ ${destLabel}` : "issued from warehouse", partId, line.id)
+        .run();
+      transferred += 1;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`${line.part_code || line.part_name}: ${msg}`);
+      await db
+        .prepare(`UPDATE parts_run_lines SET transfer_note = ? WHERE id = ?`)
+        .bind(msg.slice(0, 200), line.id)
+        .run();
+    }
+  }
+
+  if (transferred > 0) {
+    try {
+      await db
+        .prepare(
+          `UPDATE parts_run_requests SET inventory_transferred = 1, updated_at = datetime('now') WHERE id = ?`
+        )
+        .bind(run.id)
+        .run();
+    } catch {
+      /* column may be missing on very old */
+    }
+  }
+
+  return { transferred, errors };
+}
+
+function isPartsRunDispatcher(role: string): boolean {
+  return (
+    role === "admin" ||
+    role === "office" ||
+    role === "warehouse" ||
+    role === "mechanic"
+  );
+}
+
+function partsRunReasonLabel(code: string): string {
+  return PARTS_RUN_REASONS.find((r) => r.id === code)?.label || code;
+}
+
+api.get("/parts-runs/reasons", async (c) => {
+  return c.json({ reasons: PARTS_RUN_REASONS });
+});
+
+api.get("/parts-runs/pending-count", async (c) => {
+  const user = c.get("user");
+  await ensurePartsRunTables(c.env.DB);
+  try {
+    if (!isPartsRunDispatcher(user.role)) {
+      return c.json({ pending: 0 });
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM parts_run_requests WHERE status IN ('requested', 'en_route')`
+    ).first<{ c: number }>();
+    return c.json({ pending: row?.c ?? 0 });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
+/**
+ * ?view=mine | open | report
+ * report = office accountability summary + recent log
+ */
+api.get("/parts-runs", async (c) => {
+  const user = c.get("user");
+  await ensurePartsRunTables(c.env.DB);
+  const view = (c.req.query("view") || "mine").toLowerCase();
+
+  try {
+    if (view === "report") {
+      if (!isPartsRunDispatcher(user.role) && user.role !== "viewer") {
+        return c.json({ error: "Not allowed" }, 403);
+      }
+      const days = Math.min(365, Math.max(7, Number(c.req.query("days") || 90)));
+      const summary = await c.env.DB.prepare(
+        `SELECT r.user_id, u.display_name as employee_name,
+            COUNT(*) as request_count,
+            SUM(CASE WHEN r.status = 'delivered' THEN 1 ELSE 0 END) as delivered_count,
+            MAX(r.created_at) as last_request_at
+         FROM parts_run_requests r
+         JOIN users u ON u.id = r.user_id
+         WHERE date(r.created_at) >= date('now', ?)
+           AND r.status != 'cancelled'
+         GROUP BY r.user_id
+         ORDER BY request_count DESC, last_request_at DESC
+         LIMIT 80`
+      )
+        .bind(`-${days} days`)
+        .all();
+
+      const recent = await c.env.DB.prepare(
+        `SELECT r.*, u.display_name as employee_name,
+            d.display_name as delivered_by_name,
+            v.unit_number as vehicle_unit
+         FROM parts_run_requests r
+         JOIN users u ON u.id = r.user_id
+         LEFT JOIN users d ON d.id = r.delivered_by_user_id
+         LEFT JOIN vehicles v ON v.id = r.vehicle_id
+         WHERE date(r.created_at) >= date('now', ?)
+         ORDER BY r.created_at DESC LIMIT 100`
+      )
+        .bind(`-${days} days`)
+        .all();
+
+      const recentWithLines = await withPartsRunLines(
+        c.env.DB,
+        (recent.results || []) as { id: number }[]
+      );
+      return c.json({
+        days,
+        summary: summary.results || [],
+        requests: recentWithLines,
+        reasons: PARTS_RUN_REASONS,
+      });
+    }
+
+    if (view === "open") {
+      if (!isPartsRunDispatcher(user.role) && user.role !== "viewer") {
+        return c.json({ error: "Not allowed" }, 403);
+      }
+      const rows = await c.env.DB.prepare(
+        `SELECT r.*, u.display_name as employee_name,
+            d.display_name as delivered_by_name,
+            v.unit_number as vehicle_unit
+         FROM parts_run_requests r
+         JOIN users u ON u.id = r.user_id
+         LEFT JOIN users d ON d.id = r.delivered_by_user_id
+         LEFT JOIN vehicles v ON v.id = r.vehicle_id
+         WHERE r.status IN ('requested', 'en_route')
+         ORDER BY
+           CASE r.status WHEN 'requested' THEN 0 ELSE 1 END,
+           r.created_at ASC
+         LIMIT 80`
+      ).all();
+      const withLines = await withPartsRunLines(
+        c.env.DB,
+        (rows.results || []) as { id: number }[]
+      );
+      return c.json({
+        requests: withLines,
+        reasons: PARTS_RUN_REASONS,
+        is_dispatcher: isPartsRunDispatcher(user.role),
+      });
+    }
+
+    // mine — personal log + counts
+    const mine = await c.env.DB.prepare(
+      `SELECT r.*, v.unit_number as vehicle_unit,
+          d.display_name as delivered_by_name
+       FROM parts_run_requests r
+       LEFT JOIN vehicles v ON v.id = r.vehicle_id
+       LEFT JOIN users d ON d.id = r.delivered_by_user_id
+       WHERE r.user_id = ?
+       ORDER BY r.created_at DESC LIMIT 60`
+    )
+      .bind(user.id)
+      .all();
+
+    const stats = await c.env.DB.prepare(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN date(created_at) >= date('now', '-30 days') AND status != 'cancelled' THEN 1 ELSE 0 END) as last_30,
+         SUM(CASE WHEN date(created_at) >= date('now', '-90 days') AND status != 'cancelled' THEN 1 ELSE 0 END) as last_90,
+         SUM(CASE WHEN status IN ('requested','en_route') THEN 1 ELSE 0 END) as open_count
+       FROM parts_run_requests WHERE user_id = ?`
+    )
+      .bind(user.id)
+      .first<{
+        total: number;
+        last_30: number;
+        last_90: number;
+        open_count: number;
+      }>();
+
+    const mineWithLines = await withPartsRunLines(
+      c.env.DB,
+      (mine.results || []) as { id: number }[]
+    );
+
+    return c.json({
+      requests: mineWithLines,
+      reasons: PARTS_RUN_REASONS,
+      stats: {
+        total: stats?.total ?? 0,
+        last_30: stats?.last_30 ?? 0,
+        last_90: stats?.last_90 ?? 0,
+        open_count: stats?.open_count ?? 0,
+      },
+      is_dispatcher: isPartsRunDispatcher(user.role),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        requests: [],
+        summary: [],
+        reasons: PARTS_RUN_REASONS,
+        stats: { total: 0, last_30: 0, last_90: 0, open_count: 0 },
+        error: "Run migration 050_parts_run_requests.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/parts-runs", async (c) => {
+  const user = c.get("user");
+  await ensurePartsRunTables(c.env.DB);
+  const body = await c.req.json<{
+    /** What they need brought out (plain description) */
+    part_needed?: string;
+    /** Why it wasn’t already on the truck (plain text) */
+    reason_detail?: string;
+    /** Free-text reason also accepted as "why" for older clients */
+    why_not_on_truck?: string;
+    job_address?: string;
+    reason_code?: string;
+    vehicle_id?: number | null;
+    vehicle_label?: string;
+  }>();
+
+  const partNeeded = (body.part_needed || "").trim();
+  const reasonDetail = (body.reason_detail || body.why_not_on_truck || "").trim();
+  const jobAddress = (body.job_address || "").trim();
+  // Keep a reason_code for older rows/reports; free-text lives in reason_detail
+  const reasonCode = "other";
+
+  if (!partNeeded || partNeeded.length < 3) {
+    return c.json({ error: "Describe what you need delivered." }, 400);
+  }
+  if (!reasonDetail || reasonDetail.length < 5) {
+    return c.json({ error: "Say why it wasn’t already on the truck." }, 400);
+  }
+  if (!jobAddress || jobAddress.length < 5) {
+    return c.json({ error: "Enter the address where the parts need to go." }, 400);
+  }
+
+  const vehicleId =
+    body.vehicle_id != null && Number(body.vehicle_id) > 0 ? Number(body.vehicle_id) : null;
+  const vehicleLabel = (body.vehicle_label || "").trim() || null;
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO parts_run_requests (
+         user_id, vehicle_id, vehicle_label, job_address, part_needed,
+         reason_code, reason_detail, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', datetime('now'), datetime('now'))`
+    )
+      .bind(user.id, vehicleId, vehicleLabel, jobAddress, partNeeded, reasonCode, reasonDetail)
+      .run();
+    const id = Number(ins.meta.last_row_id);
+
+    const notifyIds = await usersByRoles(c.env.DB, [
+      "admin",
+      "office",
+      "warehouse",
+      "mechanic",
+    ]);
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        notifyIds.filter((uid) => uid !== user.id),
+        "parts_run_request",
+        `Parts delivery needed · ${user.display_name}`,
+        `${partNeeded.slice(0, 80)} · ${jobAddress.slice(0, 60)}`,
+        { type: "parts_run", id }
+      ).catch(() => {
+        /* non-fatal */
+      })
+    );
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "parts_run_request",
+      id,
+      `${partNeeded.slice(0, 80)} · ${jobAddress.slice(0, 40)}`
+    );
+
+    const row = await c.env.DB.prepare(
+      `SELECT r.*, u.display_name as employee_name, v.unit_number as vehicle_unit
+       FROM parts_run_requests r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN vehicles v ON v.id = r.vehicle_id
+       WHERE r.id = ?`
+    )
+      .bind(id)
+      .first();
+
+    return c.json({ ok: true, request: { ...row, lines: [] } }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+api.post("/parts-runs/:id/status", async (c) => {
+  const user = c.get("user");
+  await ensurePartsRunTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    status?: PartsRunStatus;
+    delivery_notes?: string | null;
+    /** When delivering: transfer warehouse stock to truck (default true) */
+    transfer_inventory?: boolean;
+  }>();
+  const next = body.status;
+  if (
+    next !== "requested" &&
+    next !== "en_route" &&
+    next !== "delivered" &&
+    next !== "cancelled"
+  ) {
+    return c.json({ error: "Invalid status" }, 400);
+  }
+
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_run_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      vehicle_id: number | null;
+      status: string;
+      part_needed: string;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  if (next === "cancelled") {
+    if (before.user_id !== user.id && !isPartsRunDispatcher(user.role)) {
+      return c.json({ error: "Only you or warehouse/office can cancel" }, 403);
+    }
+  } else if (!isPartsRunDispatcher(user.role)) {
+    return c.json({ error: "Only warehouse, shop, or office can update delivery status" }, 403);
+  }
+
+  const notes =
+    body.delivery_notes !== undefined
+      ? (body.delivery_notes || "").trim() || null
+      : null;
+
+  let inventoryResult: { transferred: number; errors: string[] } | null = null;
+
+  if (next === "delivered") {
+    await c.env.DB.prepare(
+      `UPDATE parts_run_requests SET
+         status = 'delivered',
+         delivery_notes = COALESCE(?, delivery_notes),
+         delivered_by_user_id = ?,
+         delivered_at = datetime('now'),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(notes, user.id, id)
+      .run();
+
+    // Live inventory: warehouse → truck / issue when marked delivered
+    const doTransfer = body.transfer_inventory !== false;
+    if (doTransfer) {
+      const tech = await c.env.DB.prepare(
+        `SELECT display_name FROM users WHERE id = ?`
+      )
+        .bind(before.user_id)
+        .first<{ display_name: string }>();
+      inventoryResult = await transferPartsRunInventory(
+        c.env.DB,
+        before,
+        user.id,
+        tech?.display_name || `user ${before.user_id}`
+      );
+    }
+  } else if (next === "en_route") {
+    await c.env.DB.prepare(
+      `UPDATE parts_run_requests SET
+         status = 'en_route',
+         delivery_notes = COALESCE(?, delivery_notes),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(notes, id)
+      .run();
+  } else if (next === "cancelled") {
+    await c.env.DB.prepare(
+      `UPDATE parts_run_requests SET
+         status = 'cancelled',
+         delivery_notes = COALESCE(?, delivery_notes),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(notes, id)
+      .run();
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE parts_run_requests SET status = 'requested', updated_at = datetime('now') WHERE id = ?`
+    )
+      .bind(id)
+      .run();
+  }
+
+  if (before.user_id !== user.id && (next === "en_route" || next === "delivered")) {
+    const invNote =
+      inventoryResult && inventoryResult.transferred
+        ? ` · stock moved to truck (${inventoryResult.transferred} line${inventoryResult.transferred === 1 ? "" : "s"})`
+        : "";
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.user_id],
+        "parts_run_status",
+        next === "en_route"
+          ? `Parts are on the way · ${before.part_needed.slice(0, 50)}`
+          : `Parts delivered · ${before.part_needed.slice(0, 50)}`,
+        (notes || `Updated by ${user.display_name}`) + invNote,
+        { type: "parts_run", id }
+      ).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "parts_run_request",
+    id,
+    inventoryResult
+      ? `${next} · inv ${inventoryResult.transferred} ok${inventoryResult.errors.length ? ` · ${inventoryResult.errors.length} err` : ""}`
+      : next
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as employee_name,
+        d.display_name as delivered_by_name,
+        v.unit_number as vehicle_unit
+     FROM parts_run_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users d ON d.id = r.delivered_by_user_id
+     LEFT JOIN vehicles v ON v.id = r.vehicle_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  const lines = await loadPartsRunLines(c.env.DB, id);
+  return c.json({
+    ok: true,
+    request: { ...row, lines },
+    inventory: inventoryResult,
+  });
+});
+
+// ——— App feedback / suggestions (everyone can submit; office/admin review) ———
+
+let appFeedbackTablesReady = false;
+async function ensureAppFeedbackTables(db: D1Database): Promise<void> {
+  if (appFeedbackTablesReady) return;
+  for (const sql of [
+    `CREATE TABLE IF NOT EXISTS app_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      category TEXT NOT NULL DEFAULT 'suggestion',
+      message TEXT NOT NULL,
+      page_context TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      admin_note TEXT,
+      reviewed_by_user_id INTEGER,
+      reviewed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_app_feedback_status ON app_feedback(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_app_feedback_user ON app_feedback(user_id, created_at DESC)`,
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  appFeedbackTablesReady = true;
+}
+
+const FEEDBACK_CATEGORIES = new Set(["suggestion", "bug", "praise", "other"]);
+const FEEDBACK_STATUSES = new Set(["new", "reviewed", "done", "dismissed"]);
+
+function isFeedbackReviewer(role: string): boolean {
+  return role === "admin" || role === "office";
+}
+
+api.get("/feedback/pending-count", async (c) => {
+  const user = c.get("user");
+  await ensureAppFeedbackTables(c.env.DB);
+  if (!isFeedbackReviewer(user.role)) return c.json({ pending: 0 });
+  try {
+    const row = await c.env.DB.prepare(
+      `SELECT COUNT(*) as c FROM app_feedback WHERE status = 'new'`
+    ).first<{ c: number }>();
+    return c.json({ pending: row?.c ?? 0 });
+  } catch {
+    return c.json({ pending: 0 });
+  }
+});
+
+api.get("/feedback", async (c) => {
+  const user = c.get("user");
+  await ensureAppFeedbackTables(c.env.DB);
+  const view = (c.req.query("view") || "mine").toLowerCase();
+
+  try {
+    if (view === "inbox" || view === "all") {
+      if (!isFeedbackReviewer(user.role)) {
+        return c.json({ error: "Office or admin only" }, 403);
+      }
+      const status = (c.req.query("status") || "open").toLowerCase();
+      let sql = `SELECT f.*, u.display_name as employee_name, u.role as employee_role,
+          r.display_name as reviewed_by_name
+         FROM app_feedback f
+         JOIN users u ON u.id = f.user_id
+         LEFT JOIN users r ON r.id = f.reviewed_by_user_id`;
+      if (status === "open" || status === "new") {
+        sql += ` WHERE f.status = 'new'`;
+      } else if (status === "active") {
+        sql += ` WHERE f.status IN ('new','reviewed')`;
+      } else if (status !== "all") {
+        sql += ` WHERE f.status = ?`;
+      }
+      sql += ` ORDER BY
+        CASE f.status WHEN 'new' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
+        f.created_at DESC
+        LIMIT 150`;
+      const rows =
+        status === "all" || status === "open" || status === "new" || status === "active"
+          ? await c.env.DB.prepare(sql).all()
+          : await c.env.DB.prepare(sql).bind(status).all();
+      const pending = await c.env.DB.prepare(
+        `SELECT COUNT(*) as c FROM app_feedback WHERE status = 'new'`
+      ).first<{ c: number }>();
+      return c.json({
+        items: rows.results || [],
+        pending: pending?.c ?? 0,
+        is_reviewer: true,
+      });
+    }
+
+    // mine
+    const mine = await c.env.DB.prepare(
+      `SELECT f.*, r.display_name as reviewed_by_name
+       FROM app_feedback f
+       LEFT JOIN users r ON r.id = f.reviewed_by_user_id
+       WHERE f.user_id = ?
+       ORDER BY f.created_at DESC LIMIT 40`
+    )
+      .bind(user.id)
+      .all();
+    return c.json({
+      items: mine.results || [],
+      is_reviewer: isFeedbackReviewer(user.role),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({
+        items: [],
+        pending: 0,
+        error: "Run migration 053_app_feedback.sql",
+      });
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+api.post("/feedback", async (c) => {
+  const user = c.get("user");
+  await ensureAppFeedbackTables(c.env.DB);
+  const body = await c.req.json<{
+    message?: string;
+    category?: string;
+    page_context?: string | null;
+  }>();
+
+  const message = (body.message || "").trim();
+  if (message.length < 8) {
+    return c.json(
+      { error: "Please write a bit more so we understand your suggestion (a short sentence is fine)." },
+      400
+    );
+  }
+  if (message.length > 4000) {
+    return c.json({ error: "Keep feedback under 4000 characters." }, 400);
+  }
+
+  let category = (body.category || "suggestion").trim().toLowerCase();
+  if (!FEEDBACK_CATEGORIES.has(category)) category = "suggestion";
+  const pageContext = (body.page_context || "").trim().slice(0, 200) || null;
+
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO app_feedback (user_id, category, message, page_context, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'new', datetime('now'), datetime('now'))`
+    )
+      .bind(user.id, category, message, pageContext)
+      .run();
+    const id = Number(ins.meta.last_row_id);
+
+    const reviewers = await usersByRoles(c.env.DB, ["admin", "office"]);
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        reviewers.filter((uid) => uid !== user.id),
+        "app_feedback",
+        `App feedback · ${user.display_name}`,
+        message.slice(0, 160),
+        { type: "app_feedback", id }
+      ).catch(() => {
+        /* non-fatal */
+      })
+    );
+
+    await writeAudit(c.env.DB, user, "create", "app_feedback", id, category);
+
+    const row = await c.env.DB.prepare(`SELECT * FROM app_feedback WHERE id = ?`)
+      .bind(id)
+      .first();
+    return c.json({ ok: true, item: row }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+api.patch("/feedback/:id", async (c) => {
+  const user = c.get("user");
+  if (!isFeedbackReviewer(user.role)) {
+    return c.json({ error: "Office or admin only" }, 403);
+  }
+  await ensureAppFeedbackTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    status?: string;
+    admin_note?: string | null;
+  }>();
+
+  const before = await c.env.DB.prepare(`SELECT * FROM app_feedback WHERE id = ?`)
+    .bind(id)
+    .first<{ id: number; user_id: number; status: string }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  const nextStatus = body.status != null ? String(body.status).trim().toLowerCase() : null;
+  if (nextStatus && !FEEDBACK_STATUSES.has(nextStatus)) {
+    return c.json({ error: "Invalid status" }, 400);
+  }
+
+  const sets: string[] = ["updated_at = datetime('now')"];
+  const binds: unknown[] = [];
+  if (nextStatus) {
+    sets.push("status = ?");
+    binds.push(nextStatus);
+    if (nextStatus !== "new") {
+      sets.push("reviewed_by_user_id = ?");
+      binds.push(user.id);
+      sets.push("reviewed_at = datetime('now')");
+    }
+  }
+  if (body.admin_note !== undefined) {
+    sets.push("admin_note = ?");
+    binds.push(body.admin_note === null || body.admin_note === "" ? null : String(body.admin_note).trim());
+  }
+  binds.push(id);
+
+  await c.env.DB.prepare(`UPDATE app_feedback SET ${sets.join(", ")} WHERE id = ?`)
+    .bind(...binds)
+    .run();
+
+  // Optional: thank the employee when marked done
+  if (nextStatus === "done" && before.user_id !== user.id) {
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.user_id],
+        "app_feedback_update",
+        "Thanks for your app feedback",
+        "We reviewed your suggestion. Keep the ideas coming.",
+        { type: "app_feedback", id }
+      ).catch(() => {
+        /* non-fatal */
+      })
+    );
+  }
+
+  await writeAudit(c.env.DB, user, "update", "app_feedback", id, nextStatus || "note");
+  const row = await c.env.DB.prepare(
+    `SELECT f.*, u.display_name as employee_name, r.display_name as reviewed_by_name
+     FROM app_feedback f
+     JOIN users u ON u.id = f.user_id
+     LEFT JOIN users r ON r.id = f.reviewed_by_user_id
+     WHERE f.id = ?`
+  )
+    .bind(id)
+    .first();
+  return c.json({ ok: true, item: row });
+});
+
 app.route("/api", api);
 
 // SPA fallback via assets binding — never cache HTML so phones always get the latest shell
@@ -12816,5 +14488,27 @@ app.all("*", async (c) => {
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
     return app.fetch(request, env, ctx);
+  },
+  /** Morning shop bring-in reminders + weekly checks (America/Chicago-oriented cron). */
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          await notifyShopBringInsToday(env.DB);
+        } catch {
+          /* best-effort */
+        }
+        try {
+          await notifyWeeklyChecksDue(env.DB);
+        } catch {
+          /* best-effort */
+        }
+        try {
+          await notifyOpsActionItems(env.DB);
+        } catch {
+          /* best-effort */
+        }
+      })()
+    );
   },
 };

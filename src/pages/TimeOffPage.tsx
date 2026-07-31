@@ -209,7 +209,7 @@ export function TimeOffPage() {
     <div className="page time-off-page">
       <div className="page-header">
         <div>
-          <h1>Time Off Request</h1>
+          <h1>Time off request</h1>
           <p>
             Request days off from the app. Your manager reviews and you’ll get a notification when
             they approve or decline{isManager ? " — use Approvals for your team" : ""}.
