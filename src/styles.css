@@ -10107,97 +10107,239 @@ tr.row-low td {
 
 /* Tool loan ledger + owner payroll report */
 .weekly-payroll-entry {
-  margin-bottom: 1.25rem;
-  border: 2px solid #1d4ed8;
-  box-shadow: 0 6px 20px rgba(29, 78, 216, 0.08);
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.85rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card, #111827) 100%, transparent);
+}
+.weekly-payroll-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 0.45rem;
 }
 .weekly-payroll-entry h2 {
-  color: #0c1f4a;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text, #f1f5f9);
+}
+.weekly-payroll-hint {
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.25;
+  color: var(--muted, #94a3b8);
 }
 .weekly-payroll-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem 1.25rem;
+  gap: 0.4rem 0.55rem;
   align-items: flex-end;
-  margin: 0.75rem 0 0.5rem;
 }
-.weekly-payroll-toolbar label {
+.weekly-date-label {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  font-weight: 600;
+  gap: 0.15rem;
+  font-weight: 650;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #94a3b8);
+  margin: 0;
+}
+.weekly-date-label input[type="date"] {
   font-size: 0.88rem;
+  font-weight: 650;
+  padding: 0.28rem 0.45rem;
+  min-height: 2rem;
 }
 .weekly-payroll-toolbar-btns {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.3rem;
+  align-items: center;
+}
+.weekly-payroll-toolbar-btns .btn.small {
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
+  min-height: 2rem;
+}
+.weekly-payroll-table-wrap {
+  margin-top: 0.35rem !important;
+  border: 1px solid color-mix(in srgb, var(--border, #334155) 100%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.weekly-payroll-table {
+  font-size: 0.86rem !important;
+  margin: 0;
+}
+.weekly-payroll-table thead th {
+  padding: 0.35rem 0.5rem !important;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #94a3b8);
+  background: color-mix(in srgb, var(--surface-2, #0f172a) 88%, #000);
+  border-bottom: 1px solid var(--border, #334155) !important;
+  white-space: nowrap;
+}
+.weekly-payroll-table tbody td {
+  padding: 0.28rem 0.5rem !important;
+  vertical-align: middle !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--border, #334155) 70%, transparent) !important;
+  line-height: 1.25;
+}
+.weekly-payroll-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-2, #0f172a) 55%, transparent);
+}
+.weekly-payroll-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 12%, transparent);
 }
 .weekly-include-col {
-  width: 2.75rem;
+  width: 2.1rem;
   text-align: center !important;
   vertical-align: middle !important;
+  padding-left: 0.4rem !important;
+  padding-right: 0.2rem !important;
 }
 .weekly-include-col input[type="checkbox"] {
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
   cursor: pointer;
-  accent-color: #1d4ed8;
+  accent-color: var(--accent, #3b82f6);
 }
 .weekly-include-all {
   display: inline-flex !important;
   align-items: center;
   justify-content: center;
   margin: 0 !important;
+}
+.weekly-name-cell {
+  min-width: 8.5rem;
+}
+.weekly-name-btn {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 650;
+  color: var(--text, #f8fafc);
+  text-decoration: none;
+  cursor: pointer;
+  text-align: left;
+}
+.weekly-name-btn:hover {
+  color: var(--accent, #60a5fa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.weekly-balance {
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
+  color: var(--text, #f1f5f9);
+  white-space: nowrap;
 }
-.weekly-row-skipped {
+.weekly-suggested {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #94a3b8) !important;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+.weekly-amount-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+.weekly-amount-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  justify-content: flex-end;
+}
+.weekly-amount-prefix {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: var(--muted, #94a3b8);
+}
+.weekly-payroll-table .weekly-deduct-input {
+  width: 5.5rem;
+  max-width: 100%;
+  text-align: right;
+  font-weight: 700;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+  padding: 0.22rem 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--border, #475569) 100%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, #fff 8%, var(--card, #0b1220));
+  color: var(--text, #f8fafc);
+  line-height: 1.2;
+}
+.weekly-payroll-table .weekly-deduct-input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent, #3b82f6) 80%, transparent);
+  outline-offset: 0;
+  border-color: var(--accent, #3b82f6);
+}
+.weekly-payroll-table .weekly-deduct-input:disabled {
+  cursor: not-allowed;
   opacity: 0.55;
-  background: #f1f5f9;
 }
-.weekly-row-skipped .weekly-deduct-input {
-  border-color: #cbd5e1 !important;
-  background: #e2e8f0 !important;
+.weekly-row-skipped td {
+  opacity: 0.5;
+}
+.weekly-row-skipped .weekly-name-btn {
+  text-decoration: line-through;
+  color: var(--muted, #94a3b8);
 }
 .weekly-skip-badge {
   display: inline-block;
   margin-left: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: #64748b;
+  padding: 0.05rem 0.3rem;
+  font-size: 0.65rem;
+  font-weight: 750;
+  color: var(--muted, #94a3b8);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
+  border: 1px solid color-mix(in srgb, var(--border, #475569) 90%, transparent);
+  border-radius: 4px;
+  vertical-align: middle;
 }
-.weekly-payroll-table .weekly-deduct-input {
-  width: 7.5rem;
-  max-width: 100%;
-  text-align: right;
-  font-weight: 700;
-  font-size: 1rem;
-  padding: 0.4rem 0.5rem;
-  border: 2px solid #93c5fd;
-  border-radius: 8px;
-  background: #f8fbff;
+.weekly-totals-row td {
+  padding: 0.4rem 0.5rem !important;
+  border-top: 1px solid var(--border, #334155) !important;
+  border-bottom: none !important;
+  background: color-mix(in srgb, var(--surface-2, #0f172a) 90%, transparent);
+  font-size: 0.84rem;
 }
-.weekly-payroll-table .weekly-deduct-input:focus {
-  outline: 2px solid #2563eb;
-  outline-offset: 1px;
-  border-color: #2563eb;
+.weekly-total-amt {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
+  color: var(--text, #f8fafc);
 }
-.weekly-payroll-table .weekly-deduct-input:disabled {
-  cursor: not-allowed;
+.weekly-empty {
+  text-align: center;
+  padding: 0.75rem !important;
 }
 .weekly-payroll-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.85rem 1.25rem;
+  gap: 0.5rem;
   align-items: center;
-  margin-top: 1rem;
+  margin-top: 0.55rem;
 }
 .weekly-bulk-btn {
-  font-size: 1rem;
-  padding: 0.7rem 1.15rem;
-  font-weight: 700;
+  font-size: 0.9rem;
+  padding: 0.45rem 0.85rem;
+  font-weight: 750;
+  min-height: 2.15rem;
 }
 .person-default-weekly {
   display: flex;

@@ -663,59 +663,58 @@ export function ToolLoanLedgerPage() {
 
       {/* ——— BULK WEEKLY DEDUCTIONS ——— */}
       <section className="card weekly-payroll-entry no-print" id="record-weekly-payroll">
-        <h2 style={{ marginTop: 0, fontSize: "1.15rem" }}>
-          Bulk weekly payroll deductions
-        </h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Everyone is <strong>checked</strong> with their weekly amount filled in. Uncheck anyone
-          who should skip this week, or change their amount if they need a different takeout. One
-          button applies all checked people as trackable payroll payments.
-        </p>
-
-        <div className="weekly-payroll-toolbar">
-          <label>
-            Payroll week date
-            <input
-              type="date"
-              required
-              value={payrollWeekDate}
-              onChange={(e) => setPayrollWeekDate(e.target.value)}
-            />
-          </label>
-          <div className="weekly-payroll-toolbar-btns">
-            <button
-              type="button"
-              className="btn secondary small"
-              disabled={busy || loading || !payrollCandidates.length}
-              onClick={() => setAllIncluded(true)}
-            >
-              Check all
-            </button>
-            <button
-              type="button"
-              className="btn secondary small"
-              disabled={busy || loading || !payrollCandidates.length}
-              onClick={() => setAllIncluded(false)}
-            >
-              Uncheck all
-            </button>
-            <button
-              type="button"
-              className="btn secondary small"
-              disabled={busy || loading}
-              onClick={fillSuggestedAmounts}
-            >
-              Reset to policy amounts
-            </button>
+        <div className="weekly-payroll-head">
+          <div>
+            <h2>Bulk weekly payroll deductions</h2>
+            <p className="weekly-payroll-hint">
+              Uncheck to skip · edit amount only if different · then apply once
+            </p>
+          </div>
+          <div className="weekly-payroll-toolbar">
+            <label className="weekly-date-label">
+              Week
+              <input
+                type="date"
+                required
+                value={payrollWeekDate}
+                onChange={(e) => setPayrollWeekDate(e.target.value)}
+              />
+            </label>
+            <div className="weekly-payroll-toolbar-btns">
+              <button
+                type="button"
+                className="btn secondary small"
+                disabled={busy || loading || !payrollCandidates.length}
+                onClick={() => setAllIncluded(true)}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                className="btn secondary small"
+                disabled={busy || loading || !payrollCandidates.length}
+                onClick={() => setAllIncluded(false)}
+              >
+                None
+              </button>
+              <button
+                type="button"
+                className="btn secondary small"
+                disabled={busy || loading}
+                onClick={fillSuggestedAmounts}
+              >
+                Reset $
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="table-wrap">
+        <div className="table-wrap weekly-payroll-table-wrap">
           <table className="data-table weekly-payroll-table">
             <thead>
               <tr>
                 <th className="weekly-include-col">
-                  <label className="weekly-include-all" title="Include all in bulk deduct">
+                  <label className="weekly-include-all" title="Include all">
                     <input
                       type="checkbox"
                       checked={allChecked}
@@ -727,9 +726,9 @@ export function ToolLoanLedgerPage() {
                   </label>
                 </th>
                 <th>Employee</th>
-                <th className="num">Balance owed</th>
+                <th className="num">Balance</th>
                 <th className="num">Suggested</th>
-                <th className="num">Amount this week ($)</th>
+                <th className="num">This week</th>
               </tr>
             </thead>
             <tbody>
@@ -750,40 +749,43 @@ export function ToolLoanLedgerPage() {
                         aria-label={`Include ${p.display_name} in bulk deduct`}
                       />
                     </td>
-                    <td>
+                    <td className="weekly-name-cell">
                       <button
                         type="button"
-                        className="linkish"
+                        className="weekly-name-btn"
                         onClick={() => setSelectedId(p.person_id)}
                       >
                         {p.display_name}
                       </button>
-                      {!included && (
-                        <span className="weekly-skip-badge"> skipped</span>
-                      )}
+                      {!included && <span className="weekly-skip-badge">skip</span>}
                     </td>
-                    <td className="num">{money(p.balance)}</td>
-                    <td className="num muted">{money(suggested)}</td>
-                    <td className="num">
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        max={p.balance}
-                        className="weekly-deduct-input"
-                        value={weekDeductAmounts[p.person_id] ?? ""}
-                        onChange={(e) => setPersonWeekAmount(p.person_id, e.target.value)}
-                        placeholder="0.00"
-                        disabled={!included || busy}
-                        aria-label={`Deduction for ${p.display_name}`}
-                      />
+                    <td className="num weekly-balance">{money(p.balance)}</td>
+                    <td className="num weekly-suggested">{money(suggested)}</td>
+                    <td className="num weekly-amount-cell">
+                      <span className="weekly-amount-wrap">
+                        <span className="weekly-amount-prefix" aria-hidden>
+                          $
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          max={p.balance}
+                          className="weekly-deduct-input"
+                          value={weekDeductAmounts[p.person_id] ?? ""}
+                          onChange={(e) => setPersonWeekAmount(p.person_id, e.target.value)}
+                          placeholder="0.00"
+                          disabled={!included || busy}
+                          aria-label={`Deduction for ${p.display_name}`}
+                        />
+                      </span>
                     </td>
                   </tr>
                 );
               })}
               {!loading && !payrollCandidates.length && (
                 <tr>
-                  <td colSpan={5} className="muted" style={{ textAlign: "center", padding: "1.25rem" }}>
+                  <td colSpan={5} className="muted weekly-empty">
                     No open balances for current employees.
                   </td>
                 </tr>
@@ -791,10 +793,10 @@ export function ToolLoanLedgerPage() {
             </tbody>
             {payrollCandidates.length > 0 && (
               <tfoot>
-                <tr className="owner-totals-row">
+                <tr className="weekly-totals-row">
                   <td colSpan={2}>
                     <strong>
-                      {weekPayrollPreview.count} will be deducted
+                      {weekPayrollPreview.count} selected
                       {weekPayrollPreview.skipped > 0
                         ? ` · ${weekPayrollPreview.skipped} skipped`
                         : ""}
@@ -803,7 +805,7 @@ export function ToolLoanLedgerPage() {
                   <td />
                   <td />
                   <td className="num">
-                    <strong>{money(weekPayrollPreview.total)}</strong>
+                    <strong className="weekly-total-amt">{money(weekPayrollPreview.total)}</strong>
                   </td>
                 </tr>
               </tfoot>
@@ -819,13 +821,9 @@ export function ToolLoanLedgerPage() {
             onClick={() => void recordWeeklyPayroll()}
           >
             {busy
-              ? "Applying bulk deductions…"
-              : `Apply bulk weekly deductions (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`}
+              ? "Applying…"
+              : `Apply bulk (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`}
           </button>
-          <p className="muted" style={{ margin: 0, fontSize: "0.85rem", flex: "1 1 14rem" }}>
-            Uncheck to skip someone. Edit the amount column only when one person needs a different
-            takeout. After apply, open a person for full payment history.
-          </p>
         </div>
       </section>
 
