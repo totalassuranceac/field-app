@@ -9117,10 +9117,45 @@ function defaultVendorRunSource(role: string): "office" | "tech" | "warehouse" |
 }
 
 /**
- * Lines ready for a warehouse run *today*.
- * Future needed_for_date stays on the list for planning but is not “go pick now”.
+ * Open lines still on the Waiting list (any ready date).
+ * Future-dated items stay counted so warehouse is never shown “0” while work is open.
+ * The driver run sheet still filters to “ready today” only.
  */
 async function countPartPickupWaiting(db: D1Database): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) as c
+         FROM part_pickup_ticket_lines l
+         WHERE l.status IN ('pending','not_ready','partial')`
+      )
+      .first<{ c: number }>();
+    let n = row?.c ?? 0;
+    // Tickets with no lines yet still count as open work
+    const openEmpty = await db
+      .prepare(
+        `SELECT COUNT(*) as c FROM part_pickup_tickets t
+         WHERE t.status IN ('open','partial')
+           AND NOT EXISTS (SELECT 1 FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id)`
+      )
+      .first<{ c: number }>();
+    n += openEmpty?.c ?? 0;
+    return n;
+  } catch {
+    /* fall through to legacy */
+  }
+  try {
+    const legacy = await db
+      .prepare(`SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`)
+      .first<{ c: number }>();
+    return legacy?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Ready for a warehouse stop *today* (needed_for_date null or ≤ today). */
+async function countPartPickupReadyToday(db: D1Database): Promise<number> {
   const today = localIsoDate();
   try {
     const row = await db
@@ -9133,27 +9168,7 @@ async function countPartPickupWaiting(db: D1Database): Promise<number> {
       )
       .bind(today)
       .first<{ c: number }>();
-    let n = row?.c ?? 0;
-    // Tickets marked qty unknown with no lines yet still count if ready by date
-    const openEmpty = await db
-      .prepare(
-        `SELECT COUNT(*) as c FROM part_pickup_tickets t
-         WHERE t.status IN ('open','partial')
-           AND NOT EXISTS (SELECT 1 FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id)
-           AND (t.needed_for_date IS NULL OR t.needed_for_date <= ?)`
-      )
-      .bind(today)
-      .first<{ c: number }>();
-    n += openEmpty?.c ?? 0;
-    return n;
-  } catch {
-    /* fall through to legacy */
-  }
-  try {
-    const legacy = await db
-      .prepare(`SELECT COUNT(*) as c FROM vendor_run_lines WHERE status = 'waiting'`)
-      .first<{ c: number }>();
-    return legacy?.c ?? 0;
+    return row?.c ?? 0;
   } catch {
     return 0;
   }
@@ -9195,15 +9210,17 @@ async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): 
     .run();
 }
 
-/** Fast badge poll */
+/** Fast badge poll — waiting = all open; ready_today = go pick now */
 api.get("/inventory/vendor-runs/count", async (c) => {
   const waiting = await countPartPickupWaiting(c.env.DB);
-  return c.json({ waiting });
+  const ready_today = await countPartPickupReadyToday(c.env.DB);
+  return c.json({ waiting, ready_today });
 });
 
 api.get("/inventory/part-pickups/count", async (c) => {
   const waiting = await countPartPickupWaiting(c.env.DB);
-  return c.json({ waiting });
+  const ready_today = await countPartPickupReadyToday(c.env.DB);
+  return c.json({ waiting, ready_today });
 });
 
 /** List pickup tickets grouped by vendor (open / all). */
@@ -9211,6 +9228,7 @@ api.get("/inventory/part-pickups", async (c) => {
   const status = (c.req.query("status") || "open").trim();
   try {
     const waiting = await countPartPickupWaiting(c.env.DB);
+    const ready_today = await countPartPickupReadyToday(c.env.DB);
     let sql = `SELECT t.*,
         u.display_name as logged_by_name,
         (SELECT COUNT(*) FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id) as line_count,
@@ -9325,6 +9343,7 @@ api.get("/inventory/part-pickups", async (c) => {
       vendors,
       vendor_names: vendorNames,
       waiting,
+      ready_today,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -9334,6 +9353,7 @@ api.get("/inventory/part-pickups", async (c) => {
         vendors: [],
         vendor_names: [],
         waiting: 0,
+        ready_today: 0,
         error: "Run migration 035_part_pickup_tickets.sql",
       });
     }
@@ -9441,18 +9461,19 @@ api.post("/inventory/part-pickups", async (c) => {
 
     const bg = (async () => {
       try {
+        // Always notify warehouse/office/admin — even when ready date is in the future
         const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin"]);
-        const whenBit = isFuture ? ` · ready ${needed}` : "";
+        const whenBit = isFuture
+          ? ` · ready ${needed} (not today)`
+          : ` · ready today`;
         await notifyUsers(
           c.env.DB,
           notifyIds.filter((uid) => uid !== user.id).slice(0, 40),
           "vendor_run",
-          isFuture
-            ? `Part arrives later · ${contactStored || user.display_name}`
-            : `Part at vendor · ${contactStored || user.display_name}`,
+          `Part pickup · ${vendor.slice(0, 40)}`,
           `${description.slice(0, 70)} · for ${address.slice(0, 40)}${whenBit}${
             contactStored ? ` · contact ${contactStored}` : ""
-          }`,
+          } — ${user.display_name}`,
           { type: "part_pickup", id: ticketId }
         );
       } catch {

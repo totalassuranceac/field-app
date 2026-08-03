@@ -131,6 +131,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [groups, setGroups] = useState<VendorGroup[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [waiting, setWaiting] = useState(0);
+  const [readyToday, setReadyToday] = useState(0);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
@@ -175,6 +176,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       tickets: Ticket[];
       vendor_names?: string[];
       waiting: number;
+      ready_today?: number;
       error?: string;
     }>(
       `/inventory/part-pickups?status=${
@@ -185,6 +187,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     setTickets(d.tickets || []);
     if (d.vendor_names?.length) setVendorNames(d.vendor_names);
     setWaiting(d.waiting || 0);
+    setReadyToday(d.ready_today ?? d.waiting ?? 0);
     if (d.error) setError(d.error);
   }, [filter]);
 
@@ -683,6 +686,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               type="button"
               className={`btn btn-sm vendor-waiting-btn${filter === "open" ? " primary" : ""}`}
               onClick={() => openWaitingList()}
+              title={
+                waiting > readyToday
+                  ? `${readyToday} ready today · ${waiting - readyToday} arriving later (still on list)`
+                  : `${waiting} open pickup${waiting === 1 ? "" : "s"}`
+              }
             >
               Waiting
               <span className={`vendor-waiting-count${waiting > 0 ? " is-hot" : ""}`}>

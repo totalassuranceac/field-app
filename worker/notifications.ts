@@ -351,7 +351,7 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
     /* table optional */
   }
 
-  // Open part pickups waiting
+  // Open part pickups waiting (legacy warehouse handoff list)
   try {
     const pickups = await db
       .prepare(
@@ -377,6 +377,60 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
         `Part pickup ${p.request_number}`,
         `Status: ${p.status} — needs warehouse attention.`,
         { type: "pickup", id: p.id }
+      );
+      created += whAdmin.length;
+    }
+  } catch {
+    /* optional */
+  }
+
+  // Vendor / store part pickup tickets still open (Waiting list)
+  try {
+    const tickets = await db
+      .prepare(
+        `SELECT t.id, t.vendor_name, t.needed_for_date, t.notes, t.purchase_order,
+            (SELECT l.part_name FROM part_pickup_ticket_lines l
+             WHERE l.ticket_id = t.id AND l.status IN ('pending','not_ready','partial')
+             ORDER BY l.line_no ASC, l.id ASC LIMIT 1) as part_name
+         FROM part_pickup_tickets t
+         WHERE t.status IN ('open','partial')
+           AND EXISTS (
+             SELECT 1 FROM part_pickup_ticket_lines l
+             WHERE l.ticket_id = t.id AND l.status IN ('pending','not_ready','partial')
+           )
+         ORDER BY t.needed_for_date IS NULL, t.needed_for_date ASC, t.id ASC
+         LIMIT 40`
+      )
+      .all<{
+        id: number;
+        vendor_name: string;
+        needed_for_date: string | null;
+        notes: string | null;
+        purchase_order: string | null;
+        part_name: string | null;
+      }>();
+    for (const t of tickets.results || []) {
+      const existing = await db
+        .prepare(
+          `SELECT id FROM notifications
+           WHERE kind = 'vendor_run_waiting' AND entity_id = ? AND read_at IS NULL
+           LIMIT 1`
+        )
+        .bind(String(t.id))
+        .first();
+      if (existing) continue;
+      const part = (t.part_name || "Part").trim().slice(0, 60);
+      const when = t.needed_for_date ? ` · ready ${t.needed_for_date}` : "";
+      const addr = (t.notes || "").trim().slice(0, 40);
+      await notifyUsers(
+        db,
+        whAdmin,
+        "vendor_run_waiting",
+        `Still need pickup · ${t.vendor_name.slice(0, 36)}`,
+        `${part}${addr ? ` · ${addr}` : ""}${when}${
+          t.purchase_order ? ` · contact ${t.purchase_order}` : ""
+        }`,
+        { type: "part_pickup", id: t.id }
       );
       created += whAdmin.length;
     }

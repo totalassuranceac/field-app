@@ -148,12 +148,14 @@ export function notificationLink(n: {
   }
   if (
     kind === "vendor_run" ||
+    kind === "vendor_run_waiting" ||
     entity === "vendor_run" ||
     entity === "part_pickup" ||
     text.includes("parts ready") ||
     text.includes("vendor run") ||
     text.includes("part pickup") ||
-    text.includes("part at vendor")
+    text.includes("part at vendor") ||
+    text.includes("still need pickup")
   ) {
     // Deep-link to the exact ticket (open, or Picked/done if already closed)
     if (n.entity_id != null && String(n.entity_id).trim() !== "") {
