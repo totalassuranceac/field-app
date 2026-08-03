@@ -316,7 +316,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  /** Flat vendor → open lines ready *today* for the driver run sheet */
+  /**
+   * All open vendor stops for the "Stops needed" / parts list.
+   * Includes future-ready items (e.g. Carrier arrives later) so warehouse always sees them.
+   * Ready-today lines sort first within each company.
+   */
   const runSheet = useMemo(() => {
     return groups
       .map((g) => {
@@ -375,28 +379,51 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             });
           }
         }
-        // Driver run sheet = only parts ready to pick today (future arrivals stay off the sheet)
+        // Ready today first, then later arrivals — never hide future items
+        lines.sort(
+          (a, b) =>
+            Number(b.ready) - Number(a.ready) ||
+            b.qty - a.qty ||
+            a.name.localeCompare(b.name)
+        );
         const readyLines = lines.filter((l) => l.ready);
-        readyLines.sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
-        const pieceCount = readyLines.reduce(
+        const laterLines = lines.filter((l) => !l.ready);
+        const pieceCount = lines.reduce(
+          (s, l) => s + (typeof l.qty === "number" && Number.isFinite(l.qty) ? l.qty : 0),
+          0
+        );
+        const readyPieceCount = readyLines.reduce(
           (s, l) => s + (typeof l.qty === "number" && Number.isFinite(l.qty) ? l.qty : 0),
           0
         );
         return {
           vendor_name: g.vendor_name,
-          waiting: readyLines.length,
-          laterCount: lines.filter((l) => !l.ready).length,
-          lines: readyLines,
+          waiting: lines.length,
+          laterCount: laterLines.length,
+          readyCount: readyLines.length,
+          lines,
           pieceCount,
+          readyPieceCount,
+          allLater: lines.length > 0 && readyLines.length === 0,
         };
       })
       .filter((g) => g.lines.length > 0)
-      // Busiest stop first
-      .sort((a, b) => b.pieceCount - a.pieceCount || a.vendor_name.localeCompare(b.vendor_name));
+      // Ready-today stops first, then later-only vendors (still listed)
+      .sort(
+        (a, b) =>
+          Number(a.allLater) - Number(b.allLater) ||
+          b.readyPieceCount - a.readyPieceCount ||
+          b.pieceCount - a.pieceCount ||
+          a.vendor_name.localeCompare(b.vendor_name)
+      );
   }, [groups]);
 
   const runSheetTotalPieces = useMemo(
     () => runSheet.reduce((s, g) => s + g.pieceCount, 0),
+    [runSheet]
+  );
+  const runSheetLaterStops = useMemo(
+    () => runSheet.filter((g) => g.laterCount > 0).length,
     [runSheet]
   );
 
@@ -728,8 +755,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
-      {/* Stops needed — tap for full easy-read company parts list */}
-      {groups.some((g) => g.waiting > 0) && (
+      {/* Stops needed — every open vendor including future-ready (e.g. Carrier arrives later) */}
+      {(runSheet.length > 0 || groups.some((g) => g.waiting > 0)) && (
         <div className="vendor-run-summary card" aria-label="Vendors with open pickups">
           <button
             type="button"
@@ -745,8 +772,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               {runSheetTotalPieces > 0
                 ? ` · ~${runSheetTotalPieces} piece${runSheetTotalPieces === 1 ? "" : "s"}`
                 : ""}
+              {runSheetLaterStops > 0
+                ? ` · ${runSheetLaterStops} with later arrival`
+                : ""}
               {" "}
-              — quick list to check if it fits your vehicle
+              — all open pickups (later arrivals marked)
             </p>
           </button>
           <div className="vendor-run-chips" role="list">
@@ -756,14 +786,25 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                 type="button"
                 className={`vendor-run-chip${
                   runSheetFocus === g.vendor_name || expanded[g.vendor_name] ? " is-open" : ""
-                }`}
+                }${g.allLater ? " is-later" : ""}`}
                 onClick={() => openRunSheet(g.vendor_name)}
-                title={`${g.pieceCount} piece(s) at ${g.vendor_name}`}
+                title={
+                  g.allLater
+                    ? `${g.vendor_name}: arrives later (still needs pickup)`
+                    : `${g.pieceCount} piece(s) at ${g.vendor_name}${
+                        g.laterCount ? ` · ${g.laterCount} later` : ""
+                      }`
+                }
               >
                 <span className="vendor-run-chip-name">{g.vendor_name}</span>
                 <span className="vendor-run-chip-n">
                   {g.pieceCount > 0 ? g.pieceCount : g.waiting}
                 </span>
+                {g.allLater ? (
+                  <span className="vendor-run-chip-later">later</span>
+                ) : g.laterCount > 0 ? (
+                  <span className="vendor-run-chip-later">+{g.laterCount}</span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -800,7 +841,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                   )}
                 </p>
                 <p className="muted vendor-run-sheet-sub">
-                  Qty × part by company — check load before you leave
+                  Qty × part by company — ready today first; later arrivals stay listed so nothing
+                  is missed
                 </p>
               </div>
               <button type="button" className="btn secondary btn-sm" onClick={closeRunSheet}>
@@ -841,18 +883,28 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                     className="vendor-run-sheet-vendor"
                   >
                     <header className="vendor-run-sheet-vendor-head">
-                      <h3>{g.vendor_name}</h3>
+                      <h3>
+                        {g.vendor_name}
+                        {g.allLater ? (
+                          <span className="vendor-run-sheet-later-tag"> arrives later</span>
+                        ) : null}
+                      </h3>
                       <span className="vendor-run-sheet-tally">
                         {g.pieceCount > 0
                           ? `${g.pieceCount} pc${g.pieceCount === 1 ? "" : "s"}`
                           : `${g.lines.length} line${g.lines.length === 1 ? "" : "s"}`}
+                        {g.laterCount > 0 && g.readyCount > 0
+                          ? ` · ${g.laterCount} later`
+                          : ""}
                       </span>
                     </header>
                     <ul className="vendor-run-sheet-parts">
                       {g.lines.map((l) => (
                         <li
                           key={l.key}
-                          className={`vendor-run-sheet-part${l.qty >= 3 ? " is-bulk" : ""}`}
+                          className={`vendor-run-sheet-part${l.qty >= 3 ? " is-bulk" : ""}${
+                            !l.ready ? " is-later" : ""
+                          }`}
                         >
                           <span className="vendor-run-sheet-qty" title="Quantity">
                             {l.qty}×
@@ -861,21 +913,20 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                             <strong className="vendor-run-sheet-name">
                               {l.name || "Part"}
                             </strong>
+                            {!l.ready ? (
+                              <span className="vendor-run-sheet-arrives">
+                                Arrives {formatReadyDate(l.needed) || "later"} · not today
+                              </span>
+                            ) : null}
                             {l.code && l.code !== "—" && l.code !== l.name ? (
                               <span className="vendor-run-sheet-code">{l.code}</span>
                             ) : null}
-                            {(l.po || l.needed || l.notes) && (
+                            {(l.po || l.notes) && (
                               <span className="muted vendor-run-sheet-meta">
-                                {[
-                                  l.po || null,
-                                  l.needed ? `need ${l.needed}` : null,
-                                  l.notes,
-                                ]
-                                  .filter(Boolean)
-                                  .join(" · ")}
+                                {[l.po || null, l.notes].filter(Boolean).join(" · ")}
                               </span>
                             )}
-                            {l.lineId != null && canResolve && (
+                            {l.lineId != null && canResolve && l.ready && (
                               <span className="vendor-run-sheet-actions">
                                 <button
                                   type="button"

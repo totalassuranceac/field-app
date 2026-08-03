@@ -12609,6 +12609,43 @@ svg {
   justify-content: center;
 }
 
+.vendor-run-chip.is-later {
+  border-color: color-mix(in srgb, #a855f7 45%, var(--line));
+  background: color-mix(in srgb, #a855f7 14%, var(--bg-elevated, #1e293b));
+}
+
+.vendor-run-chip.is-later .vendor-run-chip-n {
+  background: #7c3aed;
+}
+
+.vendor-run-chip-later {
+  font-size: 0.68rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #d8b4fe;
+}
+
+.vendor-run-sheet-later-tag {
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: #c4b5fd;
+  margin-left: 0.35rem;
+}
+
+.vendor-run-sheet-part.is-later {
+  opacity: 0.92;
+  border-left: 3px solid #a855f7;
+}
+
+.vendor-run-sheet-arrives {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #d8b4fe;
+  margin-top: 0.15rem;
+}
+
 .vendor-run-compact-head {
   display: flex;
   flex-wrap: wrap;
