@@ -9246,8 +9246,13 @@ api.get("/inventory/part-pickups", async (c) => {
       CASE t.status WHEN 'open' THEN 0 WHEN 'partial' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
       lower(t.vendor_name), t.needed_for_date IS NULL, t.needed_for_date ASC, t.id DESC
       LIMIT 100`;
+    // open / waiting / done / history / all build WHERE without ? placeholders
     const tickets =
-      status === "all" || status === "open" || status === "waiting" || status === "done"
+      status === "all" ||
+      status === "open" ||
+      status === "waiting" ||
+      status === "done" ||
+      status === "history"
         ? await c.env.DB.prepare(sql).all()
         : await c.env.DB.prepare(sql).bind(status).all();
 
