@@ -5156,6 +5156,8 @@ api.patch("/warranties/:id", async (c) => {
   const body = await c.req.json<{
     status?: string;
     notes?: string;
+    /** Append a dated status update (does not wipe prior notes). */
+    append_note?: string;
     needs_vendor_return?: boolean;
     vendor_name?: string;
     claim_submitted?: boolean;
@@ -5169,6 +5171,7 @@ api.patch("/warranties/:id", async (c) => {
       id: number;
       log_number: string;
       status: string;
+      notes: string | null;
       dropped_off_by_user_id: number | null;
       part_name: string;
     }>();
@@ -5180,11 +5183,27 @@ api.patch("/warranties/:id", async (c) => {
     user.role === "warehouse" ||
     user.role === "office" ||
     user.role === "mechanic";
+  const canNote =
+    canProcess ||
+    (before.dropped_off_by_user_id != null && before.dropped_off_by_user_id === user.id);
 
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
 
-  if (body.notes !== undefined) {
+  // Status updates for the team: append keeps history (e.g. "Working with Lennox…")
+  if (body.append_note !== undefined) {
+    if (!canNote) return c.json({ error: "Not allowed to add notes on this claim" }, 403);
+    const text = body.append_note.trim();
+    if (!text) return c.json({ error: "Note cannot be empty" }, 400);
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const who = (user.display_name || "Office").trim();
+    const block = `[${stamp} · ${who}]\n${text}`;
+    const prior = (before.notes || "").trim();
+    const next = prior ? `${prior}\n\n${block}` : block;
+    sets.push("notes = ?");
+    vals.push(next);
+  } else if (body.notes !== undefined) {
+    if (!canNote) return c.json({ error: "Not allowed to edit notes on this claim" }, 403);
     sets.push("notes = ?");
     vals.push(body.notes?.trim() || null);
   }

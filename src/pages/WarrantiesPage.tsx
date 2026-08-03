@@ -44,6 +44,7 @@ interface Warranty {
   dropped_off_at: string;
   claim_submitted_at: string | null;
   processed_at: string | null;
+  dropped_off_by_user_id?: number | null;
   dropped_off_by_name?: string | null;
   processed_by_name?: string | null;
   dropoff_photo_key?: string | null;
@@ -160,6 +161,8 @@ export function WarrantiesPage() {
   const [vendorDraft, setVendorDraft] = useState<
     Record<number, { rma: string; tracking: string; credit: string }>
   >({});
+  /** Per-claim status note draft (append) */
+  const [noteDraft, setNoteDraft] = useState<Record<number, string>>({});
 
   const [partName, setPartName] = useState("");
   const [partCode, setPartCode] = useState("");
@@ -447,6 +450,55 @@ export function WarrantiesPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save vendor details");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function noteDraftFor(id: number): string {
+    return noteDraft[id] ?? "";
+  }
+
+  /** Latest status line for collapsed list preview */
+  function latestNotePreview(notes: string | null | undefined): string {
+    const t = (notes || "").trim();
+    if (!t) return "";
+    const blocks = t.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+    const last = blocks[blocks.length - 1] || t;
+    const lines = last.split("\n").map((l) => l.trim()).filter(Boolean);
+    // Prefer body line over [timestamp · who] header
+    const body =
+      lines.find((l) => !/^\[.+·.+\]$/.test(l) && !/^\[.+\]$/.test(l)) || lines[lines.length - 1];
+    const s = (body || "").replace(/\s+/g, " ");
+    return s.length > 72 ? `${s.slice(0, 70)}…` : s;
+  }
+
+  async function addStatusNote(w: Warranty) {
+    const text = noteDraftFor(w.id).trim();
+    if (!text) {
+      setError("Type a status note first (e.g. Working with Lennox — waiting on RMA).");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ append_note: text }),
+      });
+      setNoteDraft((p) => {
+        const next = { ...p };
+        delete next[w.id];
+        return next;
+      });
+      setOk(`Status note added on ${w.log_number}`);
+      await load();
+    } catch (err) {
+      if (err instanceof OfflineQueuedError) {
+        setOk(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : "Could not save note");
+      }
     } finally {
       setBusy(false);
     }
@@ -746,6 +798,9 @@ export function WarrantiesPage() {
                     {w.days_open != null && isOpenStatus(st)
                       ? ` · ${w.days_open}d${w.urgent ? "!" : w.overdue ? " aging" : ""}`
                       : ""}
+                    {latestNotePreview(w.notes)
+                      ? ` · ${latestNotePreview(w.notes)}`
+                      : ""}
                   </span>
                 </>
               }
@@ -759,7 +814,44 @@ export function WarrantiesPage() {
               {w.customer_name ? (
                 <div className="muted">Customer: {w.customer_name}</div>
               ) : null}
-              {w.notes ? <div className="muted">{w.notes}</div> : null}
+
+              <div className="warranty-status-notes">
+                <div className="warranty-status-notes-label">Status notes</div>
+                {w.notes?.trim() ? (
+                  <pre className="warranty-status-notes-body">{w.notes.trim()}</pre>
+                ) : (
+                  <p className="muted warranty-status-notes-empty">
+                    No updates yet. Add a note so the team knows this claim is being worked
+                    (vendor help, waiting on RMA, etc.).
+                  </p>
+                )}
+                {(canProcess ||
+                  (w.dropped_off_by_user_id != null &&
+                    w.dropped_off_by_user_id === user?.id)) && (
+                  <div className="warranty-status-notes-add">
+                    <label>
+                      Add update
+                      <textarea
+                        rows={2}
+                        value={noteDraftFor(w.id)}
+                        onChange={(e) =>
+                          setNoteDraft((p) => ({ ...p, [w.id]: e.target.value }))
+                        }
+                        placeholder="e.g. Working with Lennox on this claim — waiting for them to issue RMA"
+                        disabled={busy}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="btn secondary btn-sm"
+                      disabled={busy || !noteDraftFor(w.id).trim()}
+                      onClick={() => void addStatusNote(w)}
+                    >
+                      Save status note
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="warranty-photos-row">
                 {w.nameplate_photo_key ? (
                   <div className="warranty-dropoff-photo">

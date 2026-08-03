@@ -8905,6 +8905,61 @@ tr.row-low td {
   line-height: 1.35;
 }
 
+.warranty-status-notes {
+  margin: 0.55rem 0 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border, #334155) 100%, transparent);
+  background: color-mix(in srgb, var(--surface-2, #0f172a) 70%, transparent);
+}
+.warranty-status-notes-label {
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+  margin-bottom: 0.35rem;
+}
+.warranty-status-notes-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--text, #f1f5f9);
+}
+.warranty-status-notes-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.warranty-status-notes-add {
+  margin-top: 0.5rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.warranty-status-notes-add label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+.warranty-status-notes-add textarea {
+  font: inherit;
+  font-weight: 500;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, #334155);
+  background: color-mix(in srgb, #fff 6%, var(--card, #0b1220));
+  color: var(--text, #f8fafc);
+  resize: vertical;
+  min-height: 3rem;
+  line-height: 1.35;
+}
+
 .warranty-vendor-flag {
   margin-top: 0.35rem;
   font-size: 0.82rem;

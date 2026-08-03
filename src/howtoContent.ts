@@ -378,6 +378,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Do not skip the number on the box — warehouse matches it to your drop-off photo.",
       "When you fix a wrong model/serial from a nameplate scan, the app learns for next time.",
       "Warehouse: if something should leave the open list without Approved/Rejected (back to shelves, another job, not a claim), use Remove from open list — no reason required.",
+      "While a claim is open, use Status notes → Add update so everyone can see progress (e.g. working with Lennox). Each save stamps your name and time.",
     ],
   },
   {
