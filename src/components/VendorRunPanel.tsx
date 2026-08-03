@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -118,6 +118,8 @@ function askNotNeededReason(label: string): string | null {
 export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const focusTicketId = Number(searchParams.get("ticket") || "") || null;
   /** Counter actions: pick / not ready / partial */
   const canResolve =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
@@ -140,6 +142,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   /** Full easy-read run sheet for drivers (will it fit in the truck?) */
   const [showRunSheet, setShowRunSheet] = useState(false);
   const [runSheetFocus, setRunSheetFocus] = useState<string | null>(null);
+  const focusHandled = useRef<number | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -188,6 +191,102 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     load().catch((e) => setError(e instanceof Error ? e.message : "Load failed"));
   }, [load]);
+
+  /**
+   * Inbox deep-link ?ticket=12 — open Waiting first; if already picked, switch to
+   * Picked/done (or All) so the request is still findable from the notification.
+   */
+  useEffect(() => {
+    if (!focusTicketId) return;
+    if (focusHandled.current === focusTicketId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const findIn = async (status: string) => {
+          const d = await api<{
+            vendors?: VendorGroup[];
+            tickets?: Ticket[];
+            waiting?: number;
+          }>(`/inventory/part-pickups?status=${status}`);
+          const list = d.tickets || [];
+          const hit = list.find((t) => t.id === focusTicketId);
+          return { d, hit };
+        };
+
+        // Prefer open list
+        let { d, hit } = await findIn("open");
+        let nextFilter: "open" | "history" | "all" = "open";
+        if (!hit) {
+          ({ d, hit } = await findIn("history"));
+          nextFilter = "history";
+        }
+        if (!hit) {
+          ({ d, hit } = await findIn("all"));
+          nextFilter = "all";
+        }
+        if (cancelled) return;
+
+        if (!hit) {
+          setError(
+            `Pickup request #${focusTicketId} was not found. It may have been removed from the system.`
+          );
+          focusHandled.current = focusTicketId;
+          return;
+        }
+
+        setFilter(nextFilter);
+        setGroups(d.vendors || []);
+        setTickets(d.tickets || []);
+        setWaiting(d.waiting || 0);
+        setExpanded((p) => ({ ...p, [hit!.vendor_name]: true }));
+        setExpandedTicket((p) => ({ ...p, [hit!.id]: true }));
+
+        const openish = (hit.lines || []).some((l) =>
+          ["pending", "not_ready", "partial"].includes(l.status)
+        );
+        if (openish) {
+          setOk(
+            `Opened request #${hit.id} · ${hit.vendor_name} — still on the Waiting list.`
+          );
+        } else {
+          const st =
+            hit.status === "cancelled"
+              ? "Not needed"
+              : hit.status === "done"
+                ? "Picked / done"
+                : hit.status;
+          setOk(
+            `This request is already closed (${st}). Expand it below — use “Put back on Waiting list” if it still needs pickup.`
+          );
+        }
+
+        focusHandled.current = focusTicketId;
+        // Drop query after focus so refresh doesn’t re-jump forever
+        const next = new URLSearchParams(searchParams);
+        // keep ticket briefly for shareable URL; clear after scroll
+        window.setTimeout(() => {
+          next.delete("ticket");
+          setSearchParams(next, { replace: true });
+        }, 800);
+        window.setTimeout(() => {
+          document
+            .getElementById(`pp-ticket-${hit!.id}`)
+            ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 120);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Could not open that pickup request");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Only re-run when the deep-link id changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTicketId]);
 
   useEffect(() => {
     if (!isOfficeEntry) return;
@@ -1092,7 +1191,10 @@ function TicketCard({
     t.lines.some((l) => l.status === "pending" || l.status === "not_ready" || l.status === "partial");
 
   return (
-    <div className={`pp-ticket${ready ? "" : " pp-ticket-later"}`}>
+    <div
+      id={`pp-ticket-${t.id}`}
+      className={`pp-ticket${ready ? "" : " pp-ticket-later"}`}
+    >
       <button type="button" className="pp-ticket-head" onClick={onToggle}>
         <span>
           <strong>{partText}</strong>
