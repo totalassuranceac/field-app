@@ -12948,6 +12948,32 @@ svg {
   padding-right: 0.25rem !important;
 }
 
+.pp-ticket-later {
+  border-left: 3px solid #a78bfa;
+  opacity: 0.95;
+}
+.pp-arrives-pill {
+  display: inline-block;
+  margin-top: 0.25rem;
+  margin-right: 0.35rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 750;
+  background: color-mix(in srgb, #a855f7 22%, var(--surface, #0f172a));
+  color: #e9d5ff;
+}
+.pp-ready-pill {
+  display: inline-block;
+  margin-top: 0.25rem;
+  margin-right: 0.35rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 750;
+  background: color-mix(in srgb, #22c55e 20%, var(--surface, #0f172a));
+  color: #bbf7d0;
+}
 .pp-ticket {
   border-top: 1px solid var(--line);
   padding: 0.1rem 0.5rem 0.4rem;

@@ -35,7 +35,38 @@ interface Ticket {
   line_count?: number;
   open_lines?: number;
   picked_lines?: number;
+  /** Server: ready for warehouse run today (needed_for_date is null or ≤ today) */
+  ready_to_pick?: boolean;
   lines: TicketLine[];
+}
+
+function localTodayIso(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function isTicketReadyToPick(t: { needed_for_date?: string | null; ready_to_pick?: boolean }): boolean {
+  if (typeof t.ready_to_pick === "boolean") return t.ready_to_pick;
+  const needed = (t.needed_for_date || "").trim();
+  if (!needed) return true;
+  return needed <= localTodayIso();
+}
+
+function formatReadyDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso.includes("T") ? iso : `${iso}T12:00:00`);
+    return d.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return iso.slice(0, 10);
+  }
 }
 
 interface StaffOption {
@@ -80,8 +111,9 @@ function askNotNeededReason(label: string): string | null {
 }
 
 /**
- * Part pickup request: vendor + part description + address it’s needed for.
- * Only the person who logged it can change that text; warehouse marks picked up.
+ * Part pickup request: vendor + part description + address + ready date.
+ * Owner / office / warehouse can edit description anytime while open.
+ * Future ready dates stay on the list but off the driver's today run sheet.
  */
 export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
@@ -117,10 +149,14 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [jobAddress, setJobAddress] = useState("");
   const [contactUserId, setContactUserId] = useState("");
   const [contactName, setContactName] = useState("");
+  /** First day warehouse should pick it up (future = on list but not for today's run). */
+  const [readyDate, setReadyDate] = useState(() => localTodayIso());
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [vendorNames, setVendorNames] = useState<string[]>([]);
 
   const isOfficeEntry = user?.role === "admin" || user?.role === "office";
+  const canEditAny =
+    user?.role === "admin" || user?.role === "office" || user?.role === "warehouse";
 
   const defaultSource = useMemo(() => {
     const r = user?.role;
@@ -174,10 +210,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  /** Flat vendor → open lines for a glanceable pickup sheet (will it fit?) */
+  /** Flat vendor → open lines ready *today* for the driver run sheet */
   const runSheet = useMemo(() => {
     return groups
-      .filter((g) => g.waiting > 0)
       .map((g) => {
         const lines: Array<{
           key: string;
@@ -190,9 +225,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           needed: string | null;
           notes: string | null;
           status: string;
+          ready: boolean;
         }> = [];
         for (const t of g.tickets) {
           const ticketNote = (t.notes || "").trim() || null;
+          const ready = isTicketReadyToPick(t);
           for (const l of t.lines || []) {
             if (!["pending", "not_ready", "partial"].includes(l.status)) continue;
             const code = (l.part_code || "").trim();
@@ -206,9 +243,10 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               code: code || "—",
               name: name || (code ? code : "Part description pending"),
               po: null,
-              needed: null,
+              needed: t.needed_for_date,
               notes: lineNote || ticketNote,
               status: l.status,
+              ready,
             });
           }
           // Ticket with no lines yet but still waiting
@@ -227,23 +265,26 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               needed: t.needed_for_date,
               notes: ticketNote,
               status: "pending",
+              ready,
             });
           }
         }
-        // Biggest pieces first — driver scans for bulk/fit first
-        lines.sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
-        const pieceCount = lines.reduce(
+        // Driver run sheet = only parts ready to pick today (future arrivals stay off the sheet)
+        const readyLines = lines.filter((l) => l.ready);
+        readyLines.sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
+        const pieceCount = readyLines.reduce(
           (s, l) => s + (typeof l.qty === "number" && Number.isFinite(l.qty) ? l.qty : 0),
           0
         );
         return {
           vendor_name: g.vendor_name,
-          waiting: g.waiting,
-          lines,
+          waiting: readyLines.length,
+          laterCount: lines.filter((l) => !l.ready).length,
+          lines: readyLines,
           pieceCount,
         };
       })
-      .filter((g) => g.lines.length > 0 || g.waiting > 0)
+      .filter((g) => g.lines.length > 0)
       // Busiest stop first
       .sort((a, b) => b.pieceCount - a.pieceCount || a.vendor_name.localeCompare(b.vendor_name));
   }, [groups]);
@@ -314,22 +355,33 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       if (isOfficeEntry && !contact) {
         throw new Error("Select who this is for (contact) so warehouse knows who to ask.");
       }
-      await api("/inventory/part-pickups", {
-        method: "POST",
-        body: JSON.stringify({
-          vendor_name: vend,
-          part_description: desc,
-          job_address: addr,
-          contact_name: contact || undefined,
-          source: defaultSource,
-        }),
-      });
-      setOk("Part pickup request submitted.");
+      const ready = readyDate.trim() || localTodayIso();
+      const r = await api<{ ready_to_pick?: boolean; needed_for_date?: string }>(
+        "/inventory/part-pickups",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            vendor_name: vend,
+            part_description: desc,
+            job_address: addr,
+            contact_name: contact || undefined,
+            needed_for_date: ready,
+            source: defaultSource,
+          }),
+        }
+      );
+      const later = r.ready_to_pick === false;
+      setOk(
+        later
+          ? `Saved — arrives ${formatReadyDate(r.needed_for_date || ready)}. On the list for planning, not on today's driver run sheet.`
+          : "Part pickup request submitted — ready for pickup."
+      );
       setVendor("");
       setPartDescription("");
       setJobAddress("");
       setContactUserId("");
       setContactName("");
+      setReadyDate(localTodayIso());
       setShowForm(false);
       await load();
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
@@ -342,12 +394,19 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
   async function saveOwnerDetails(
     ticketId: number,
-    payload: { lineId: number; part_name: string; job_address: string }
+    payload: {
+      lineId: number;
+      part_name: string;
+      job_address: string;
+      needed_for_date: string;
+    }
   ) {
     await api(`/inventory/part-pickups/${ticketId}/lines`, {
       method: "PUT",
       body: JSON.stringify({
         job_address: payload.job_address,
+        needed_for_date: payload.needed_for_date || null,
+        part_description: payload.part_name,
         lines: [{ id: payload.lineId, part_name: payload.part_name }],
       }),
     });
@@ -786,6 +845,19 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               autoComplete="street-address"
             />
           </label>
+          <label>
+            Ready to pick on *
+            <input
+              type="date"
+              value={readyDate}
+              onChange={(e) => setReadyDate(e.target.value)}
+              required
+            />
+            <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 500 }}>
+              Today = on the driver run sheet now. Future date (e.g. when vendor says it arrives) =
+              stays on the list but driver is not sent today.
+            </span>
+          </label>
           {isOfficeEntry && (
             <>
               <label>
@@ -836,7 +908,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         {!tickets.length && (
           <div className="card muted">
             {filter === "open"
-              ? "Nothing waiting for pickup. Use New pickup request when parts are ready at a store."
+              ? "Nothing waiting for pickup. Use New pickup request — set Ready to pick on a future day if it is still arriving."
               : "No recent pickup requests."}
           </div>
         )}
@@ -875,8 +947,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                   <TicketCard
                     key={t.id}
                     ticket={t}
-                    isOwner={
-                      user?.role === "admin" ||
+                    canEdit={
+                      canEditAny ||
                       (t.logged_by_user_id != null && t.logged_by_user_id === user?.id)
                     }
                     canResolve={canResolve}
@@ -893,7 +965,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                       setError("");
                       try {
                         await saveOwnerDetails(t.id, payload);
-                        setOk("Your request updated.");
+                        setOk("Request updated — description, address, and ready date saved.");
                         await load();
                       } catch (err) {
                         setError(err instanceof Error ? err.message : "Save failed");
@@ -913,7 +985,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
 function TicketCard({
   ticket: t,
-  isOwner,
+  canEdit,
   canResolve,
   canNotNeeded,
   busy,
@@ -924,8 +996,8 @@ function TicketCard({
   onSaveOwner,
 }: {
   ticket: Ticket;
-  /** Creator (or admin) may edit description / address */
-  isOwner: boolean;
+  /** Owner / office / warehouse / admin may edit description, address, ready date */
+  canEdit: boolean;
   canResolve: boolean;
   canNotNeeded: boolean;
   busy: boolean;
@@ -942,6 +1014,7 @@ function TicketCard({
     lineId: number;
     part_name: string;
     job_address: string;
+    needed_for_date: string;
   }) => Promise<void>;
 }) {
   const primaryLine = t.lines[0];
@@ -955,25 +1028,31 @@ function TicketCard({
   const addressText = (t.notes || "").trim();
   /** Contact for questions (office-entered); purchase_order column holds the name */
   const contactText = (t.purchase_order || "").trim();
+  const ready = isTicketReadyToPick(t);
+  const readyLabel = formatReadyDate(t.needed_for_date);
 
   const [editDesc, setEditDesc] = useState(partText);
   const [editAddr, setEditAddr] = useState(addressText);
+  const [editReady, setEditReady] = useState(
+    (t.needed_for_date || "").slice(0, 10) || localTodayIso()
+  );
   const [partialQty, setPartialQty] = useState<Record<number, string>>({});
 
   useEffect(() => {
     setEditDesc(partText);
     setEditAddr(addressText);
-  }, [partText, addressText, t.id]);
+    setEditReady((t.needed_for_date || "").slice(0, 10) || localTodayIso());
+  }, [partText, addressText, t.needed_for_date, t.id]);
 
   const openCount = t.lines.filter((l) =>
     ["pending", "not_ready", "partial"].includes(l.status)
   ).length;
   const canEditText =
-    isOwner &&
+    canEdit &&
     t.lines.some((l) => l.status === "pending" || l.status === "not_ready" || l.status === "partial");
 
   return (
-    <div className="pp-ticket">
+    <div className={`pp-ticket${ready ? "" : " pp-ticket-later"}`}>
       <button type="button" className="pp-ticket-head" onClick={onToggle}>
         <span>
           <strong>{partText}</strong>
@@ -986,6 +1065,11 @@ function TicketCard({
                 ? ` · ${t.logged_by_name}`
                 : ""}
           </span>
+          {!ready && readyLabel ? (
+            <span className="pp-arrives-pill">Arrives {readyLabel} · not today</span>
+          ) : ready && t.needed_for_date ? (
+            <span className="pp-ready-pill">Ready {readyLabel || "today"}</span>
+          ) : null}
         </span>
         <span className={`pp-ticket-badge st-${t.status}`}>
           {t.status}
@@ -1009,19 +1093,31 @@ function TicketCard({
                 Address needed for
                 <input value={editAddr} onChange={(e) => setEditAddr(e.target.value)} />
               </label>
+              <label>
+                Ready to pick on
+                <input
+                  type="date"
+                  value={editReady}
+                  onChange={(e) => setEditReady(e.target.value)}
+                />
+                <span className="muted" style={{ fontSize: "0.78rem", fontWeight: 500 }}>
+                  Future date keeps it on the list but off the driver&apos;s today run.
+                </span>
+              </label>
               <button
                 type="button"
                 className="btn secondary btn-sm"
-                disabled={busy}
+                disabled={busy || editDesc.trim().length < 2}
                 onClick={() =>
                   void onSaveOwner({
                     lineId: primaryLine.id,
                     part_name: editDesc.trim(),
                     job_address: editAddr.trim(),
+                    needed_for_date: editReady.trim() || localTodayIso(),
                   })
                 }
               >
-                Save my request
+                Save changes
               </button>
             </div>
           ) : (
@@ -1030,6 +1126,12 @@ function TicketCard({
               {addressText ? (
                 <p className="muted" style={{ margin: "0.25rem 0 0" }}>
                   Needed for: {addressText}
+                </p>
+              ) : null}
+              {t.needed_for_date ? (
+                <p style={{ margin: "0.25rem 0 0", fontWeight: 600 }}>
+                  {ready ? "Ready to pick" : "Arrives"}: {readyLabel}
+                  {!ready ? " (not on today's run)" : ""}
                 </p>
               ) : null}
               {contactText ? (
@@ -1042,9 +1144,9 @@ function TicketCard({
                   Logged by {t.logged_by_name}
                 </p>
               ) : null}
-              {!isOwner && (
+              {!canEdit && (
                 <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}>
-                  Only the person who logged this can edit the description or address.
+                  Ask office/warehouse to update the description or ready date.
                 </p>
               )}
             </div>

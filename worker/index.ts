@@ -9094,10 +9094,19 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
 // ——— Part pickup / vendor will-call ("parts ready at supply house") ———
 // Field App owns this list. ST job # / address are optional free-text for now.
 
-function tomorrowIsoDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().slice(0, 10);
+/** Local calendar date YYYY-MM-DD (avoids UTC day-shift from toISOString). */
+function localIsoDate(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function parseNeededForDate(v: unknown): string | null {
+  if (v == null || v === "") return null;
+  const s = String(v).trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return s;
 }
 
 function defaultVendorRunSource(role: string): "office" | "tech" | "warehouse" | "other" {
@@ -9107,23 +9116,33 @@ function defaultVendorRunSource(role: string): "office" | "tech" | "warehouse" |
   return "other";
 }
 
-/** Lines still needing action at the vendor (pending / not ready / partial). */
+/**
+ * Lines ready for a warehouse run *today*.
+ * Future needed_for_date stays on the list for planning but is not “go pick now”.
+ */
 async function countPartPickupWaiting(db: D1Database): Promise<number> {
+  const today = localIsoDate();
   try {
     const row = await db
       .prepare(
-        `SELECT COUNT(*) as c FROM part_pickup_ticket_lines
-         WHERE status IN ('pending','not_ready','partial')`
+        `SELECT COUNT(*) as c
+         FROM part_pickup_ticket_lines l
+         JOIN part_pickup_tickets t ON t.id = l.ticket_id
+         WHERE l.status IN ('pending','not_ready','partial')
+           AND (t.needed_for_date IS NULL OR t.needed_for_date <= ?)`
       )
+      .bind(today)
       .first<{ c: number }>();
     let n = row?.c ?? 0;
-    // Tickets marked qty unknown with no lines yet still count as 1 open ticket
+    // Tickets marked qty unknown with no lines yet still count if ready by date
     const openEmpty = await db
       .prepare(
         `SELECT COUNT(*) as c FROM part_pickup_tickets t
          WHERE t.status IN ('open','partial')
-           AND NOT EXISTS (SELECT 1 FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id)`
+           AND NOT EXISTS (SELECT 1 FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id)
+           AND (t.needed_for_date IS NULL OR t.needed_for_date <= ?)`
       )
+      .bind(today)
       .first<{ c: number }>();
     n += openEmpty?.c ?? 0;
     return n;
@@ -9217,9 +9236,12 @@ api.get("/inventory/part-pickups", async (c) => {
         ? await c.env.DB.prepare(sql).all()
         : await c.env.DB.prepare(sql).bind(status).all();
 
+    const today = localIsoDate();
     const list = [];
     for (const t of tickets.results || []) {
       const tid = Number((t as { id: number }).id);
+      const needed = (t as { needed_for_date?: string | null }).needed_for_date || null;
+      const ready_to_pick = !needed || needed <= today;
       const lines = await c.env.DB.prepare(
         `SELECT l.*, ru.display_name as resolved_by_name
          FROM part_pickup_ticket_lines l
@@ -9229,7 +9251,11 @@ api.get("/inventory/part-pickups", async (c) => {
       )
         .bind(tid)
         .all();
-      list.push({ ...t, lines: lines.results || [] });
+      list.push({
+        ...t,
+        ready_to_pick,
+        lines: lines.results || [],
+      });
     }
 
     // Vendor names for autocomplete
@@ -9308,6 +9334,7 @@ api.post("/inventory/part-pickups", async (c) => {
     contact_name?: string | null;
     contact_user_id?: number | null;
     vendor_name?: string;
+    /** First day the part is ready to pick (future = do not go yet). */
     needed_for_date?: string | null;
     purchase_order?: string | null;
     notes?: string | null;
@@ -9365,10 +9392,13 @@ api.post("/inventory/part-pickups", async (c) => {
   // Field techs logging themselves — contact defaults to them
   if (!contactName) contactName = user.display_name || null;
 
-  const needed = tomorrowIsoDate();
+  // Ready date: default today (pick now). Future date = stays on list but not on today's run.
+  const needed = parseNeededForDate(body.needed_for_date) || localIsoDate();
   const source = body.source || defaultVendorRunSource(user.role);
   // purchase_order column repurposed as contact person label for these simple tickets
   const contactStored = contactName;
+  const today = localIsoDate();
+  const isFuture = needed > today;
 
   try {
     const ins = await c.env.DB.prepare(
@@ -9392,12 +9422,15 @@ api.post("/inventory/part-pickups", async (c) => {
     const bg = (async () => {
       try {
         const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin"]);
+        const whenBit = isFuture ? ` · ready ${needed}` : "";
         await notifyUsers(
           c.env.DB,
           notifyIds.filter((uid) => uid !== user.id).slice(0, 40),
           "vendor_run",
-          `Part at vendor · ${contactStored || user.display_name}`,
-          `${description.slice(0, 70)} · for ${address.slice(0, 40)}${
+          isFuture
+            ? `Part arrives later · ${contactStored || user.display_name}`
+            : `Part at vendor · ${contactStored || user.display_name}`,
+          `${description.slice(0, 70)} · for ${address.slice(0, 40)}${whenBit}${
             contactStored ? ` · contact ${contactStored}` : ""
           }`,
           { type: "part_pickup", id: ticketId }
@@ -9408,7 +9441,13 @@ api.post("/inventory/part-pickups", async (c) => {
     })();
     scheduleWaitUntil(c, bg);
 
-    return c.json({ ok: true, id: ticketId, contact_name: contactStored });
+    return c.json({
+      ok: true,
+      id: ticketId,
+      contact_name: contactStored,
+      needed_for_date: needed,
+      ready_to_pick: !isFuture,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) {
@@ -9419,7 +9458,8 @@ api.post("/inventory/part-pickups", async (c) => {
 });
 
 /**
- * Update part description / address — only the person who logged the request (or admin).
+ * Update part description / address / ready date.
+ * Owner, office, warehouse, or admin may edit open tickets so details stay accurate.
  * Warehouse still marks picked / not ready via resolve.
  */
 api.put("/inventory/part-pickups/:id/lines", async (c) => {
@@ -9434,6 +9474,8 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
       qty_requested?: number;
     }>;
     job_address?: string | null;
+    needed_for_date?: string | null;
+    part_description?: string | null;
     add_lines?: number;
   }>();
 
@@ -9449,12 +9491,12 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
     }
 
     const isOwner = ticket.logged_by_user_id != null && ticket.logged_by_user_id === user.id;
-    const isAdmin = user.role === "admin";
-    if (!isOwner && !isAdmin) {
+    const isStaff = ["admin", "office", "warehouse"].includes(user.role);
+    if (!isOwner && !isStaff) {
       return c.json(
         {
           error:
-            "Only the person who logged this request can change the part description or address.",
+            "Only the person who logged this request (or office/warehouse) can change the description, address, or ready date.",
         },
         403
       );
@@ -9464,34 +9506,90 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
       return c.json({ error: "Cannot add lines to this request." }, 400);
     }
 
+    const ticketSets: string[] = ["updated_at = datetime('now')"];
+    const ticketVals: unknown[] = [];
+
     if (body.job_address != null) {
       const addr = String(body.job_address).trim();
       if (addr.length >= 3) {
+        ticketSets.push("notes = ?");
+        ticketVals.push(addr);
+      }
+    }
+
+    if (body.needed_for_date !== undefined) {
+      const needed = parseNeededForDate(body.needed_for_date);
+      ticketSets.push("needed_for_date = ?");
+      ticketVals.push(needed);
+    }
+
+    if (ticketSets.length > 1) {
+      ticketVals.push(ticketId);
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_tickets SET ${ticketSets.join(", ")} WHERE id = ?`
+      )
+        .bind(...ticketVals)
+        .run();
+    }
+
+    // Single-field description convenience (updates first open line if no line id given)
+    const bulkDesc =
+      body.part_description != null ? String(body.part_description).trim() : "";
+    if (bulkDesc.length >= 2 && (!body.lines || !body.lines.length)) {
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_ticket_lines SET part_name = ?
+         WHERE ticket_id = ? AND status IN ('pending','not_ready','partial')
+         AND id = (
+           SELECT id FROM part_pickup_ticket_lines
+           WHERE ticket_id = ? AND status IN ('pending','not_ready','partial')
+           ORDER BY line_no ASC, id ASC LIMIT 1
+         )`
+      )
+        .bind(bulkDesc, ticketId, ticketId)
+        .run();
+    }
+
+    let linesUpdated = 0;
+    for (const line of body.lines || []) {
+      if (!line.id) continue;
+      const name = line.part_name != null ? String(line.part_name).trim() || null : null;
+      if (!name || name.length < 2) continue;
+      // Allow update on any still-open line (not only pending — was blocking description edits)
+      const r = await c.env.DB.prepare(
+        `UPDATE part_pickup_ticket_lines SET part_name = ?
+         WHERE id = ? AND ticket_id = ?
+           AND status IN ('pending','not_ready','partial')`
+      )
+        .bind(name, line.id, ticketId)
+        .run();
+      linesUpdated += Number(r.meta.changes) || 0;
+    }
+
+    if (
+      linesUpdated === 0 &&
+      (body.lines || []).some((l) => l.part_name && String(l.part_name).trim().length >= 2) &&
+      bulkDesc.length < 2
+    ) {
+      // Fall back: if line ids were wrong/stale, still try primary open line
+      const firstName = String(
+        (body.lines || []).find((l) => l.part_name && String(l.part_name).trim().length >= 2)
+          ?.part_name || ""
+      ).trim();
+      if (firstName) {
         await c.env.DB.prepare(
-          `UPDATE part_pickup_tickets SET notes = ?, updated_at = datetime('now') WHERE id = ?`
+          `UPDATE part_pickup_ticket_lines SET part_name = ?
+           WHERE ticket_id = ? AND status IN ('pending','not_ready','partial')
+           AND id = (
+             SELECT id FROM part_pickup_ticket_lines
+             WHERE ticket_id = ? AND status IN ('pending','not_ready','partial')
+             ORDER BY line_no ASC, id ASC LIMIT 1
+           )`
         )
-          .bind(addr, ticketId)
+          .bind(firstName, ticketId, ticketId)
           .run();
       }
     }
 
-    for (const line of body.lines || []) {
-      if (!line.id) continue;
-      const name = line.part_name != null ? String(line.part_name).trim() || null : null;
-      if (!name) continue;
-      await c.env.DB.prepare(
-        `UPDATE part_pickup_ticket_lines SET part_name = ?
-         WHERE id = ? AND ticket_id = ? AND status = 'pending'`
-      )
-        .bind(name, line.id, ticketId)
-        .run();
-    }
-
-    await c.env.DB.prepare(
-      `UPDATE part_pickup_tickets SET updated_at = datetime('now') WHERE id = ?`
-    )
-      .bind(ticketId)
-      .run();
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Update failed" }, 500);
