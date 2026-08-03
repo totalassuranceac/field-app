@@ -112,6 +112,19 @@ export function ToolLoanLedgerPage() {
   const [weeklyEdit, setWeeklyEdit] = useState("");
   const [report, setReport] = useState<OwnerReport | null>(null);
 
+  /** Office add-charge (no approval) — works for $0 balance employees. */
+  type PickerPerson = PersonSummary;
+  type PickerUser = { id: number; display_name: string; role?: string };
+  const [pickerPeople, setPickerPeople] = useState<PickerPerson[]>([]);
+  const [pickerUsers, setPickerUsers] = useState<PickerUser[]>([]);
+  const [addEmployeeKey, setAddEmployeeKey] = useState(""); // "p:123" | "u:456"
+  const [addKind, setAddKind] = useState("unapproved_card");
+  const [addReason, setAddReason] = useState("");
+  const [addAmt, setAddAmt] = useState("");
+  const [addDate, setAddDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [lastChargePrintId, setLastChargePrintId] = useState<number | null>(null);
+  const [showZeroBalances, setShowZeroBalances] = useState(true);
+
   /** Payroll week: bulk deduct everyone checked, with optional amount overrides. */
   const [payrollWeekDate, setPayrollWeekDate] = useState(() =>
     new Date().toISOString().slice(0, 10)
@@ -195,6 +208,20 @@ export function ToolLoanLedgerPage() {
       setTotalOwed(summary.total_owed || 0);
       setReport(owner);
       seedWeekAmounts(list);
+
+      // Employee picker for add-charge (includes $0 balance + users not yet on ledger)
+      try {
+        const picker = await api<{
+          people?: PickerPerson[];
+          users_not_on_ledger?: PickerUser[];
+        }>("/tool-loan-ledger/employee-picker", { timeoutMs: 25_000 });
+        setPickerPeople(picker.people || list);
+        setPickerUsers(picker.users_not_on_ledger || []);
+      } catch {
+        setPickerPeople(list);
+        setPickerUsers([]);
+      }
+
       setOk("");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Could not load ledger";
@@ -236,6 +263,94 @@ export function ToolLoanLedgerPage() {
     [people]
   );
 
+  const balancesList = useMemo(() => {
+    const base = showZeroBalances
+      ? people.filter((p) => p.status !== "former")
+      : openPeople;
+    return [...base].sort((a, b) => {
+      if (b.balance !== a.balance) return b.balance - a.balance;
+      return a.display_name.localeCompare(b.display_name);
+    });
+  }, [people, openPeople, showZeroBalances]);
+
+  function openChargeAgreementPrint(chargeId: number) {
+    setError("");
+    const url = `/api/tool-loan-ledger/charges/${chargeId}/print-agreement`;
+    const w = window.open(url, "_blank");
+    if (w == null) {
+      setError("Pop-up blocked — allow pop-ups for this site, then try Print acknowledgment again.");
+      return;
+    }
+    try {
+      w.opener = null;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Direct office charge — no employee request / approval. */
+  async function addOfficeCharge(e: FormEvent) {
+    e.preventDefault();
+    if (!addEmployeeKey) {
+      setError("Select an employee.");
+      return;
+    }
+    if (!addReason.trim()) {
+      setError("Enter the reason for this charge (required for the acknowledgment form).");
+      return;
+    }
+    const amount = Number(addAmt);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Enter a positive amount.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const payload: Record<string, unknown> = {
+        amount,
+        charge_date: addDate,
+        reason: addReason.trim(),
+        charge_kind: addKind,
+      };
+      if (addEmployeeKey.startsWith("p:")) {
+        payload.person_id = Number(addEmployeeKey.slice(2));
+      } else if (addEmployeeKey.startsWith("u:")) {
+        payload.user_id = Number(addEmployeeKey.slice(2));
+      } else {
+        throw new Error("Select an employee from the list.");
+      }
+
+      const res = await api<{
+        id: number;
+        person_id: number;
+        display_name: string;
+        balance_after: number;
+        print_path?: string;
+      }>("/tool-loan-ledger/charges", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      setLastChargePrintId(res.id);
+      setAddReason("");
+      setAddAmt("");
+      setOk(
+        `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. Print the acknowledgment for their signature.`
+      );
+      setSelectedId(res.person_id);
+      await loadAll();
+      await loadDetail(res.person_id);
+      openChargeAgreementPrint(res.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Charge failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function addCharge(e: FormEvent) {
     e.preventDefault();
     if (!selectedId) return;
@@ -243,18 +358,21 @@ export function ToolLoanLedgerPage() {
     setError("");
     setOk("");
     try {
-      await api("/tool-loan-ledger/charges", {
+      const res = await api<{ id: number }>("/tool-loan-ledger/charges", {
         method: "POST",
         body: JSON.stringify({
           person_id: selectedId,
           description: chargeDesc.trim(),
+          reason: chargeDesc.trim(),
           charge_date: chargeDate,
           amount: Number(chargeAmt),
+          charge_kind: "other",
         }),
       });
       setChargeDesc("");
       setChargeAmt("");
-      setOk("Charge added.");
+      setLastChargePrintId(res.id);
+      setOk("Charge added. You can print the acknowledgment form.");
       await loadDetail(selectedId);
       await loadAll();
     } catch (err) {
@@ -827,6 +945,106 @@ export function ToolLoanLedgerPage() {
         </div>
       </section>
 
+      {/* ——— ADD LOAN CHARGE (no approval) ——— */}
+      <section className="card add-loan-charge-card no-print" id="add-loan-charge">
+        <h2>Add loan charge (no approval)</h2>
+        <p className="add-loan-charge-hint">
+          Use this for unapproved credit card charges or any amount that should go on an
+          employee&apos;s tool loan balance — including people who currently owe{" "}
+          <strong>$0</strong>. Does not use the employee request / approval flow. After save, a
+          signature form opens to print.
+        </p>
+        <form onSubmit={addOfficeCharge} className="add-loan-charge-form">
+          <label>
+            Employee
+            <select
+              required
+              value={addEmployeeKey}
+              onChange={(e) => setAddEmployeeKey(e.target.value)}
+            >
+              <option value="">Select employee…</option>
+              <optgroup label="On tool loan ledger (any balance)">
+                {[...pickerPeople]
+                  .filter((p) => p.status !== "former")
+                  .sort((a, b) => a.display_name.localeCompare(b.display_name))
+                  .map((p) => (
+                    <option key={`p-${p.person_id}`} value={`p:${p.person_id}`}>
+                      {p.display_name}
+                      {p.balance <= 0.009 ? " · $0 balance" : ` · owes ${money(p.balance)}`}
+                    </option>
+                  ))}
+              </optgroup>
+              {pickerUsers.length > 0 && (
+                <optgroup label="App users not yet on ledger">
+                  {pickerUsers.map((u) => (
+                    <option key={`u-${u.id}`} value={`u:${u.id}`}>
+                      {u.display_name} · new on ledger
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </label>
+          <label>
+            Type of charge
+            <select value={addKind} onChange={(e) => setAddKind(e.target.value)}>
+              <option value="unapproved_card">Unapproved credit card charge</option>
+              <option value="tool_purchase">Tool purchase / loan</option>
+              <option value="balance_adjustment">Balance adjustment</option>
+              <option value="other">Other charge</option>
+            </select>
+          </label>
+          <div className="add-loan-charge-row">
+            <label>
+              Date
+              <input
+                type="date"
+                required
+                value={addDate}
+                onChange={(e) => setAddDate(e.target.value)}
+              />
+            </label>
+            <label>
+              Amount ($)
+              <input
+                type="number"
+                required
+                min="0.01"
+                step="0.01"
+                value={addAmt}
+                onChange={(e) => setAddAmt(e.target.value)}
+                placeholder="0.00"
+              />
+            </label>
+          </div>
+          <label>
+            Reason (printed on acknowledgment form)
+            <textarea
+              required
+              rows={3}
+              value={addReason}
+              onChange={(e) => setAddReason(e.target.value)}
+              placeholder="e.g. Unapproved company card purchase at [store] on [date] — invoice #… — item description"
+            />
+          </label>
+          <div className="add-loan-charge-actions">
+            <button type="submit" className="btn primary" disabled={busy || loading}>
+              {busy ? "Saving…" : "Add charge & print acknowledgment"}
+            </button>
+            {lastChargePrintId != null && (
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy}
+                onClick={() => openChargeAgreementPrint(lastChargePrintId)}
+              >
+                Re-print last acknowledgment
+              </button>
+            )}
+          </div>
+        </form>
+      </section>
+
       <div
         className="tool-loan-ledger-grid no-print"
         style={{
@@ -836,7 +1054,19 @@ export function ToolLoanLedgerPage() {
         }}
       >
         <section className="card">
-          <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Balances (open)</h2>
+          <div className="balances-head">
+            <h2 style={{ marginTop: 0, fontSize: "1.1rem", marginBottom: 0 }}>
+              Balances {showZeroBalances ? "(all)" : "(open only)"}
+            </h2>
+            <label className="balances-toggle">
+              <input
+                type="checkbox"
+                checked={showZeroBalances}
+                onChange={(e) => setShowZeroBalances(e.target.checked)}
+              />
+              Show $0 balances
+            </label>
+          </div>
           <div className="table-wrap">
             <table className="data-table">
               <thead>
@@ -850,7 +1080,7 @@ export function ToolLoanLedgerPage() {
                 </tr>
               </thead>
               <tbody>
-                {openPeople.map((p) => (
+                {balancesList.map((p) => (
                   <tr
                     key={p.person_id}
                     className={selectedId === p.person_id ? "is-selected" : undefined}
@@ -866,7 +1096,7 @@ export function ToolLoanLedgerPage() {
                     <td>{money(p.total_charged)}</td>
                     <td>{money(p.total_paid)}</td>
                     <td>
-                      <strong className={p.balance > 0 ? "text-warn" : undefined}>
+                      <strong className={p.balance > 0.009 ? "text-warn" : undefined}>
                         {money(p.balance)}
                       </strong>
                     </td>
@@ -884,6 +1114,13 @@ export function ToolLoanLedgerPage() {
                     </td>
                   </tr>
                 ))}
+                {!loading && !balancesList.length && (
+                  <tr>
+                    <td colSpan={6} className="muted" style={{ textAlign: "center" }}>
+                      No employees on the ledger yet — use Add loan charge above.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -942,15 +1179,20 @@ export function ToolLoanLedgerPage() {
 
             <hr style={{ margin: "1.25rem 0", border: 0, borderTop: "1px solid var(--border, #ddd)" }} />
 
-            <h3 style={{ fontSize: "1rem" }}>Add charge (loan / purchase)</h3>
+            <h3 style={{ fontSize: "1rem" }}>Add charge for this person</h3>
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+              Or use{" "}
+              <a href="#add-loan-charge">Add loan charge (no approval)</a> above for the full form
+              + printed acknowledgment (best for unapproved card charges).
+            </p>
             <form onSubmit={addCharge} className="stack-form">
               <label>
-                Description
+                Reason / description
                 <input
                   required
                   value={chargeDesc}
                   onChange={(e) => setChargeDesc(e.target.value)}
-                  placeholder="Tool or Balance Carried Over"
+                  placeholder="What was charged and why"
                 />
               </label>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem" }}>
@@ -968,6 +1210,7 @@ export function ToolLoanLedgerPage() {
                   <input
                     type="number"
                     step="0.01"
+                    min="0.01"
                     required
                     value={chargeAmt}
                     onChange={(e) => setChargeAmt(e.target.value)}
@@ -1025,7 +1268,8 @@ export function ToolLoanLedgerPage() {
 
             <h3 style={{ fontSize: "1rem", marginTop: "1.5rem" }}>Charges</h3>
             <p className="muted" style={{ fontSize: "0.85rem" }}>
-              History is permanent — no void buttons (prevents accidents).
+              History is permanent — no void buttons (prevents accidents). Print an acknowledgment
+              anytime for employee signature.
             </p>
             <div className="table-wrap">
               <table className="data-table">
@@ -1033,7 +1277,8 @@ export function ToolLoanLedgerPage() {
                   <tr>
                     <th>Date</th>
                     <th>Description</th>
-                    <th>Amount</th>
+                    <th className="num">Amount</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1044,7 +1289,18 @@ export function ToolLoanLedgerPage() {
                         {c.description}
                         {c.voided ? " (voided)" : ""}
                       </td>
-                      <td>{money(Number(c.amount))}</td>
+                      <td className="num">{money(Number(c.amount))}</td>
+                      <td>
+                        {!c.voided && (
+                          <button
+                            type="button"
+                            className="btn secondary small"
+                            onClick={() => openChargeAgreementPrint(c.id)}
+                          >
+                            Print ack
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

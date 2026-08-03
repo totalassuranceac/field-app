@@ -495,6 +495,111 @@ export function registerToolLoanLedger(api: App): void {
     });
   });
 
+  /**
+   * People already on the ledger (any balance, including $0) plus active app users
+   * not yet linked — so office can add a charge without the employee request flow.
+   */
+  api.get("/tool-loan-ledger/employee-picker", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) return denied;
+    await ensureToolLoanLedgerTables(c.env.DB);
+    const people = await balancesForPeople(c.env.DB);
+    const users = await c.env.DB.prepare(
+      `SELECT id, display_name, role FROM users
+       WHERE IFNULL(active, 1) = 1
+       ORDER BY display_name COLLATE NOCASE`
+    ).all<{ id: number; display_name: string; role: string }>();
+    const linkedUserIds = new Set(
+      people.map((p) => p.user_id).filter((id): id is number => id != null)
+    );
+    const users_not_on_ledger = (users.results || []).filter((u) => !linkedUserIds.has(u.id));
+    return c.json({
+      people,
+      users_not_on_ledger,
+    });
+  });
+
+  /** Resolve or create a ledger person for a charge (supports $0-balance employees). */
+  async function ensureLedgerPerson(
+    db: D1Database,
+    actor: PublicUser,
+    opts: { person_id?: number; user_id?: number; display_name?: string }
+  ): Promise<{ person_id: number; display_name: string } | { error: string; status: number }> {
+    const personId = Number(opts.person_id) || 0;
+    if (personId) {
+      const row = await db
+        .prepare(`SELECT id, display_name FROM tool_loan_people WHERE id = ?`)
+        .bind(personId)
+        .first<{ id: number; display_name: string }>();
+      if (!row) return { error: "Employee not found on ledger", status: 404 };
+      return { person_id: row.id, display_name: row.display_name };
+    }
+
+    const userId = Number(opts.user_id) || 0;
+    if (userId) {
+      const existing = await db
+        .prepare(`SELECT id, display_name FROM tool_loan_people WHERE user_id = ?`)
+        .bind(userId)
+        .first<{ id: number; display_name: string }>();
+      if (existing) return { person_id: existing.id, display_name: existing.display_name };
+
+      const u = await db
+        .prepare(`SELECT id, display_name FROM users WHERE id = ?`)
+        .bind(userId)
+        .first<{ id: number; display_name: string }>();
+      if (!u) return { error: "User not found", status: 404 };
+
+      const ins = await db
+        .prepare(
+          `INSERT INTO tool_loan_people (user_id, display_name, weekly_deduction, status, notes)
+           VALUES (?, ?, NULL, 'active', NULL)`
+        )
+        .bind(u.id, u.display_name)
+        .run();
+      const newId = Number(ins.meta.last_row_id);
+      await writeAudit(db, actor, "create", "tool_loan_person", String(newId), u.display_name);
+      return { person_id: newId, display_name: u.display_name };
+    }
+
+    const name = (opts.display_name || "").trim();
+    if (name) {
+      const byName = await db
+        .prepare(
+          `SELECT id, display_name FROM tool_loan_people
+           WHERE lower(trim(display_name)) = lower(trim(?))
+           ORDER BY id LIMIT 1`
+        )
+        .bind(name)
+        .first<{ id: number; display_name: string }>();
+      if (byName) return { person_id: byName.id, display_name: byName.display_name };
+
+      const ins = await db
+        .prepare(
+          `INSERT INTO tool_loan_people (user_id, display_name, weekly_deduction, status, notes)
+           VALUES (NULL, ?, NULL, 'active', NULL)`
+        )
+        .bind(name)
+        .run();
+      const newId = Number(ins.meta.last_row_id);
+      await writeAudit(db, actor, "create", "tool_loan_person", String(newId), name);
+      return { person_id: newId, display_name: name };
+    }
+
+    return { error: "person_id, user_id, or display_name required", status: 400 };
+  }
+
+  const CHARGE_KIND_LABELS: Record<string, string> = {
+    unapproved_card: "Unapproved credit card charge",
+    tool_purchase: "Tool purchase / loan",
+    balance_adjustment: "Balance adjustment",
+    other: "Other charge",
+  };
+
+  /**
+   * Office adds a charge directly to the ledger (no employee request / approval).
+   * Works for people with $0 balance and can create a ledger person from an app user.
+   */
   api.post("/tool-loan-ledger/charges", async (c) => {
     const user = c.get("user");
     const denied = requireOffice(user);
@@ -502,33 +607,387 @@ export function registerToolLoanLedger(api: App): void {
     await ensureToolLoanLedgerTables(c.env.DB);
     const body = await c.req.json<{
       person_id?: number;
+      user_id?: number;
+      display_name?: string;
       description?: string;
+      reason?: string;
+      charge_kind?: string;
       charge_date?: string;
       amount?: number | string;
     }>();
-    const personId = Number(body.person_id);
+
     const amount = parseMoney(body.amount);
-    const date = parseDate(body.charge_date) || new Date().toISOString().slice(0, 10);
-    const desc = (body.description || "").trim();
-    if (!personId || !desc || amount == null) {
-      return c.json({ error: "person_id, description, and amount required" }, 400);
+    if (amount == null || amount <= 0) {
+      return c.json({ error: "Positive amount required" }, 400);
     }
+
+    const person = await ensureLedgerPerson(c.env.DB, user, {
+      person_id: body.person_id,
+      user_id: body.user_id,
+      display_name: body.display_name,
+    });
+    if ("error" in person) {
+      return c.json({ error: person.error }, person.status as 400);
+    }
+
+    const reason = (body.reason || body.description || "").trim();
+    if (!reason) {
+      return c.json({ error: "Reason / description is required" }, 400);
+    }
+
+    const kindKey = (body.charge_kind || "").trim();
+    const kindLabel = CHARGE_KIND_LABELS[kindKey] || (kindKey ? kindKey : "");
+    const desc = kindLabel ? `${kindLabel}: ${reason}` : reason;
+    const date = parseDate(body.charge_date) || new Date().toISOString().slice(0, 10);
+
+    const before = (await balancesForPeople(c.env.DB, [person.person_id]))[0];
+    const balanceBefore = before?.balance ?? 0;
+
     const r = await c.env.DB.prepare(
       `INSERT INTO tool_loan_charges
          (person_id, description, charge_date, amount, source, created_by_user_id)
        VALUES (?, ?, ?, ?, 'manual', ?)`
     )
-      .bind(personId, desc, date, amount, user.id)
+      .bind(person.person_id, desc, date, amount, user.id)
       .run();
+    const chargeId = Number(r.meta.last_row_id);
+
     await writeAudit(
       c.env.DB,
       user,
       "create",
       "tool_loan_charge",
-      String(r.meta.last_row_id),
-      `${desc} $${amount}`
+      String(chargeId),
+      `${person.display_name}: ${desc} $${amount}`
     );
-    return c.json({ id: Number(r.meta.last_row_id), ok: true });
+
+    const balanceAfter = Math.round((balanceBefore + amount) * 100) / 100;
+    const weeklyAfter = policyWeeklyDeduction(balanceAfter);
+
+    return c.json({
+      id: chargeId,
+      ok: true,
+      person_id: person.person_id,
+      display_name: person.display_name,
+      description: desc,
+      amount,
+      charge_date: date,
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+      weekly_after: weeklyAfter,
+      print_path: `/api/tool-loan-ledger/charges/${chargeId}/print-agreement`,
+    });
+  });
+
+  /** Printable acknowledgment form for employee signature (charge already on ledger). */
+  api.get("/tool-loan-ledger/charges/:id/print-agreement", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) {
+      return c.html(
+        `<!DOCTYPE html><html><body><p>Office or admin only.</p></body></html>`,
+        403
+      );
+    }
+    await ensureToolLoanLedgerTables(c.env.DB);
+    const id = Number(c.req.param("id"));
+    if (!id) {
+      return c.html(`<!DOCTYPE html><html><body><p>Invalid charge.</p></body></html>`, 400);
+    }
+
+    const charge = await c.env.DB.prepare(
+      `SELECT c.id, c.person_id, c.description, c.charge_date, c.amount, c.created_at,
+              p.display_name, p.weekly_deduction
+       FROM tool_loan_charges c
+       JOIN tool_loan_people p ON p.id = c.person_id
+       WHERE c.id = ? AND IFNULL(c.voided, 0) = 0`
+    )
+      .bind(id)
+      .first<{
+        id: number;
+        person_id: number;
+        description: string;
+        charge_date: string;
+        amount: number;
+        created_at: string;
+        display_name: string;
+        weekly_deduction: number | null;
+      }>();
+
+    if (!charge) {
+      return c.html(`<!DOCTYPE html><html><body><p>Charge not found.</p></body></html>`, 404);
+    }
+
+    const summary = (await balancesForPeople(c.env.DB, [charge.person_id]))[0];
+    const balanceNow = summary?.balance ?? Number(charge.amount);
+    const amount = Number(charge.amount) || 0;
+    const balanceBefore = Math.round((balanceNow - amount) * 100) / 100;
+    const weekly =
+      summary?.suggested_weekly ??
+      policyWeeklyDeduction(balanceNow);
+
+    const money = (n: number) =>
+      n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+    const esc = (s: string) =>
+      String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    const origin = new URL(c.req.url).origin;
+    const logoUrl = `${origin}/logo-print.jpg`;
+    const chargeDate = (charge.charge_date || "").slice(0, 10);
+    const prepared = new Date().toLocaleString("en-US", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Tool Loan Acknowledgment — ${esc(charge.display_name)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      color: #0f172a;
+      margin: 0.55in 0.65in;
+      font-size: 13px;
+      line-height: 1.45;
+      background: #fff;
+    }
+    .noprint { margin: 0 0 14px; }
+    .noprint button {
+      font: inherit;
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: none;
+      background: #0c1f4a;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .head {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+      padding-bottom: 0.85rem;
+      margin-bottom: 1rem;
+      border-bottom: 3px solid #0c1f4a;
+    }
+    .logo {
+      height: 52px;
+      width: auto;
+      max-width: min(300px, 100%);
+      object-fit: contain;
+      display: block;
+      margin-bottom: 0.35rem;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      color: #0c1f4a;
+      letter-spacing: -0.02em;
+    }
+    .meta {
+      font-size: 11px;
+      text-align: right;
+      color: #475569;
+    }
+    .meta strong { color: #0f172a; display: block; font-size: 12px; }
+    .box {
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 0.85rem;
+      background: #f8fafc;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem 1.25rem;
+    }
+    .label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #64748b;
+    }
+    .value {
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+      margin-top: 2px;
+    }
+    .reason {
+      margin-top: 0.65rem;
+      padding-top: 0.65rem;
+      border-top: 1px dashed #cbd5e1;
+    }
+    .reason .value {
+      font-weight: 600;
+      white-space: pre-wrap;
+      line-height: 1.4;
+    }
+    .amounts {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.55rem;
+      margin-bottom: 0.85rem;
+    }
+    .amt {
+      border: 1px solid #d5dee8;
+      border-radius: 8px;
+      padding: 0.65rem 0.75rem;
+      background: #fff;
+    }
+    .amt.accent {
+      background: #fff5f5;
+      border-color: #f5c2c2;
+    }
+    .amt .value { font-size: 1.15rem; }
+    .amt.accent .value { color: #b91c1c; }
+    .terms {
+      font-size: 12px;
+      color: #334155;
+      margin: 0 0 1.1rem;
+    }
+    .terms li { margin: 0.25rem 0; }
+    .sign {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem 2rem;
+      margin-top: 1.25rem;
+    }
+    .sign-block {
+      border-top: 1px solid #94a3b8;
+      padding-top: 0.45rem;
+      min-height: 4.5rem;
+    }
+    .sign-block .line {
+      margin-top: 1.6rem;
+      border-bottom: 1px solid #0f172a;
+      height: 1.4rem;
+    }
+    .sign-block .cap {
+      margin-top: 0.35rem;
+      font-size: 10px;
+      color: #64748b;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .foot {
+      margin-top: 1.25rem;
+      padding-top: 0.65rem;
+      border-top: 1px solid #cbd5e1;
+      font-size: 10px;
+      color: #64748b;
+    }
+    @media print {
+      .noprint { display: none !important; }
+      body { margin: 0.45in 0.55in; }
+      .box, .amt, .amt.accent {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+    }
+    @page { margin: 0.45in; size: letter; }
+  </style>
+</head>
+<body>
+  <div class="noprint"><button type="button" onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="head">
+    <div>
+      <img class="logo" src="${esc(logoUrl)}" alt="Total Assurance A/C &amp; Heating"
+        onerror="this.onerror=null;this.src='${esc(origin)}/logo-light.png'" />
+      <h1>Tool Loan Charge Acknowledgment</h1>
+    </div>
+    <div class="meta">
+      <span>Prepared</span>
+      <strong>${esc(prepared)}</strong>
+      <span style="display:block;margin-top:0.45rem">By</span>
+      <strong>${esc(user.display_name || "Office")}</strong>
+      <span style="display:block;margin-top:0.45rem">Charge #</span>
+      <strong>${charge.id}</strong>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="grid">
+      <div>
+        <div class="label">Employee</div>
+        <div class="value">${esc(charge.display_name)}</div>
+      </div>
+      <div>
+        <div class="label">Charge date</div>
+        <div class="value">${esc(chargeDate)}</div>
+      </div>
+    </div>
+    <div class="reason">
+      <div class="label">Reason / description</div>
+      <div class="value">${esc(charge.description)}</div>
+    </div>
+  </div>
+
+  <div class="amounts">
+    <div class="amt">
+      <div class="label">Balance before</div>
+      <div class="value">${money(balanceBefore)}</div>
+    </div>
+    <div class="amt accent">
+      <div class="label">This charge</div>
+      <div class="value">+${money(amount)}</div>
+    </div>
+    <div class="amt">
+      <div class="label">New balance</div>
+      <div class="value">${money(balanceNow)}</div>
+    </div>
+  </div>
+
+  <p class="terms"><strong>Estimated weekly payroll deduction after this charge:</strong> ${money(weekly)}
+    (company policy: 10% of remaining balance, minimum $50/week, not more than remaining balance — office may set a different weekly amount).</p>
+
+  <ul class="terms">
+    <li>This amount is added to my company <strong>tool loan balance</strong> and is repaid through weekly payroll deductions until paid in full.</li>
+    <li>I understand this charge was recorded by the office (it does not require a separate in-app loan request).</li>
+    <li>On termination, any remaining balance may be deducted from final pay / PTO / other compensation per company policy; any remainder remains due.</li>
+  </ul>
+
+  <p class="terms"><strong>Employee acknowledgment:</strong> I have read this form and acknowledge the charge and the increase to my tool loan balance as shown above.</p>
+
+  <div class="sign">
+    <div class="sign-block">
+      <div class="line"></div>
+      <div class="cap">Employee signature</div>
+      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="cap">Printed name</div>
+      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="cap">Date</div>
+    </div>
+    <div class="sign-block">
+      <div class="line"></div>
+      <div class="cap">Office / supervisor signature</div>
+      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="cap">Printed name</div>
+      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="cap">Date</div>
+    </div>
+  </div>
+
+  <p class="foot">Total Assurance A/C &amp; Heating · Confidential employee file · Tool loan charge #${charge.id} · Keep signed copy with employee records.</p>
+  <script>
+    window.addEventListener("load", function () {
+      setTimeout(function () { window.focus(); window.print(); }, 450);
+    });
+  </script>
+</body>
+</html>`;
+    return c.html(html);
   });
 
   api.post("/tool-loan-ledger/payments", async (c) => {

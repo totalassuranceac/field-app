@@ -10341,6 +10341,82 @@ tr.row-low td {
   font-weight: 750;
   min-height: 2.15rem;
 }
+.add-loan-charge-card {
+  margin-bottom: 1rem;
+  border: 1px solid color-mix(in srgb, #b45309 45%, var(--border, #334155));
+  border-radius: 12px;
+  padding: 0.85rem 0.95rem 1rem;
+}
+.add-loan-charge-card h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  font-weight: 750;
+  color: var(--text, #f8fafc);
+}
+.add-loan-charge-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--muted, #94a3b8);
+}
+.add-loan-charge-form {
+  display: grid;
+  gap: 0.55rem;
+}
+.add-loan-charge-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  font-weight: 650;
+  font-size: 0.82rem;
+}
+.add-loan-charge-form select,
+.add-loan-charge-form input,
+.add-loan-charge-form textarea {
+  font: inherit;
+  font-weight: 500;
+  font-size: 0.9rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, #334155);
+  background: color-mix(in srgb, #fff 6%, var(--card, #0b1220));
+  color: var(--text, #f8fafc);
+}
+.add-loan-charge-form textarea {
+  resize: vertical;
+  min-height: 4.25rem;
+  line-height: 1.35;
+}
+.add-loan-charge-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.55rem;
+}
+.add-loan-charge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.25rem;
+}
+.balances-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+}
+.balances-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  cursor: pointer;
+  user-select: none;
+}
 .person-default-weekly {
   display: flex;
   flex-wrap: wrap;
