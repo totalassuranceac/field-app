@@ -125,7 +125,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const canNotNeeded =
     canResolve || user?.role === "driver" || user?.role === "mechanic";
 
-  const [filter, setFilter] = useState<"open" | "all">("open");
+  const [filter, setFilter] = useState<"open" | "history" | "all">("open");
   const [groups, setGroups] = useState<VendorGroup[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [waiting, setWaiting] = useState(0);
@@ -173,7 +173,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       vendor_names?: string[];
       waiting: number;
       error?: string;
-    }>(`/inventory/part-pickups?status=${filter === "open" ? "open" : "all"}`);
+    }>(
+      `/inventory/part-pickups?status=${
+        filter === "open" ? "open" : filter === "history" ? "history" : "all"
+      }`
+    );
     setGroups(d.vendors || []);
     setTickets(d.tickets || []);
     if (d.vendor_names?.length) setVendorNames(d.vendor_names);
@@ -473,18 +477,31 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               status: ticketStatus,
             };
           });
-          // On "open" filter, drop finished tickets so the list matches reality
+          // Open list keeps any ticket that still has lines needing pickup
           const keep =
             filter === "all"
               ? tickets
-              : tickets.filter((t) => t.status === "open" || t.status === "partial");
+              : filter === "history"
+                ? tickets.filter(
+                    (t) =>
+                      (t.status === "done" || t.status === "cancelled") &&
+                      !(t.lines || []).some((l) => openish(l.status))
+                  )
+                : tickets.filter(
+                    (t) =>
+                      t.status === "open" ||
+                      t.status === "partial" ||
+                      (t.lines || []).some((l) => openish(l.status))
+                  );
           const waiting = keep.reduce(
             (s, t) => s + (t.lines || []).filter((l) => openish(l.status)).length,
             0
           );
           return { ...g, tickets: keep, waiting };
         })
-        .filter((g) => (filter === "open" ? g.tickets.length > 0 : true))
+        .filter((g) =>
+          filter === "open" || filter === "history" ? g.tickets.length > 0 : true
+        )
     );
 
     setWaiting((w) => {
@@ -556,9 +573,10 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           <div>
             <h2 style={{ margin: 0 }}>Part pickup request</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
-              Parts ready at a store (Gemaire, Johnstone, etc.)? Tell warehouse which store, what
-              the part is, and where it needs to go. Only you can edit your request; warehouse marks
-              it picked up.
+              Parts at a store? Log the vendor, part, and job address. Items{" "}
+              <strong>stay on Waiting</strong> until warehouse marks <strong>Picked</strong> or{" "}
+              <strong>Not needed</strong> — they do not clear on their own. Future ready dates stay
+              listed (with an Arrives badge) but stay off the driver&apos;s today run.
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -571,6 +589,17 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               <span className={`vendor-waiting-count${waiting > 0 ? " is-hot" : ""}`}>
                 {waiting}
               </span>
+            </button>
+            <button
+              type="button"
+              className={`btn ghost btn-sm${filter === "history" ? " primary" : ""}`}
+              onClick={() => {
+                setFilter("history");
+                setShowForm(false);
+              }}
+              title="Picked up or not needed — find something to put back on the list"
+            >
+              Picked / done
             </button>
             <button
               type="button"
@@ -745,7 +774,16 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                   type="button"
                                   className="btn btn-sm"
                                   disabled={resolvingId === l.lineId || busy}
-                                  onClick={() => void resolveLine(l.lineId!, "picked")}
+                                  onClick={() => {
+                                    if (
+                                      !window.confirm(
+                                        `Mark “${l.name}” picked up?\n\nIt leaves Waiting. Use Picked / done → Put back if this was a mistake.`
+                                      )
+                                    ) {
+                                      return;
+                                    }
+                                    void resolveLine(l.lineId!, "picked");
+                                  }}
                                 >
                                   {resolvingId === l.lineId ? "Saving…" : "Picked up"}
                                 </button>
@@ -909,7 +947,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           <div className="card muted">
             {filter === "open"
               ? "Nothing waiting for pickup. Use New pickup request — set Ready to pick on a future day if it is still arriving."
-              : "No recent pickup requests."}
+              : filter === "history"
+                ? "No picked / done requests in recent history. Use this tab to find something marked picked by mistake and put it back."
+                : "No recent pickup requests."}
           </div>
         )}
 
@@ -1176,7 +1216,16 @@ function TicketCard({
                             type="button"
                             className="btn btn-sm"
                             disabled={busy || resolvingId === line.id}
-                            onClick={() => void onResolve(line.id, "picked")}
+                            onClick={() => {
+                              if (
+                                !window.confirm(
+                                  `Mark “${label}” as picked up?\n\nIt will leave the Waiting list. You can put it back later from Picked / done if this was a mistake.`
+                                )
+                              ) {
+                                return;
+                              }
+                              void onResolve(line.id, "picked");
+                            }}
                           >
                             {resolvingId === line.id ? "Saving…" : "Picked"}
                           </button>
@@ -1228,6 +1277,28 @@ function TicketCard({
                           Not needed
                         </button>
                       )}
+                    </div>
+                  )}
+                  {locked && canResolve && (
+                    <div className="pp-line-actions">
+                      <button
+                        type="button"
+                        className="btn secondary btn-sm"
+                        disabled={busy || resolvingId === line.id}
+                        title="Put this back on the Waiting list if it was closed by mistake"
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              `Put “${label}” back on the Waiting list?\n\nUse this if it was marked picked or not needed by mistake and still needs pickup.`
+                            )
+                          ) {
+                            return;
+                          }
+                          void onResolve(line.id, "pending");
+                        }}
+                      >
+                        {resolvingId === line.id ? "Saving…" : "Put back on Waiting list"}
+                      </button>
                     </div>
                   )}
                 </li>

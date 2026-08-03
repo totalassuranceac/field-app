@@ -9221,9 +9221,24 @@ api.get("/inventory/part-pickups", async (c) => {
        FROM part_pickup_tickets t
        LEFT JOIN users u ON u.id = t.logged_by_user_id`;
     if (status === "open" || status === "waiting") {
-      sql += ` WHERE t.status IN ('open','partial')`;
-    } else if (status === "done") {
-      sql += ` WHERE t.status IN ('done','cancelled')`;
+      // Anything still needing pickup stays listed — even if ticket status is out of date.
+      // Items leave only when every line is picked or not needed (no open lines left).
+      sql += ` WHERE (
+        t.status IN ('open','partial')
+        OR EXISTS (
+          SELECT 1 FROM part_pickup_ticket_lines l
+          WHERE l.ticket_id = t.id
+            AND l.status IN ('pending','not_ready','partial')
+        )
+      )`;
+    } else if (status === "done" || status === "history") {
+      // Fully resolved only (no remaining open lines)
+      sql += ` WHERE t.status IN ('done','cancelled')
+        AND NOT EXISTS (
+          SELECT 1 FROM part_pickup_ticket_lines l
+          WHERE l.ticket_id = t.id
+            AND l.status IN ('pending','not_ready','partial')
+        )`;
     } else if (status !== "all") {
       sql += ` WHERE t.status = ?`;
     }
