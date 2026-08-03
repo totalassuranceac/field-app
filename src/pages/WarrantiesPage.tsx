@@ -16,6 +16,7 @@ import {
  * Flow:
  * Dropped off → Claim submitted → (optional) Return to vendor [→ Delivered]
  * → Approved | Rejected (credit decision only — closes the log)
+ * OR → Not a warranty — sent to job (closes when it was never a warranty claim)
  * Return to vendor is an OPEN status, never the same as rejected.
  */
 type WStatus =
@@ -24,7 +25,8 @@ type WStatus =
   | "return_to_vendor"
   | "delivered"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "not_warranty";
 
 interface Warranty {
   id: number;
@@ -61,9 +63,11 @@ const STATUS_LABEL: Record<string, string> = {
   delivered: "Delivered",
   approved: "Approved",
   rejected: "Rejected",
+  not_warranty: "Not warranty · job",
   // legacy
   processed: "Approved",
   cancelled: "Rejected",
+  sent_to_job: "Not warranty · job",
 };
 
 const OPEN_STATUSES: WStatus[] = [
@@ -77,12 +81,21 @@ function normalizeStatus(s: string): WStatus {
   if (s === "processed") return "approved";
   if (s === "cancelled") return "rejected";
   if (
+    s === "not_a_warranty" ||
+    s === "sent_to_job" ||
+    s === "repurposed" ||
+    s === "used_on_job"
+  ) {
+    return "not_warranty";
+  }
+  if (
     s === "dropped_off" ||
     s === "claim_submitted" ||
     s === "return_to_vendor" ||
     s === "delivered" ||
     s === "approved" ||
-    s === "rejected"
+    s === "rejected" ||
+    s === "not_warranty"
   ) {
     return s;
   }
@@ -402,6 +415,35 @@ export function WarrantiesPage() {
     }
   }
 
+  /**
+   * Close when the part was never a warranty claim (e.g. going out to another job).
+   * Asks for a short note so the log shows where it went / why.
+   */
+  async function markNotWarranty(w: Warranty) {
+    const note = window.prompt(
+      `${w.log_number} — not a warranty.\n\nWhere is the part going, or why is it not a warranty?\n(e.g. "Sent to job at 123 Main for unit 42" or "Stock — used on service call")`,
+      w.notes?.trim() || ""
+    );
+    if (note === null) return;
+    const reason = note.trim();
+    if (
+      !window.confirm(
+        `Close ${w.log_number} as Not a warranty — sent to job?\n\n${
+          reason || "(no extra note)"
+        }\n\nThis removes it from open warranties. It is not Approved or Rejected.`
+      )
+    ) {
+      return;
+    }
+    const prior = (w.notes || "").trim();
+    const tag = "Not a warranty — sent to job";
+    let notesOut = reason ? `${tag}: ${reason}` : tag;
+    if (prior && !prior.toLowerCase().includes("not a warranty")) {
+      notesOut = `${prior}\n${notesOut}`;
+    }
+    await setStatus(w.id, "not_warranty", { notes: notesOut });
+  }
+
   async function saveVendorDetails(w: Warranty) {
     const d = draftFor(w);
     setBusy(true);
@@ -431,7 +473,9 @@ export function WarrantiesPage() {
           <h1>Warranties</h1>
           <p>
             Drop off warranty parts with a photo of where you left them · you get a log number to{" "}
-            <strong>write on the box</strong> · track claims · return to vendor when needed.
+            <strong>write on the box</strong> · track claims · return to vendor when needed · if it
+            wasn&apos;t a warranty, mark <strong>Not a warranty — send to job</strong> so it leaves
+            the open list.
           </p>
         </div>
       </div>
@@ -656,7 +700,7 @@ export function WarrantiesPage() {
             ["open", "Open"],
             ["vendor", "Waiting on vendor"],
             ["all", "All"],
-            ["decided", "Approved / rejected"],
+            ["decided", "Closed"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -689,13 +733,15 @@ export function WarrantiesPage() {
           const tone =
             st === "approved"
               ? "done"
-              : st === "rejected"
-                ? "urgent"
-                : w.urgent
+              : st === "not_warranty"
+                ? "done"
+                : st === "rejected"
                   ? "urgent"
-                  : w.overdue
-                    ? "overdue"
-                    : undefined;
+                  : w.urgent
+                    ? "urgent"
+                    : w.overdue
+                      ? "overdue"
+                      : undefined;
           return (
             <LogItem
               key={w.id}
@@ -768,7 +814,15 @@ export function WarrantiesPage() {
                 Dropped off {w.dropped_off_at?.replace("T", " ").slice(0, 16)}
                 {w.dropped_off_by_name ? ` by ${w.dropped_off_by_name}` : ""}
                 {w.processed_at
-                  ? ` · ${st === "rejected" ? "rejected" : st === "approved" ? "approved" : "closed"} ${w.processed_at.replace("T", " ").slice(0, 16)}`
+                  ? ` · ${
+                      st === "rejected"
+                        ? "rejected"
+                        : st === "approved"
+                          ? "approved"
+                          : st === "not_warranty"
+                            ? "not warranty"
+                            : "closed"
+                    } ${w.processed_at.replace("T", " ").slice(0, 16)}`
                   : ""}
                 {w.processed_by_name ? ` by ${w.processed_by_name}` : ""}
               </div>
@@ -889,6 +943,16 @@ export function WarrantiesPage() {
                       </button>
                     </>
                   )}
+                  {/* Not a warranty claim — part going to another job / stock use */}
+                  <button
+                    type="button"
+                    className="btn ghost warranty-not-warranty-btn"
+                    disabled={busy}
+                    title="Close this log: not a warranty claim; part used on another job or elsewhere"
+                    onClick={() => void markNotWarranty(w)}
+                  >
+                    Not a warranty — send to job
+                  </button>
                 </div>
               )}
             </LogItem>

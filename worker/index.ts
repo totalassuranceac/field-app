@@ -4787,7 +4787,7 @@ api.get("/warranties", async (c) => {
       } else if (status === "vendor" || status === "vendor_waiting" || status === "waiting_vendor") {
         sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
       } else if (status === "decided" || status === "closed") {
-        sql += ` WHERE w.status IN ('approved','rejected')`;
+        sql += ` WHERE w.status IN ('approved','rejected','not_warranty')`;
       } else if (status) {
         const mapped =
           status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
@@ -4829,7 +4829,8 @@ api.get("/warranties", async (c) => {
         WHEN 'delivered' THEN 3
         WHEN 'approved' THEN 4
         WHEN 'rejected' THEN 5
-        ELSE 6
+        WHEN 'not_warranty' THEN 6
+        ELSE 7
       END,
       w.dropped_off_at ASC
       LIMIT 200`;
@@ -5221,6 +5222,15 @@ api.patch("/warranties/:id", async (c) => {
     let next = body.status;
     if (next === "processed") next = "approved";
     if (next === "cancelled") next = "rejected";
+    // Aliases for "not really a warranty / part going to another job"
+    if (
+      next === "not_a_warranty" ||
+      next === "sent_to_job" ||
+      next === "repurposed" ||
+      next === "used_on_job"
+    ) {
+      next = "not_warranty";
+    }
     const allowed = [
       "dropped_off",
       "claim_submitted",
@@ -5228,6 +5238,7 @@ api.patch("/warranties/:id", async (c) => {
       "delivered",
       "approved",
       "rejected",
+      "not_warranty",
     ];
     if (!allowed.includes(next)) return c.json({ error: "Invalid status" }, 400);
     newStatus = next;
@@ -5241,8 +5252,8 @@ api.patch("/warranties/:id", async (c) => {
       sets.push("shipped_by_user_id = COALESCE(shipped_by_user_id, ?)");
       vals.push(user.id);
     }
-    // Credit decision closes the claim — only then set processed_at
-    if (next === "approved" || next === "rejected") {
+    // Closing outcomes — set processed_at so it leaves open / aging lists
+    if (next === "approved" || next === "rejected" || next === "not_warranty") {
       sets.push("processed_at = datetime('now')");
       sets.push("processed_by_user_id = ?");
       vals.push(user.id);
@@ -5297,6 +5308,16 @@ api.patch("/warranties/:id", async (c) => {
       "warranty_rejected",
       `Warranty ${before.log_number} rejected`,
       `${before.part_name} claim was rejected.`,
+      { type: "warranty", id }
+    );
+  }
+  if (newStatus === "not_warranty" && before.dropped_off_by_user_id) {
+    await notifyUsers(
+      c.env.DB,
+      [before.dropped_off_by_user_id],
+      "warranty_not_warranty",
+      `${before.log_number} not a warranty`,
+      `${before.part_name} was marked not a warranty (part used on another job / not claimed).`,
       { type: "warranty", id }
     );
   }

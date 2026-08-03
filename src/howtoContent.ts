@@ -377,6 +377,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Section 1 is always the equipment unit; section 2 is the part on the box — don’t mix them up.",
       "Do not skip the number on the box — warehouse matches it to your drop-off photo.",
       "When you fix a wrong model/serial from a nameplate scan, the app learns for next time.",
+      "Warehouse: if a drop-off was never a warranty (part going to another job), use Not a warranty — send to job. That closes the log without Approved/Rejected.",
     ],
   },
   {

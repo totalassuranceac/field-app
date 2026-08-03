@@ -7688,6 +7688,11 @@ tr.row-low td {
   color: #fca5a5 !important;
 }
 
+.warranty-status-not_warranty {
+  background: color-mix(in srgb, #64748b 28%, var(--surface)) !important;
+  color: #e2e8f0 !important;
+}
+
 .warranty-status-claim_submitted {
   background: color-mix(in srgb, #3b82f6 20%, var(--surface)) !important;
 }
@@ -7704,6 +7709,10 @@ tr.row-low td {
 
 .warranty-status-dropped_off {
   background: color-mix(in srgb, #eab308 18%, var(--surface)) !important;
+}
+
+.warranty-not-warranty-btn {
+  font-size: 0.85rem;
 }
 
 .pickup-scan-actions {
