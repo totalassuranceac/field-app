@@ -10106,6 +10106,112 @@ tr.row-low td {
 }
 
 /* Tool loan ledger + owner payroll report */
+.weekly-payroll-entry {
+  margin-bottom: 1.25rem;
+  border: 2px solid #1d4ed8;
+  box-shadow: 0 6px 20px rgba(29, 78, 216, 0.08);
+}
+.weekly-payroll-entry h2 {
+  color: #0c1f4a;
+}
+.weekly-payroll-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: flex-end;
+  margin: 0.75rem 0 0.5rem;
+}
+.weekly-payroll-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+.weekly-payroll-toolbar-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.weekly-include-col {
+  width: 2.75rem;
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+.weekly-include-col input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
+  cursor: pointer;
+  accent-color: #1d4ed8;
+}
+.weekly-include-all {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  margin: 0 !important;
+  font-weight: 600;
+}
+.weekly-row-skipped {
+  opacity: 0.55;
+  background: #f1f5f9;
+}
+.weekly-row-skipped .weekly-deduct-input {
+  border-color: #cbd5e1 !important;
+  background: #e2e8f0 !important;
+}
+.weekly-skip-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.weekly-payroll-table .weekly-deduct-input {
+  width: 7.5rem;
+  max-width: 100%;
+  text-align: right;
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 0.4rem 0.5rem;
+  border: 2px solid #93c5fd;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.weekly-payroll-table .weekly-deduct-input:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+  border-color: #2563eb;
+}
+.weekly-payroll-table .weekly-deduct-input:disabled {
+  cursor: not-allowed;
+}
+.weekly-payroll-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem 1.25rem;
+  align-items: center;
+  margin-top: 1rem;
+}
+.weekly-bulk-btn {
+  font-size: 1rem;
+  padding: 0.7rem 1.15rem;
+  font-weight: 700;
+}
+.person-default-weekly {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+}
+.person-default-weekly label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
 .tool-loan-ledger .table-wrap {
   overflow-x: auto;
   margin-top: 0.75rem;

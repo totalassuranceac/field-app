@@ -112,6 +112,56 @@ export function ToolLoanLedgerPage() {
   const [weeklyEdit, setWeeklyEdit] = useState("");
   const [report, setReport] = useState<OwnerReport | null>(null);
 
+  /** Payroll week: bulk deduct everyone checked, with optional amount overrides. */
+  const [payrollWeekDate, setPayrollWeekDate] = useState(() =>
+    new Date().toISOString().slice(0, 10)
+  );
+  const [weekDeductAmounts, setWeekDeductAmounts] = useState<Record<number, string>>(
+    {}
+  );
+  /** When false, that person is skipped by the bulk button. */
+  const [weekInclude, setWeekInclude] = useState<Record<number, boolean>>({});
+
+  function suggestedWeekAmount(p: PersonSummary): number {
+    const raw =
+      p.weekly_this_week ??
+      p.suggested_weekly ??
+      (p.balance > 0
+        ? Math.min(p.balance, Math.max(50, Math.round(p.balance * 0.1 * 100) / 100))
+        : 0);
+    return Math.round(Math.min(Math.max(raw, 0), Math.max(p.balance, 0)) * 100) / 100;
+  }
+
+  function seedWeekAmounts(list: PersonSummary[]) {
+    setWeekDeductAmounts((prev) => {
+      const next: Record<number, string> = { ...prev };
+      for (const p of list) {
+        if (p.balance <= 0.009 || p.status === "former") {
+          delete next[p.person_id];
+          continue;
+        }
+        // Only seed people we have never shown yet (undefined).
+        // Keep prior edits / post-save blanks so we don't risk double-post.
+        if (prev[p.person_id] !== undefined) continue;
+        const amt = suggestedWeekAmount(p);
+        next[p.person_id] = amt > 0 ? amt.toFixed(2) : "";
+      }
+      return next;
+    });
+    setWeekInclude((prev) => {
+      const next: Record<number, boolean> = { ...prev };
+      for (const p of list) {
+        if (p.balance <= 0.009 || p.status === "former") {
+          delete next[p.person_id];
+          continue;
+        }
+        // New people default to included; keep user's unchecks
+        if (prev[p.person_id] === undefined) next[p.person_id] = true;
+      }
+      return next;
+    });
+  }
+
   const loadAll = useCallback(async () => {
     setError("");
     setLoading(true);
@@ -139,10 +189,12 @@ export function ToolLoanLedgerPage() {
       ]);
 
       if (summary.error) throw new Error(summary.error);
-      setPeople(summary.people || []);
+      const list = summary.people || [];
+      setPeople(list);
       setOpenCount(summary.open_count || 0);
       setTotalOwed(summary.total_owed || 0);
       setReport(owner);
+      seedWeekAmounts(list);
       setOk("");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Could not load ledger";
@@ -253,11 +305,135 @@ export function ToolLoanLedgerPage() {
           weekly_deduction: v != null && Number.isFinite(v) ? v : null,
         }),
       });
-      setOk("Weekly deduction saved.");
+      setOk("Default weekly amount saved (used on the owner report).");
       await loadDetail(selectedId);
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const payrollCandidates = useMemo(
+    () => people.filter((p) => p.status !== "former" && p.balance > 0.009),
+    [people]
+  );
+
+  const weekPayrollPreview = useMemo(() => {
+    let count = 0;
+    let total = 0;
+    let skipped = 0;
+    for (const p of payrollCandidates) {
+      if (weekInclude[p.person_id] === false) {
+        skipped += 1;
+        continue;
+      }
+      const n = Number(weekDeductAmounts[p.person_id]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      count += 1;
+      total += Math.min(n, p.balance);
+    }
+    return { count, total: Math.round(total * 100) / 100, skipped };
+  }, [payrollCandidates, weekDeductAmounts, weekInclude]);
+
+  const allChecked =
+    payrollCandidates.length > 0 &&
+    payrollCandidates.every((p) => weekInclude[p.person_id] !== false);
+
+  function setPersonWeekAmount(personId: number, value: string) {
+    setWeekDeductAmounts((prev) => ({ ...prev, [personId]: value }));
+  }
+
+  function setPersonIncluded(personId: number, included: boolean) {
+    setWeekInclude((prev) => ({ ...prev, [personId]: included }));
+  }
+
+  function setAllIncluded(included: boolean) {
+    const next: Record<number, boolean> = {};
+    for (const p of payrollCandidates) next[p.person_id] = included;
+    setWeekInclude(next);
+  }
+
+  function fillSuggestedAmounts() {
+    const nextAmt: Record<number, string> = {};
+    const nextInc: Record<number, boolean> = {};
+    for (const p of payrollCandidates) {
+      const amt = suggestedWeekAmount(p);
+      nextAmt[p.person_id] = amt > 0 ? amt.toFixed(2) : "";
+      nextInc[p.person_id] = true;
+    }
+    setWeekDeductAmounts(nextAmt);
+    setWeekInclude(nextInc);
+  }
+
+  function clearWeekAmounts() {
+    const next: Record<number, string> = {};
+    for (const p of payrollCandidates) next[p.person_id] = "";
+    setWeekDeductAmounts(next);
+  }
+
+  /**
+   * One-click bulk: records payroll payments for every checked person
+   * using their amount (suggested by default, editable per row).
+   */
+  async function recordWeeklyPayroll() {
+    const lines: { person_id: number; name: string; amount: number }[] = [];
+    for (const p of payrollCandidates) {
+      if (weekInclude[p.person_id] === false) continue;
+      const n = Number(weekDeductAmounts[p.person_id]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      const amount = Math.round(Math.min(n, p.balance) * 100) / 100;
+      if (amount <= 0) continue;
+      lines.push({ person_id: p.person_id, name: p.display_name, amount });
+    }
+    if (!lines.length) {
+      setError(
+        "No one is ready to deduct. Check at least one person and enter an amount greater than $0 (or use Reset to policy amounts)."
+      );
+      return;
+    }
+    if (!payrollWeekDate) {
+      setError("Choose the payroll week date.");
+      return;
+    }
+    const total = lines.reduce((s, l) => s + l.amount, 0);
+    const skipped = payrollCandidates.filter((p) => weekInclude[p.person_id] === false).length;
+    const skipNote =
+      skipped > 0 ? `\n${skipped} person${skipped === 1 ? "" : "s"} unchecked (skipped).` : "";
+    const okConfirm = window.confirm(
+      `Apply bulk weekly deductions for ${lines.length} employee${lines.length === 1 ? "" : "s"} totaling $${total.toFixed(2)} (week of ${payrollWeekDate})?${skipNote}\n\nThis records a payroll payment on each checked person's ledger.`
+    );
+    if (!okConfirm) return;
+
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      let recorded = 0;
+      for (const line of lines) {
+        await api("/tool-loan-ledger/payments", {
+          method: "POST",
+          body: JSON.stringify({
+            person_id: line.person_id,
+            payment_date: payrollWeekDate,
+            amount: line.amount,
+            payment_type: "payroll",
+            note: `Payroll week of ${payrollWeekDate}`,
+          }),
+        });
+        recorded += 1;
+      }
+      // Uncheck + clear amounts so a second click cannot double-post
+      clearWeekAmounts();
+      setAllIncluded(false);
+      if (selectedId) await loadDetail(selectedId);
+      await loadAll();
+      setOk(
+        `Bulk deducted ${recorded} employee${recorded === 1 ? "" : "s"} for week of ${payrollWeekDate}. Balances updated — open anyone for payment history.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record payroll deductions");
     } finally {
       setBusy(false);
     }
@@ -338,7 +514,8 @@ export function ToolLoanLedgerPage() {
         <div>
           <h1 style={{ marginBottom: "0.25rem" }}>Tool loan payroll</h1>
           <p className="muted" style={{ margin: 0 }}>
-            Office only · Who owes what · weekly amounts for the owner ·{" "}
+            Office only · Who owes what · print for owner ·{" "}
+            <strong>enter weekly deductions</strong> each paycheck ·{" "}
             <Link to="/tool-loans">Tool loan requests</Link>
           </p>
         </div>
@@ -409,6 +586,10 @@ export function ToolLoanLedgerPage() {
         </div>
 
         <div className="owner-report-actions no-print">
+          <p className="muted" style={{ margin: 0, fontSize: "0.88rem", flex: "1 1 12rem" }}>
+            Suggested amounts only. To post them all at once, use{" "}
+            <a href="#record-weekly-payroll">Bulk weekly payroll deductions</a> below.
+          </p>
           <div className="owner-report-btns" style={{ marginLeft: "auto" }}>
             <button type="button" className="btn secondary" disabled={loading} onClick={() => void loadAll()}>
               Refresh
@@ -477,6 +658,174 @@ export function ToolLoanLedgerPage() {
               </tfoot>
             )}
           </table>
+        </div>
+      </section>
+
+      {/* ——— BULK WEEKLY DEDUCTIONS ——— */}
+      <section className="card weekly-payroll-entry no-print" id="record-weekly-payroll">
+        <h2 style={{ marginTop: 0, fontSize: "1.15rem" }}>
+          Bulk weekly payroll deductions
+        </h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Everyone is <strong>checked</strong> with their weekly amount filled in. Uncheck anyone
+          who should skip this week, or change their amount if they need a different takeout. One
+          button applies all checked people as trackable payroll payments.
+        </p>
+
+        <div className="weekly-payroll-toolbar">
+          <label>
+            Payroll week date
+            <input
+              type="date"
+              required
+              value={payrollWeekDate}
+              onChange={(e) => setPayrollWeekDate(e.target.value)}
+            />
+          </label>
+          <div className="weekly-payroll-toolbar-btns">
+            <button
+              type="button"
+              className="btn secondary small"
+              disabled={busy || loading || !payrollCandidates.length}
+              onClick={() => setAllIncluded(true)}
+            >
+              Check all
+            </button>
+            <button
+              type="button"
+              className="btn secondary small"
+              disabled={busy || loading || !payrollCandidates.length}
+              onClick={() => setAllIncluded(false)}
+            >
+              Uncheck all
+            </button>
+            <button
+              type="button"
+              className="btn secondary small"
+              disabled={busy || loading}
+              onClick={fillSuggestedAmounts}
+            >
+              Reset to policy amounts
+            </button>
+          </div>
+        </div>
+
+        <div className="table-wrap">
+          <table className="data-table weekly-payroll-table">
+            <thead>
+              <tr>
+                <th className="weekly-include-col">
+                  <label className="weekly-include-all" title="Include all in bulk deduct">
+                    <input
+                      type="checkbox"
+                      checked={allChecked}
+                      disabled={!payrollCandidates.length || busy}
+                      onChange={(e) => setAllIncluded(e.target.checked)}
+                      aria-label="Include all employees in bulk deduct"
+                    />
+                    <span className="sr-only">Include all</span>
+                  </label>
+                </th>
+                <th>Employee</th>
+                <th className="num">Balance owed</th>
+                <th className="num">Suggested</th>
+                <th className="num">Amount this week ($)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payrollCandidates.map((p) => {
+                const suggested = suggestedWeekAmount(p);
+                const included = weekInclude[p.person_id] !== false;
+                return (
+                  <tr
+                    key={p.person_id}
+                    className={included ? undefined : "weekly-row-skipped"}
+                  >
+                    <td className="weekly-include-col">
+                      <input
+                        type="checkbox"
+                        checked={included}
+                        disabled={busy}
+                        onChange={(e) => setPersonIncluded(p.person_id, e.target.checked)}
+                        aria-label={`Include ${p.display_name} in bulk deduct`}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => setSelectedId(p.person_id)}
+                      >
+                        {p.display_name}
+                      </button>
+                      {!included && (
+                        <span className="weekly-skip-badge"> skipped</span>
+                      )}
+                    </td>
+                    <td className="num">{money(p.balance)}</td>
+                    <td className="num muted">{money(suggested)}</td>
+                    <td className="num">
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        max={p.balance}
+                        className="weekly-deduct-input"
+                        value={weekDeductAmounts[p.person_id] ?? ""}
+                        onChange={(e) => setPersonWeekAmount(p.person_id, e.target.value)}
+                        placeholder="0.00"
+                        disabled={!included || busy}
+                        aria-label={`Deduction for ${p.display_name}`}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+              {!loading && !payrollCandidates.length && (
+                <tr>
+                  <td colSpan={5} className="muted" style={{ textAlign: "center", padding: "1.25rem" }}>
+                    No open balances for current employees.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+            {payrollCandidates.length > 0 && (
+              <tfoot>
+                <tr className="owner-totals-row">
+                  <td colSpan={2}>
+                    <strong>
+                      {weekPayrollPreview.count} will be deducted
+                      {weekPayrollPreview.skipped > 0
+                        ? ` · ${weekPayrollPreview.skipped} skipped`
+                        : ""}
+                    </strong>
+                  </td>
+                  <td />
+                  <td />
+                  <td className="num">
+                    <strong>{money(weekPayrollPreview.total)}</strong>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+
+        <div className="weekly-payroll-actions">
+          <button
+            type="button"
+            className="btn primary weekly-bulk-btn"
+            disabled={busy || loading || weekPayrollPreview.count === 0}
+            onClick={() => void recordWeeklyPayroll()}
+          >
+            {busy
+              ? "Applying bulk deductions…"
+              : `Apply bulk weekly deductions (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`}
+          </button>
+          <p className="muted" style={{ margin: 0, fontSize: "0.85rem", flex: "1 1 14rem" }}>
+            Uncheck to skip someone. Edit the amount column only when one person needs a different
+            takeout. After apply, open a person for full payment history.
+          </p>
         </div>
       </section>
 
@@ -569,9 +918,9 @@ export function ToolLoanLedgerPage() {
               </span>
             </p>
 
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "end" }}>
+            <div className="person-default-weekly">
               <label>
-                Weekly payroll amount
+                Default weekly amount (owner report)
                 <input
                   type="number"
                   min={0}
@@ -582,13 +931,15 @@ export function ToolLoanLedgerPage() {
                 />
               </label>
               <button type="button" className="btn secondary" disabled={busy} onClick={() => void saveWeekly()}>
-                Save weekly
+                Save default
               </button>
             </div>
             <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.35rem" }}>
-              Office only — sets the amount used on the owner payroll report. Leave blank for the
-              standard policy (<strong>10% of remaining, min $50</strong>). Employees always see the
-              policy estimate on their request form, not this field.
+              Optional override for the <strong>suggested</strong> amount on the owner report and
+              in &quot;Fill policy amounts&quot;. This does <strong>not</strong> record a payment —
+              use <a href="#record-weekly-payroll">Record this week&apos;s payroll deductions</a>{" "}
+              above to log what was actually taken each week. Leave blank for standard policy (
+              <strong>10% of remaining, min $50</strong>).
             </p>
 
             <hr style={{ margin: "1.25rem 0", border: 0, borderTop: "1px solid var(--border, #ddd)" }} />
@@ -702,14 +1053,15 @@ export function ToolLoanLedgerPage() {
               </table>
             </div>
 
-            <h3 style={{ fontSize: "1rem", marginTop: "1.25rem" }}>Payments</h3>
+            <h3 style={{ fontSize: "1rem", marginTop: "1.25rem" }}>Payments (trackable history)</h3>
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
                   <tr>
                     <th>Date</th>
                     <th>Type</th>
-                    <th>Amount</th>
+                    <th>Note</th>
+                    <th className="num">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -724,9 +1076,19 @@ export function ToolLoanLedgerPage() {
                         )}
                         {p.voided ? " (voided)" : ""}
                       </td>
-                      <td>{money(Number(p.amount))}</td>
+                      <td className="muted" style={{ fontSize: "0.88rem" }}>
+                        {p.note || "—"}
+                      </td>
+                      <td className="num">{money(Number(p.amount))}</td>
                     </tr>
                   ))}
+                  {!detail.payments.length && (
+                    <tr>
+                      <td colSpan={4} className="muted" style={{ textAlign: "center" }}>
+                        No payments yet — record weekly payroll above or add a payment here.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
