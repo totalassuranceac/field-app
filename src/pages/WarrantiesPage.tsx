@@ -63,11 +63,11 @@ const STATUS_LABEL: Record<string, string> = {
   delivered: "Delivered",
   approved: "Approved",
   rejected: "Rejected",
-  not_warranty: "Not warranty · job",
+  not_warranty: "Removed · not a claim",
   // legacy
   processed: "Approved",
   cancelled: "Rejected",
-  sent_to_job: "Not warranty · job",
+  sent_to_job: "Removed · not a claim",
 };
 
 const OPEN_STATUSES: WStatus[] = [
@@ -416,32 +416,18 @@ export function WarrantiesPage() {
   }
 
   /**
-   * Close when the part was never a warranty claim (e.g. going out to another job).
-   * Asks for a short note so the log shows where it went / why.
+   * Close without a claim outcome — part back to shelves, another job, not a warranty, etc.
+   * No reason required; just leaves the open list.
    */
   async function markNotWarranty(w: Warranty) {
-    const note = window.prompt(
-      `${w.log_number} — not a warranty.\n\nWhere is the part going, or why is it not a warranty?\n(e.g. "Sent to job at 123 Main for unit 42" or "Stock — used on service call")`,
-      w.notes?.trim() || ""
-    );
-    if (note === null) return;
-    const reason = note.trim();
     if (
       !window.confirm(
-        `Close ${w.log_number} as Not a warranty — sent to job?\n\n${
-          reason || "(no extra note)"
-        }\n\nThis removes it from open warranties. It is not Approved or Rejected.`
+        `Remove ${w.log_number} from open warranties?\n\nUse this when it is not a warranty claim (back to shelves, another job, etc.). It will not show as Approved or Rejected.`
       )
     ) {
       return;
     }
-    const prior = (w.notes || "").trim();
-    const tag = "Not a warranty — sent to job";
-    let notesOut = reason ? `${tag}: ${reason}` : tag;
-    if (prior && !prior.toLowerCase().includes("not a warranty")) {
-      notesOut = `${prior}\n${notesOut}`;
-    }
-    await setStatus(w.id, "not_warranty", { notes: notesOut });
+    await setStatus(w.id, "not_warranty");
   }
 
   async function saveVendorDetails(w: Warranty) {
@@ -473,9 +459,9 @@ export function WarrantiesPage() {
           <h1>Warranties</h1>
           <p>
             Drop off warranty parts with a photo of where you left them · you get a log number to{" "}
-            <strong>write on the box</strong> · track claims · return to vendor when needed · if it
-            wasn&apos;t a warranty, mark <strong>Not a warranty — send to job</strong> so it leaves
-            the open list.
+            <strong>write on the box</strong> · track claims · return to vendor when needed · use{" "}
+            <strong>Remove from open list</strong> when it is not a warranty claim (no reason
+            needed).
           </p>
         </div>
       </div>
@@ -943,15 +929,15 @@ export function WarrantiesPage() {
                       </button>
                     </>
                   )}
-                  {/* Not a warranty claim — part going to another job / stock use */}
+                  {/* Not a claim outcome — shelves, another job, etc. No reason required. */}
                   <button
                     type="button"
                     className="btn ghost warranty-not-warranty-btn"
                     disabled={busy}
-                    title="Close this log: not a warranty claim; part used on another job or elsewhere"
+                    title="Take this off the open warranty list (not approved/rejected — no reason required)"
                     onClick={() => void markNotWarranty(w)}
                   >
-                    Not a warranty — send to job
+                    Remove from open list
                   </button>
                 </div>
               )}

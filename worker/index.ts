@@ -5316,8 +5316,8 @@ api.patch("/warranties/:id", async (c) => {
       c.env.DB,
       [before.dropped_off_by_user_id],
       "warranty_not_warranty",
-      `${before.log_number} not a warranty`,
-      `${before.part_name} was marked not a warranty (part used on another job / not claimed).`,
+      `${before.log_number} removed from warranties`,
+      `${before.part_name} is no longer an open warranty claim.`,
       { type: "warranty", id }
     );
   }
