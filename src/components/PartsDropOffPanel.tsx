@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -34,6 +34,7 @@ interface Dropoff {
 export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const canReceive =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
 
@@ -45,6 +46,7 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(true);
   const [actingId, setActingId] = useState<number | null>(null);
+  const [fromPickup, setFromPickup] = useState(false);
 
   const [vendor, setVendor] = useState("");
   const [summary, setSummary] = useState("");
@@ -53,6 +55,50 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const [partSlots, setPartSlots] = useState<{ code: string; name: string; qty: string }[]>([
     { code: "", name: "", qty: "1" },
   ]);
+
+  // Prefill from Part pickup "Picked up" → drop-off handoff
+  useEffect(() => {
+    const from = searchParams.get("from");
+    const v = (searchParams.get("vendor") || "").trim();
+    const part = (searchParams.get("part") || "").trim();
+    const address = (searchParams.get("address") || "").trim();
+    const contact = (searchParams.get("contact") || "").trim();
+    const qty = (searchParams.get("qty") || "1").trim() || "1";
+    if (from !== "pickup" && !v && !part) return;
+
+    if (v) setVendor(v);
+    if (part) {
+      setSummary(part);
+      setPartSlots([{ code: "", name: part, qty }]);
+    }
+    const noteBits = [
+      address ? `Job / address: ${address}` : "",
+      contact ? `Contact: ${contact}` : "",
+      "Dropped after vendor pickup",
+    ].filter(Boolean);
+    setNotes(noteBits.join(" · "));
+    setShowForm(true);
+    setFromPickup(true);
+    setOk(
+      part
+        ? `Picked up selected: ${part}. Confirm where you’re dropping it off, then save.`
+        : "Picked up — confirm drop-off details, then save."
+    );
+
+    // Clear query so a refresh doesn’t re-apply forever
+    const next = new URLSearchParams(searchParams);
+    ["from", "vendor", "part", "address", "contact", "qty", "pickup_id", "line_id"].forEach((k) =>
+      next.delete(k)
+    );
+    setSearchParams(next, { replace: true });
+    window.setTimeout(() => {
+      document.getElementById("dropoff-form")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 80);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const defaultSource =
     user?.role === "warehouse"
@@ -210,11 +256,18 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       {ok && <div className="success inv-flash">{ok}</div>}
 
       {showForm && (
-        <form className="card form vendor-run-form" onSubmit={submit}>
-          <h3 style={{ marginTop: 0 }}>I brought parts to the shop</h3>
+        <form
+          className={`card form vendor-run-form${fromPickup ? " parts-dropoff-from-pickup" : ""}`}
+          onSubmit={submit}
+          id="dropoff-form"
+        >
+          <h3 style={{ marginTop: 0 }}>
+            {fromPickup ? "Where are you dropping this off?" : "I brought parts to the shop"}
+          </h3>
           <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-            Use this after you pick up at Carrier, Lennox, ACE, etc. and leave the parts at the
-            warehouse counter (or anywhere warehouse can grab them).
+            {fromPickup
+              ? "Vendor and part are filled in from your pickup. Add the unit if you know it, confirm the notes, then save so warehouse knows the parts are at the shop."
+              : "Use this after you pick up at Carrier, Lennox, ACE, etc. and leave the parts at the warehouse counter (or anywhere warehouse can grab them)."}
           </p>
           <label>
             Vendor

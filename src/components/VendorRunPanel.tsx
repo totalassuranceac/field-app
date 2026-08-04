@@ -639,6 +639,20 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     });
   }
 
+  function findLineContext(lineId: number): {
+    ticket: Ticket;
+    line: TicketLine;
+  } | null {
+    const search = (list: Ticket[]) => {
+      for (const t of list) {
+        const line = (t.lines || []).find((l) => l.id === lineId);
+        if (line) return { ticket: t, line };
+      }
+      return null;
+    };
+    return search(tickets) || search(groups.flatMap((g) => g.tickets)) || null;
+  }
+
   async function resolveLine(
     lineId: number,
     status: LineStatus,
@@ -648,6 +662,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     setResolvingId(lineId);
     setError("");
     setOk("");
+    const ctx = findLineContext(lineId);
     // Optimistic — UI updates immediately so counter doesn't wait on network
     applyLineLocally(lineId, status, qtyReceived, notes || null);
     try {
@@ -663,11 +678,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       });
       setOk(
         status === "picked"
-          ? "Marked picked up."
+          ? "Marked picked up — choose drop-off location…"
           : status === "not_ready"
             ? "Marked not ready at vendor."
             : status === "partial"
-              ? "Marked partial pickup."
+              ? "Marked partial pickup — choose drop-off location…"
               : status === "cancelled"
                 ? "Marked not needed — off the pickup list."
                 : "Updated."
@@ -677,12 +692,29 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       void load().catch(() => {
         /* optimistic state already applied */
       });
-      // Close the loop: if parts are coming to the shop, log a drop-off
+      // After pick: auto-open Brought to shop with this part selected / prefilled
       if (status === "picked" || status === "partial") {
-        const go = window.confirm(
-          "Parts coming back to the shop?\n\nLog Brought to shop so warehouse knows they’re on the counter and ready to issue."
-        );
-        if (go) navigate("/parts-dropoff");
+        const params = new URLSearchParams();
+        if (ctx) {
+          params.set("vendor", ctx.ticket.vendor_name || "");
+          const part =
+            (ctx.line.part_name || ctx.line.part_code || "").trim() || "Parts from vendor";
+          params.set("part", part);
+          if (ctx.ticket.notes?.trim()) params.set("address", ctx.ticket.notes.trim());
+          if (ctx.ticket.purchase_order?.trim()) {
+            params.set("contact", ctx.ticket.purchase_order.trim());
+          }
+          params.set("pickup_id", String(ctx.ticket.id));
+          params.set("line_id", String(ctx.line.id));
+          if (qtyReceived != null && Number.isFinite(qtyReceived)) {
+            params.set("qty", String(qtyReceived));
+          } else if (ctx.line.qty_requested) {
+            params.set("qty", String(ctx.line.qty_requested));
+          }
+        }
+        params.set("from", "pickup");
+        navigate(`/parts-dropoff?${params.toString()}`);
+        return;
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Update failed — try again");
@@ -1157,9 +1189,12 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                     canNotNeeded={canNotNeeded}
                     busy={busy}
                     resolvingId={resolvingId}
-                    expanded={!!expandedTicket[t.id] || t.status === "open" || t.status === "partial"}
+                    expanded={expandedTicket[t.id] === true}
                     onToggle={() =>
-                      setExpandedTicket((p) => ({ ...p, [t.id]: !p[t.id] }))
+                      setExpandedTicket((p) => ({
+                        ...p,
+                        [t.id]: !(p[t.id] === true),
+                      }))
                     }
                     onResolve={resolveLine}
                     onSaveOwner={async (payload) => {
