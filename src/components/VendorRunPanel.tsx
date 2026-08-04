@@ -703,9 +703,10 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             <h2 style={{ margin: 0 }}>Part pickup request</h2>
             <p style={{ margin: "0.25rem 0 0" }}>
               Parts at a store? Log the vendor, part, and job address. Items{" "}
-              <strong>stay on Waiting</strong> until warehouse marks <strong>Picked</strong> or{" "}
-              <strong>Not needed</strong> — they do not clear on their own. Future ready dates stay
-              listed (with an Arrives badge) but stay off the driver&apos;s today run.
+              <strong>stay on Waiting</strong> until warehouse marks{" "}
+              <strong>Picked up</strong> or <strong>Not needed</strong> — they do not clear on
+              their own. Future ready dates stay listed (with an Arrives badge) but stay off the
+              driver&apos;s today run.
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -926,16 +927,19 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                                 {[l.po || null, l.notes].filter(Boolean).join(" · ")}
                               </span>
                             )}
-                            {l.lineId != null && canResolve && l.ready && (
+                            {l.lineId != null && canResolve && (
                               <span className="vendor-run-sheet-actions">
                                 <button
                                   type="button"
                                   className="btn btn-sm"
                                   disabled={resolvingId === l.lineId || busy}
                                   onClick={() => {
+                                    const laterNote = !l.ready
+                                      ? "\n\nNote: ready date is still in the future — only mark picked up if you already have it."
+                                      : "";
                                     if (
                                       !window.confirm(
-                                        `Mark “${l.name}” picked up?\n\nIt leaves Waiting. Use Picked / done → Put back if this was a mistake.`
+                                        `Mark “${l.name}” as picked up?\n\nIt leaves Waiting. Use Picked / done → Put back if this was a mistake.${laterNote}`
                                       )
                                     ) {
                                       return;
@@ -1354,6 +1358,17 @@ function TicketCard({
           )}
 
           <ul className="pp-lines">
+            {t.lines.length === 0 && (t.status === "open" || t.status === "partial") && (
+              <li className="pp-line st-pending">
+                <div className="pp-line-top">
+                  <span className="pp-status-pill st-pending">Still pending</span>
+                </div>
+                <p className="muted" style={{ margin: "0.25rem 0", fontSize: "0.85rem" }}>
+                  No line was saved on this request (refresh the page to auto-fix). Use the buttons
+                  after refresh, or expand and save a description.
+                </p>
+              </li>
+            )}
             {t.lines.map((line) => {
               const locked = line.status === "picked" || line.status === "cancelled";
               const label =
@@ -1388,7 +1403,7 @@ function TicketCard({
                               void onResolve(line.id, "picked");
                             }}
                           >
-                            {resolvingId === line.id ? "Saving…" : "Picked"}
+                            {resolvingId === line.id ? "Saving…" : "Picked up"}
                           </button>
                           <button
                             type="button"

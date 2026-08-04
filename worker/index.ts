@@ -9280,7 +9280,7 @@ api.get("/inventory/part-pickups", async (c) => {
       const tid = Number((t as { id: number }).id);
       const needed = (t as { needed_for_date?: string | null }).needed_for_date || null;
       const ready_to_pick = !needed || needed <= today;
-      const lines = await c.env.DB.prepare(
+      let lines = await c.env.DB.prepare(
         `SELECT l.*, ru.display_name as resolved_by_name
          FROM part_pickup_ticket_lines l
          LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
@@ -9289,6 +9289,36 @@ api.get("/inventory/part-pickups", async (c) => {
       )
         .bind(tid)
         .all();
+      // Heal open tickets that somehow have zero lines — otherwise warehouse has no "Picked up" button
+      const ticketStatus = String((t as { status?: string }).status || "");
+      if (
+        (!lines.results || lines.results.length === 0) &&
+        (ticketStatus === "open" || ticketStatus === "partial")
+      ) {
+        const fallbackName =
+          String((t as { notes?: string | null }).notes || "").trim() ||
+          String((t as { vendor_name?: string }).vendor_name || "Part").trim() + " part";
+        try {
+          await c.env.DB.prepare(
+            `INSERT INTO part_pickup_ticket_lines (
+               ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
+             ) VALUES (?, 1, NULL, NULL, ?, 1, 'pending')`
+          )
+            .bind(tid, fallbackName.slice(0, 200))
+            .run();
+          lines = await c.env.DB.prepare(
+            `SELECT l.*, ru.display_name as resolved_by_name
+             FROM part_pickup_ticket_lines l
+             LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+             WHERE l.ticket_id = ?
+             ORDER BY l.line_no ASC, l.id ASC`
+          )
+            .bind(tid)
+            .all();
+        } catch {
+          /* ignore heal failure */
+        }
+      }
       list.push({
         ...t,
         ready_to_pick,
@@ -9451,13 +9481,25 @@ api.post("/inventory/part-pickups", async (c) => {
       .run();
     const ticketId = Number(ins.meta.last_row_id);
 
-    await c.env.DB.prepare(
-      `INSERT INTO part_pickup_ticket_lines (
-         ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
-       ) VALUES (?, 1, NULL, NULL, ?, 1, 'pending')`
-    )
-      .bind(ticketId, description)
-      .run();
+    try {
+      await c.env.DB.prepare(
+        `INSERT INTO part_pickup_ticket_lines (
+           ticket_id, line_no, part_id, part_code, part_name, qty_requested, status
+         ) VALUES (?, 1, NULL, NULL, ?, 1, 'pending')`
+      )
+        .bind(ticketId, description)
+        .run();
+    } catch (lineErr) {
+      // Don't leave an empty ticket with no pick button — roll back ticket
+      try {
+        await c.env.DB.prepare(`DELETE FROM part_pickup_tickets WHERE id = ?`)
+          .bind(ticketId)
+          .run();
+      } catch {
+        /* ignore */
+      }
+      throw lineErr;
+    }
 
     const bg = (async () => {
       try {
