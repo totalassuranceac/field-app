@@ -210,17 +210,14 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   }
 
   return (
-    <div className={`vendor-run-panel parts-dropoff-panel${compact ? " is-compact" : ""}`}>
+    <div className={`vendor-run-panel parts-dropoff-panel is-dense${compact ? " is-compact" : ""}`}>
       {!compact && (
         <div className="page-header vendor-run-page-head">
           <div>
             <h2 style={{ margin: 0 }}>Brought to shop</h2>
-            <p style={{ margin: "0.25rem 0 0" }}>
-              Picked up parts from a vendor while you were out? Log them here so warehouse knows
-              they’re <strong>at the shop</strong> and ready to put away or issue to a truck.
-              {" "}
-              Still at the store? Use{" "}
-              <Link to="/part-pickup">Part pickup request</Link> instead.
+            <p className="page-header-sub">
+              Log vendor parts left at the shop ·{" "}
+              <Link to="/part-pickup">Still at the store?</Link>
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -239,7 +236,7 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
               className={`btn ghost btn-sm${filter === "all" ? " primary" : ""}`}
               onClick={() => setFilter("all")}
             >
-              All recent
+              All
             </button>
             <button
               type="button"
@@ -257,157 +254,189 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
 
       {showForm && (
         <form
-          className={`card form vendor-run-form${fromPickup ? " parts-dropoff-from-pickup" : ""}`}
+          className={`card form vendor-run-form dense-form${fromPickup ? " parts-dropoff-from-pickup" : ""}`}
           onSubmit={submit}
           id="dropoff-form"
         >
-          <h3 style={{ marginTop: 0 }}>
-            {fromPickup ? "Where are you dropping this off?" : "I brought parts to the shop"}
+          <h3 className="dense-form-title">
+            {fromPickup ? "Where are you dropping this off?" : "Log drop-off"}
           </h3>
-          <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
-            {fromPickup
-              ? "Vendor and part are filled in from your pickup. Add the unit if you know it, confirm the notes, then save so warehouse knows the parts are at the shop."
-              : "Use this after you pick up at Carrier, Lennox, ACE, etc. and leave the parts at the warehouse counter (or anywhere warehouse can grab them)."}
-          </p>
-          <label>
-            Vendor
-            <input
-              value={vendor}
-              onChange={(e) => setVendor(e.target.value)}
-              placeholder="Carrier, Lennox, ACE…"
-              required
-              list="parts-dropoff-vendors"
-            />
-            <datalist id="parts-dropoff-vendors">
-              <option value="Carrier" />
-              <option value="Lennox" />
-              <option value="ACE" />
-              <option value="Johnstone" />
-              <option value="Ferguson" />
-            </datalist>
-          </label>
-          <label>
-            What’s in the drop-off?{" "}
-            <span className="muted">(required if you don’t fill part lines)</span>
-            <input
-              value={summary}
-              onChange={(e) => setSummary(e.target.value)}
-              placeholder="e.g. TXV, 2 ton blower motor, or 3/4 soft copper"
-            />
-          </label>
-          <label>
-            For unit / job <span className="muted">(optional)</span>
-            <input
-              value={forUnit}
-              onChange={(e) => setForUnit(e.target.value)}
-              placeholder="Unit 012 · job address · ticket #"
-            />
-          </label>
-
-          <div className="pp-lines-edit">
-            <div className="pp-lines-edit-head">
-              <strong style={{ fontSize: "0.9rem" }}>Part lines (optional)</strong>
-              <button
-                type="button"
-                className="btn ghost btn-sm"
-                onClick={() =>
-                  setPartSlots((p) => [...p, { code: "", name: "", qty: "1" }].slice(0, 20))
-                }
-              >
-                + Line
-              </button>
-            </div>
-            {partSlots.map((s, i) => (
-              <div key={i} className="pp-line-fields" style={{ marginBottom: "0.35rem" }}>
-                <input
-                  className="pp-code"
-                  placeholder="Part #"
-                  value={s.code}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setPartSlots((prev) =>
-                      prev.map((row, j) => (j === i ? { ...row, code: v } : row))
-                    );
-                  }}
-                />
-                <input
-                  className="pp-name"
-                  placeholder="Description"
-                  value={s.name}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setPartSlots((prev) =>
-                      prev.map((row, j) => (j === i ? { ...row, name: v } : row))
-                    );
-                  }}
-                />
-                <input
-                  className="pp-qty"
-                  type="number"
-                  min={0}
-                  step="any"
-                  title="Qty"
-                  value={s.qty}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setPartSlots((prev) =>
-                      prev.map((row, j) => (j === i ? { ...row, qty: v } : row))
-                    );
-                  }}
-                />
-              </div>
-            ))}
+          <div className="dense-form-grid">
+            <label>
+              Vendor
+              <input
+                value={vendor}
+                onChange={(e) => setVendor(e.target.value)}
+                placeholder="Carrier, Lennox, ACE…"
+                required
+                list="parts-dropoff-vendors"
+              />
+              <datalist id="parts-dropoff-vendors">
+                <option value="Carrier" />
+                <option value="Lennox" />
+                <option value="ACE" />
+                <option value="Johnstone" />
+                <option value="Ferguson" />
+              </datalist>
+            </label>
+            <label>
+              What&apos;s in the drop-off?
+              <input
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+                placeholder="TXV, blower motor, copper…"
+              />
+            </label>
+            <label>
+              Unit / job <span className="muted">(opt.)</span>
+              <input
+                value={forUnit}
+                onChange={(e) => setForUnit(e.target.value)}
+                placeholder="Unit 012 · address"
+              />
+            </label>
+            <label>
+              Where left <span className="muted">(opt.)</span>
+              <input
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Counter · cage…"
+              />
+            </label>
           </div>
 
-          <label>
-            Notes <span className="muted">(where you left them, etc.)</span>
-            <input
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="On the counter by the door · in the cage…"
-            />
-          </label>
+          <details className="dense-optional">
+            <summary>Part lines (optional)</summary>
+            <div className="pp-lines-edit">
+              <div className="pp-lines-edit-head">
+                <button
+                  type="button"
+                  className="btn ghost btn-sm"
+                  onClick={() =>
+                    setPartSlots((p) => [...p, { code: "", name: "", qty: "1" }].slice(0, 20))
+                  }
+                >
+                  + Line
+                </button>
+              </div>
+              {partSlots.map((s, i) => (
+                <div key={i} className="pp-line-fields">
+                  <input
+                    className="pp-code"
+                    placeholder="Part #"
+                    value={s.code}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPartSlots((prev) =>
+                        prev.map((row, j) => (j === i ? { ...row, code: v } : row))
+                      );
+                    }}
+                  />
+                  <input
+                    className="pp-name"
+                    placeholder="Description"
+                    value={s.name}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPartSlots((prev) =>
+                        prev.map((row, j) => (j === i ? { ...row, name: v } : row))
+                      );
+                    }}
+                  />
+                  <input
+                    className="pp-qty"
+                    type="number"
+                    min={0}
+                    step="any"
+                    title="Qty"
+                    value={s.qty}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPartSlots((prev) =>
+                        prev.map((row, j) => (j === i ? { ...row, qty: v } : row))
+                      );
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          </details>
 
-          <div className="toolbar">
-            <button className="btn" type="submit" disabled={busy}>
+          <div className="toolbar dense-toolbar">
+            <button className="btn btn-sm" type="submit" disabled={busy}>
               {busy ? "Saving…" : "Log drop-off at shop"}
             </button>
           </div>
         </form>
       )}
 
-      <div className="vendor-run-list">
+      <div className="vendor-run-list parts-dropoff-list">
         {!list.length ? (
-          <div className="card muted">
+          <div className="card muted dense-empty">
             {filter === "waiting"
-              ? "Nothing waiting at the shop. Log a drop-off when you bring parts in."
+              ? "Nothing at the shop yet."
               : "No recent drop-offs."}
           </div>
         ) : (
           list.map((d) => (
             <article key={d.id} className={`card parts-dropoff-card st-${d.status}`}>
               <div className="parts-dropoff-card-head">
-                <div>
+                <div className="parts-dropoff-card-title">
                   <strong className="parts-dropoff-vendor">{d.vendor_name}</strong>
-                  <span className={`pp-status-pill st-${d.status === "waiting" ? "pending" : d.status === "received" ? "picked" : "cancelled"}`}>
+                  <span
+                    className={`pp-status-pill st-${
+                      d.status === "waiting"
+                        ? "pending"
+                        : d.status === "received"
+                          ? "picked"
+                          : "cancelled"
+                    }`}
+                  >
                     {d.status === "waiting"
                       ? "At shop"
                       : d.status === "received"
                         ? "Received"
                         : "Cancelled"}
                   </span>
+                  <span className="muted parts-dropoff-when">
+                    {String(d.created_at).replace("T", " ").slice(5, 16)}
+                    {d.dropped_by_name ? ` · ${d.dropped_by_name}` : ""}
+                  </span>
                 </div>
-                <span className="muted" style={{ fontSize: "0.8rem" }}>
-                  {String(d.created_at).replace("T", " ").slice(0, 16)}
-                  {d.dropped_by_name ? ` · ${d.dropped_by_name}` : ""}
-                </span>
+                {d.status === "waiting" && (
+                  <div className="parts-dropoff-actions">
+                    {canReceive && (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={actingId === d.id}
+                        onClick={() => void markReceived(d.id)}
+                      >
+                        {actingId === d.id ? "…" : "Received"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn secondary btn-sm"
+                      disabled={actingId === d.id}
+                      onClick={() => void cancelDropoff(d.id)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
-              <p className="parts-dropoff-summary">{d.part_summary}</p>
-              {(d.for_unit || d.notes) && (
-                <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
-                  {[d.for_unit ? `For: ${d.for_unit}` : null, d.notes].filter(Boolean).join(" · ")}
-                </p>
-              )}
+              <p className="parts-dropoff-summary">
+                {d.part_summary}
+                {(d.for_unit || d.notes) && (
+                  <span className="muted parts-dropoff-meta">
+                    {" · "}
+                    {[d.for_unit ? `For ${d.for_unit}` : null, d.notes]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                )}
+              </p>
               {d.lines && d.lines.length > 0 && (
                 <ul className="parts-dropoff-lines">
                   {d.lines.map((l) => (
@@ -422,34 +451,12 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
                 </ul>
               )}
               {d.status === "received" && d.received_by_name && (
-                <p className="muted" style={{ margin: "0.4rem 0 0", fontSize: "0.8rem" }}>
-                  Received by {d.received_by_name}
+                <p className="muted parts-dropoff-received">
+                  By {d.received_by_name}
                   {d.received_at
-                    ? ` · ${String(d.received_at).replace("T", " ").slice(0, 16)}`
+                    ? ` · ${String(d.received_at).replace("T", " ").slice(5, 16)}`
                     : ""}
                 </p>
-              )}
-              {d.status === "waiting" && (
-                <div className="toolbar" style={{ marginTop: "0.65rem" }}>
-                  {canReceive && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={actingId === d.id}
-                      onClick={() => void markReceived(d.id)}
-                    >
-                      {actingId === d.id ? "Saving…" : "Received · ready to issue"}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn secondary btn-sm"
-                    disabled={actingId === d.id}
-                    onClick={() => void cancelDropoff(d.id)}
-                  >
-                    Cancel
-                  </button>
-                </div>
               )}
             </article>
           ))

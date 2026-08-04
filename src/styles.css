@@ -639,22 +639,31 @@ a.user-box-link.active {
 .page-header {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.5rem 0.75rem;
   align-items: flex-end;
   justify-content: space-between;
-  margin-bottom: 1.1rem;
+  margin-bottom: 0.75rem;
 }
 
 .page-header h1 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.35rem;
   letter-spacing: -0.02em;
 }
 
-.page-header p {
-  margin: 0.25rem 0 0;
+.page-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.page-header p,
+.page-header-sub {
+  margin: 0.15rem 0 0;
   color: var(--muted);
-  font-size: 0.95rem;
+  font-size: 0.82rem;
+  line-height: 1.3;
+  max-width: 42rem;
 }
 
 /* Fuel log — success handoff back to home */
@@ -12195,20 +12204,32 @@ svg {
 }
 
 /* Part pickup — vendor will-call list by supply house */
+.vendor-run-panel {
+  display: grid;
+  gap: 0.45rem;
+}
+
 .vendor-run-panel .page-header,
 .vendor-run-page-head {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.4rem 0.65rem;
+  margin-bottom: 0.35rem;
 }
 
 .vendor-run-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.3rem;
   align-items: center;
+}
+
+.vendor-run-toolbar .btn-sm {
+  min-height: 1.85rem;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
 }
 
 .vendor-waiting-btn {
@@ -12656,36 +12677,75 @@ svg {
 
 .vendor-run-form {
   display: grid;
-  gap: 0.55rem;
-  margin-bottom: 0.85rem;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  padding: 0.65rem 0.75rem;
 }
 
 .vendor-run-form-hint {
   margin: 0;
-  font-size: 0.88rem;
+  font-size: 0.8rem;
 }
 
-.vendor-run-form-grid {
+.vendor-run-form-grid,
+.dense-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.4rem 0.55rem;
 }
 
-.vendor-run-form label {
+.vendor-run-form label,
+.dense-form label {
   display: grid;
-  gap: 0.25rem;
-  font-size: 0.85rem;
-  font-weight: 600;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 650;
 }
 
-.vendor-run-form input {
+.vendor-run-form input,
+.dense-form input,
+.dense-form textarea {
   font: inherit;
   font-weight: 500;
-  padding: 0.45rem 0.55rem;
-  border-radius: 10px;
+  font-size: 0.88rem;
+  padding: 0.32rem 0.45rem;
+  border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--input-bg, var(--bg-elevated));
   color: var(--ink);
+  min-height: 2rem;
+}
+
+.dense-form-title {
+  margin: 0 0 0.15rem;
+  font-size: 0.95rem;
+  font-weight: 750;
+}
+
+.dense-optional {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+}
+
+.dense-optional summary {
+  cursor: pointer;
+  font-weight: 650;
+  color: var(--muted);
+  user-select: none;
+}
+
+.dense-optional[open] summary {
+  margin-bottom: 0.3rem;
+}
+
+.dense-toolbar {
+  margin: 0.15rem 0 0;
+  gap: 0.35rem;
+}
+
+.dense-empty {
+  padding: 0.65rem 0.75rem;
+  font-size: 0.85rem;
 }
 
 .vendor-run-hits {
@@ -13310,8 +13370,15 @@ svg {
 }
 
 /* Parts drop-off at shop */
+.parts-dropoff-list {
+  display: grid;
+  gap: 0.3rem;
+}
+
 .parts-dropoff-card {
-  margin-bottom: 0.55rem;
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 10px;
 }
 
 .parts-dropoff-card-head {
@@ -13319,34 +13386,71 @@ svg {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.35rem 0.75rem;
+  gap: 0.25rem 0.5rem;
+}
+
+.parts-dropoff-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.4rem;
+  min-width: 0;
+  flex: 1;
 }
 
 .parts-dropoff-vendor {
-  font-size: 1.05rem;
-  margin-right: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.parts-dropoff-when {
+  font-size: 0.72rem;
 }
 
 .parts-dropoff-summary {
-  margin: 0.4rem 0 0;
-  font-weight: 650;
-  line-height: 1.35;
+  margin: 0.15rem 0 0;
+  font-weight: 600;
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+
+.parts-dropoff-meta {
+  font-weight: 500;
 }
 
 .parts-dropoff-lines {
   list-style: none;
-  margin: 0.4rem 0 0;
+  margin: 0.15rem 0 0;
   padding: 0;
-  font-size: 0.88rem;
+  font-size: 0.8rem;
+  line-height: 1.25;
 }
 
 .parts-dropoff-lines li {
-  padding: 0.15rem 0;
+  padding: 0.05rem 0;
 }
 
 .parts-dropoff-qty {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+}
+
+.parts-dropoff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.parts-dropoff-actions .btn-sm {
+  min-height: 1.8rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.76rem;
+}
+
+.parts-dropoff-received {
+  margin: 0.1rem 0 0;
+  font-size: 0.72rem;
 }
 
 .parts-dropoff-card.st-waiting {
@@ -13356,6 +13460,21 @@ svg {
 .parts-dropoff-card.st-received {
   border-left: 3px solid var(--ok, #2f9e44);
   opacity: 0.92;
+}
+
+/* Shared density for warehouse ops screens */
+.is-dense .card {
+  padding: 0.55rem 0.65rem;
+}
+
+.vendor-run-summary.card {
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.35rem;
+}
+
+.vendor-run-list {
+  display: grid;
+  gap: 0.35rem;
 }
 
 .vendor-run-sheet-drop {

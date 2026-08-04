@@ -243,7 +243,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         setTickets(d.tickets || []);
         setWaiting(d.waiting || 0);
         setExpanded((p) => ({ ...p, [hit!.vendor_name]: true }));
-        setExpandedTicket((p) => ({ ...p, [hit!.id]: true }));
+        setExpandedTicket((p) => ({ ...p, [hit!.id]: true })); // force open when deep-linked
 
         const openish = (hit.lines || []).some((l) =>
           ["pending", "not_ready", "partial"].includes(l.status)
@@ -733,12 +733,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         <div className="page-header vendor-run-page-head">
           <div>
             <h2 style={{ margin: 0 }}>Part pickup request</h2>
-            <p style={{ margin: "0.25rem 0 0" }}>
-              Parts at a store? Log the vendor, part, and job address. Items{" "}
-              <strong>stay on Waiting</strong> until warehouse marks{" "}
-              <strong>Picked up</strong> or <strong>Not needed</strong> — they do not clear on
-              their own. Future ready dates stay listed (with an Arrives badge) but stay off the
-              driver&apos;s today run.
+            <p className="page-header-sub">
+              Stay on <strong>Waiting</strong> until <strong>Picked up</strong> or{" "}
+              <strong>Not needed</strong>. Later ready dates stay listed, off today&apos;s run.
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -1288,34 +1285,62 @@ function TicketCard({
     canEdit &&
     t.lines.some((l) => l.status === "pending" || l.status === "not_ready" || l.status === "partial");
 
+  const primaryOpen =
+    primaryLine &&
+    ["pending", "not_ready", "partial"].includes(primaryLine.status)
+      ? primaryLine
+      : t.lines.find((l) => ["pending", "not_ready", "partial"].includes(l.status)) ||
+        null;
+
   return (
     <div
       id={`pp-ticket-${t.id}`}
       className={`pp-ticket${ready ? "" : " pp-ticket-later"}`}
     >
-      <button type="button" className="pp-ticket-head" onClick={onToggle}>
-        <span>
-          <strong>{partText}</strong>
-          <span className="muted pp-ticket-meta">
-            {addressText ? ` · ${addressText}` : ""}
-            {contactText ? ` · contact ${contactText}` : ""}
-            {t.logged_by_name && t.logged_by_name !== contactText
-              ? ` · logged by ${t.logged_by_name}`
-              : t.logged_by_name && !contactText
-                ? ` · ${t.logged_by_name}`
-                : ""}
+      <div className="pp-ticket-row">
+        <button type="button" className="pp-ticket-head" onClick={onToggle}>
+          <span className="pp-ticket-main">
+            <span className="pp-ticket-title-line">
+              <span className="pp-ticket-chevron" aria-hidden>
+                {expanded ? "▾" : "▸"}
+              </span>
+              <strong>{partText}</strong>
+              <span className={`pp-ticket-badge st-${t.status}`}>
+                {t.status}
+                {openCount > 0 ? ` · ${openCount}` : ""}
+              </span>
+              {!ready && readyLabel ? (
+                <span className="pp-arrives-pill">Arrives {readyLabel}</span>
+              ) : null}
+            </span>
+            <span className="muted pp-ticket-meta">
+              {addressText || ""}
+              {contactText ? `${addressText ? " · " : ""}contact ${contactText}` : ""}
+            </span>
           </span>
-          {!ready && readyLabel ? (
-            <span className="pp-arrives-pill">Arrives {readyLabel} · not today</span>
-          ) : ready && t.needed_for_date ? (
-            <span className="pp-ready-pill">Ready {readyLabel || "today"}</span>
-          ) : null}
-        </span>
-        <span className={`pp-ticket-badge st-${t.status}`}>
-          {t.status}
-          {openCount > 0 ? ` · ${openCount} open` : ""}
-        </span>
-      </button>
+        </button>
+        {canResolve && primaryOpen && (
+          <div className="pp-ticket-quick-actions">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy || resolvingId === primaryOpen.id}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    `Mark “${partText}” as picked up?\n\nNext you’ll choose where you’re dropping it off at the shop.`
+                  )
+                ) {
+                  return;
+                }
+                void onResolve(primaryOpen.id, "picked");
+              }}
+            >
+              {resolvingId === primaryOpen.id ? "…" : "Picked up"}
+            </button>
+          </div>
+        )}
+      </div>
 
       {expanded && (
         <div className="pp-ticket-body">
