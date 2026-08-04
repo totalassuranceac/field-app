@@ -41,6 +41,7 @@ interface Vehicle extends VehicleMatch {
 }
 interface FuelEntry {
   id: number;
+  vehicle_id?: number;
   fuel_date: string;
   fuel_time?: string | null;
   store_number?: string | null;
@@ -101,6 +102,8 @@ export function FuelPage() {
   const [totals, setTotals] = useState<{ gallons: number; total_cost: number; count: number } | null>(
     null
   );
+  /** Filter recent entries by vehicle id ("" = all units) */
+  const [unitFilter, setUnitFilter] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   /** Admin/office: open a recent entry to view receipt + jump to verify/edit */
@@ -237,23 +240,32 @@ export function FuelPage() {
     return "missing" as const;
   }
 
+  async function loadFuel(vehicleIdFilter?: string) {
+    const q =
+      vehicleIdFilter && vehicleIdFilter.trim()
+        ? `?vehicle_id=${encodeURIComponent(vehicleIdFilter.trim())}`
+        : "";
+    const fuel = await api<{
+      entries: FuelEntry[];
+      totals: { gallons: number; total_cost: number; count: number };
+    }>(`/fuel${q}`);
+    setEntries(fuel.entries || []);
+    setTotals(fuel.totals || null);
+  }
+
   async function load() {
     // scope=fleet: every active van so helpers can pick another unit when covering
-    const [emps, vehs, fuel] = await Promise.all([
+    const [emps, vehs] = await Promise.all([
       api<{ employees: Employee[] }>("/employees"),
       api<{
         vehicles: Vehicle[];
         default_vehicle_ids?: number[];
       }>("/vehicles?filter=active&scope=fleet"),
-      api<{ entries: FuelEntry[]; totals: { gallons: number; total_cost: number; count: number } }>(
-        "/fuel"
-      ),
     ]);
     setEmployees(emps.employees);
     const list = vehs.vehicles || [];
     setVehicles(list);
-    setEntries(fuel.entries);
-    setTotals(fuel.totals);
+    await loadFuel(unitFilter);
     if (user?.employee_id) setEmployeeId(String(user.employee_id));
 
     // Default to usual unit (first is_my_default / default_vehicle_ids)
@@ -292,6 +304,69 @@ export function FuelPage() {
     () => vehicles.filter((v) => !v.is_my_default),
     [vehicles]
   );
+
+  const vehiclesByUnit = useMemo(
+    () =>
+      [...vehicles].sort((a, b) =>
+        String(a.unit_number || "").localeCompare(String(b.unit_number || ""), undefined, {
+          numeric: true,
+        })
+      ),
+    [vehicles]
+  );
+
+  const filterUnitLabel = useMemo(() => {
+    if (!unitFilter) return null;
+    return vehicles.find((v) => String(v.id) === unitFilter)?.unit_number || null;
+  }, [unitFilter, vehicles]);
+
+  /** When one unit is selected: gallons/cost + rough MPG from odometer gaps. */
+  const unitUsage = useMemo(() => {
+    if (!unitFilter || entries.length < 1) return null;
+    const sorted = [...entries].sort((a, b) => {
+      const d = String(a.fuel_date).localeCompare(String(b.fuel_date));
+      if (d !== 0) return d;
+      return a.id - b.id;
+    });
+    let miles = 0;
+    let gallons = 0;
+    let legs = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      const dMiles = Number(cur.odometer) - Number(prev.odometer);
+      const gal = Number(cur.gallons);
+      if (
+        Number.isFinite(dMiles) &&
+        dMiles > 5 &&
+        dMiles < 2500 &&
+        Number.isFinite(gal) &&
+        gal > 0
+      ) {
+        miles += dMiles;
+        gallons += gal;
+        legs += 1;
+      }
+    }
+    const totalGal = entries.reduce((s, e) => s + (Number(e.gallons) || 0), 0);
+    const totalCost = entries.reduce((s, e) => s + (Number(e.total_cost) || 0), 0);
+    return {
+      count: entries.length,
+      gallons: totalGal,
+      cost: totalCost,
+      miles: legs > 0 ? miles : null,
+      mpg: legs > 0 && gallons > 0 ? miles / gallons : null,
+      legs,
+    };
+  }, [unitFilter, entries]);
+
+  useEffect(() => {
+    if (!vehicles.length) return;
+    void loadFuel(unitFilter).catch((e) =>
+      setError(e instanceof Error ? e.message : "Could not load fuel for that unit")
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter]);
 
   function applyVehicleCrew(id: string) {
     setVehicleId(id);
@@ -1099,12 +1174,71 @@ export function FuelPage() {
         count={entries.length}
         hint={
           canReviewReceipts
-            ? "Open a row → view receipt photo → Review & edit to verify / teach OCR"
-            : "Tap a row for gallons / total / odometer"
+            ? "Filter by unit · open a row for receipt · Review & edit to verify OCR"
+            : "Pick a unit to see only that van’s fuel · tap a row for details"
         }
-        defaultOpen={canReviewReceipts}
+        defaultOpen={canReviewReceipts || !!unitFilter}
       >
-        <LogList className="fuel-entry-list" empty="No entries yet.">
+        <div className="fuel-unit-filter no-print">
+          <label>
+            Show unit
+            <select
+              value={unitFilter}
+              onChange={(e) => {
+                setUnitFilter(e.target.value);
+                setInspectId(null);
+              }}
+              aria-label="Filter fuel entries by unit"
+            >
+              <option value="">All units</option>
+              {vehiclesByUnit.map((v) => (
+                <option key={v.id} value={String(v.id)}>
+                  Unit {v.unit_number}
+                  {v.driver_name || v.assigned_driver
+                    ? ` · ${v.driver_name || v.assigned_driver}`
+                    : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {unitFilter && (
+            <button
+              type="button"
+              className="btn ghost btn-sm"
+              onClick={() => setUnitFilter("")}
+            >
+              Clear filter
+            </button>
+          )}
+        </div>
+
+        {unitFilter && unitUsage && (
+          <div className="fuel-unit-usage no-print" aria-live="polite">
+            <strong>
+              Unit {filterUnitLabel || "—"} usage
+            </strong>
+            <span>
+              {unitUsage.count} stop{unitUsage.count === 1 ? "" : "s"} ·{" "}
+              {unitUsage.gallons.toFixed(1)} gal · ${unitUsage.cost.toFixed(2)}
+              {unitUsage.mpg != null
+                ? ` · ~${unitUsage.mpg.toFixed(1)} mpg (${unitUsage.legs} interval${
+                    unitUsage.legs === 1 ? "" : "s"
+                  })`
+                : unitUsage.count >= 2
+                  ? " · MPG needs valid odometer gaps"
+                  : ""}
+            </span>
+          </div>
+        )}
+
+        <LogList
+          className="fuel-entry-list"
+          empty={
+            unitFilter
+              ? `No fuel entries for unit ${filterUnitLabel || "selected"}.`
+              : "No entries yet."
+          }
+        >
           {entries.map((e) => {
             const open = inspectId === e.id;
             return (
@@ -1115,12 +1249,13 @@ export function FuelPage() {
                   <>
                     <strong>{e.fuel_date}</strong>
                     {e.fuel_time ? <span className="log-item-meta">{e.fuel_time}</span> : null}
-                    {e.unit_number ? (
+                    {e.unit_number && !unitFilter ? (
                       <span className="log-item-badge">Unit {e.unit_number}</span>
                     ) : null}
                     <span className="log-item-meta">
                       {e.gallons != null ? `${Number(e.gallons).toFixed(1)} gal` : "—"}
                       {e.total_cost != null ? ` · $${Number(e.total_cost).toFixed(2)}` : ""}
+                      {unitFilter ? ` · ${Number(e.odometer).toLocaleString()} mi` : ""}
                     </span>
                     {canReviewReceipts && e.receipt_key ? (
                       <span className="log-item-badge" title="Has receipt photo">
