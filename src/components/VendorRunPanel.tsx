@@ -15,6 +15,8 @@ interface TicketLine {
   qty_received: number | null;
   status: LineStatus;
   notes: string | null;
+  resolved_at?: string | null;
+  resolved_by_user_id?: number | null;
   resolved_by_name?: string | null;
 }
 
@@ -66,6 +68,24 @@ function formatReadyDate(iso: string | null | undefined): string {
     });
   } catch {
     return iso.slice(0, 10);
+  }
+}
+
+/** Compact local-looking stamp for audit rows (DB stores "YYYY-MM-DD HH:MM:SS"). */
+function formatStamp(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const s = String(iso).replace("T", " ").slice(0, 16);
+  try {
+    const d = new Date(s.includes(" ") ? s.replace(" ", "T") : s);
+    if (Number.isNaN(d.getTime())) return s;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return s;
   }
 }
 
@@ -761,9 +781,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                 setFilter("history");
                 setShowForm(false);
               }}
-              title="Picked up or not needed — find something to put back on the list"
+              title="History of who requested and who picked up — put back if needed"
             >
-              Picked / done
+              History
             </button>
             <button
               type="button"
@@ -1139,7 +1159,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             {filter === "open"
               ? "Nothing waiting for pickup. Use New pickup request — set Ready to pick on a future day if it is still arriving."
               : filter === "history"
-                ? "No picked / done requests in recent history. Use this tab to find something marked picked by mistake and put it back."
+                ? "No closed pickups yet. History shows who requested each part and who marked it picked up."
                 : "No recent pickup requests."}
           </div>
         )}
@@ -1316,6 +1336,18 @@ function TicketCard({
             <span className="muted pp-ticket-meta">
               {addressText || ""}
               {contactText ? `${addressText ? " · " : ""}contact ${contactText}` : ""}
+              {t.logged_by_name
+                ? `${addressText || contactText ? " · " : ""}req ${t.logged_by_name}`
+                : ""}
+              {(() => {
+                const picked = t.lines.find(
+                  (l) => l.status === "picked" && (l.resolved_by_name || l.resolved_at)
+                );
+                if (!picked) return "";
+                return ` · picked ${picked.resolved_by_name || "someone"}${
+                  picked.resolved_at ? ` ${formatStamp(picked.resolved_at)}` : ""
+                }`;
+              })()}
             </span>
           </span>
         </button>
@@ -1344,6 +1376,58 @@ function TicketCard({
 
       {expanded && (
         <div className="pp-ticket-body">
+          {/* Always-visible who-did-what trail */}
+          <div className="pp-activity" aria-label="Activity log">
+            <div className="pp-activity-title">Activity</div>
+            <ul className="pp-activity-list">
+              <li>
+                <span className="pp-activity-when">{formatStamp(t.created_at) || "—"}</span>
+                <span className="pp-activity-what">
+                  Requested by <strong>{t.logged_by_name || "Unknown"}</strong>
+                  {contactText && contactText !== t.logged_by_name
+                    ? ` · contact ${contactText}`
+                    : ""}
+                  {addressText ? ` · for ${addressText}` : ""}
+                </span>
+              </li>
+              {t.lines
+                .filter((l) => l.status !== "pending" || l.resolved_at || l.resolved_by_name)
+                .map((l) => {
+                  const who = l.resolved_by_name || "Someone";
+                  const when = formatStamp(l.resolved_at);
+                  const what =
+                    l.status === "picked"
+                      ? "Picked up"
+                      : l.status === "cancelled"
+                        ? "Marked not needed"
+                        : l.status === "not_ready"
+                          ? "Marked not ready"
+                          : l.status === "partial"
+                            ? "Partial pickup"
+                            : statusLabel(l.status);
+                  const part =
+                    (l.part_name || l.part_code || "").trim() || `Line ${l.line_no}`;
+                  return (
+                    <li key={`act-${l.id}-${l.status}-${l.resolved_at || ""}`}>
+                      <span className="pp-activity-when">{when || "—"}</span>
+                      <span className="pp-activity-what">
+                        {what} by <strong>{who}</strong>
+                        {l.qty_received != null ? ` · qty ${l.qty_received}` : ""}
+                        {` · ${part}`}
+                        {l.status === "cancelled" && l.notes ? ` · ${l.notes}` : ""}
+                      </span>
+                    </li>
+                  );
+                })}
+              {!t.lines.some((l) => l.status === "picked" || l.status === "cancelled" || l.status === "not_ready" || l.status === "partial") && (
+                <li className="pp-activity-pending">
+                  <span className="pp-activity-when">Now</span>
+                  <span className="pp-activity-what muted">Waiting for warehouse pickup</span>
+                </li>
+              )}
+            </ul>
+          </div>
+
           {canEditText && primaryLine ? (
             <div className="pp-owner-edit" style={{ marginBottom: "0.75rem" }}>
               <label>
@@ -1386,31 +1470,21 @@ function TicketCard({
               </button>
             </div>
           ) : (
-            <div className="pp-readonly" style={{ marginBottom: "0.65rem" }}>
+            <div className="pp-readonly" style={{ marginBottom: "0.45rem" }}>
               <p style={{ margin: 0, fontWeight: 600 }}>{partText}</p>
               {addressText ? (
-                <p className="muted" style={{ margin: "0.25rem 0 0" }}>
+                <p className="muted" style={{ margin: "0.15rem 0 0" }}>
                   Needed for: {addressText}
                 </p>
               ) : null}
               {t.needed_for_date ? (
-                <p style={{ margin: "0.25rem 0 0", fontWeight: 600 }}>
+                <p style={{ margin: "0.15rem 0 0", fontWeight: 600 }}>
                   {ready ? "Ready to pick" : "Arrives"}: {readyLabel}
                   {!ready ? " (not on today's run)" : ""}
                 </p>
               ) : null}
-              {contactText ? (
-                <p style={{ margin: "0.25rem 0 0", fontWeight: 600 }}>
-                  Contact: {contactText}
-                </p>
-              ) : null}
-              {t.logged_by_name && t.logged_by_name !== contactText ? (
-                <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.82rem" }}>
-                  Logged by {t.logged_by_name}
-                </p>
-              ) : null}
-              {!canEdit && (
-                <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}>
+              {!canEdit && openCount > 0 && (
+                <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.78rem" }}>
                   Ask office/warehouse to update the description or ready date.
                 </p>
               )}
@@ -1440,6 +1514,12 @@ function TicketCard({
                       {statusLabel(line.status)}
                       {line.qty_received != null ? ` · ${line.qty_received}` : ""}
                     </span>
+                    {locked && (line.resolved_by_name || line.resolved_at) ? (
+                      <span className="muted pp-line-who">
+                        {line.resolved_by_name || "Someone"}
+                        {line.resolved_at ? ` · ${formatStamp(line.resolved_at)}` : ""}
+                      </span>
+                    ) : null}
                   </div>
                   {line.status === "cancelled" && line.notes ? (
                     <p className="pp-cancel-reason muted">Why: {line.notes}</p>

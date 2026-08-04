@@ -9501,6 +9501,15 @@ api.post("/inventory/part-pickups", async (c) => {
       throw lineErr;
     }
 
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "part_pickup",
+      ticketId,
+      `Pickup request · ${vendor} · ${description.slice(0, 80)} · for ${address.slice(0, 40)} · contact ${contactStored || "—"}`
+    );
+
     const bg = (async () => {
       try {
         // Always notify warehouse/office/admin — even when ready date is in the future
@@ -9815,19 +9824,31 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
 
     await refreshPartPickupTicketStatus(c.env.DB, line.ticket_id);
 
+    const label = line.part_name || line.part_code || `Line ${lineId}`;
+    const statusLabel =
+      status === "cancelled"
+        ? "Not needed"
+        : status === "not_ready"
+          ? "Not ready"
+          : status === "picked"
+            ? "Picked up"
+            : status === "partial"
+              ? "Partial"
+              : status.replace("_", " ");
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "part_pickup",
+      line.ticket_id,
+      `${statusLabel} · ${line.vendor_name} · ${label}${
+        qtyRecv != null ? ` · qty ${qtyRecv}` : ""
+      }${notesIn ? ` · ${notesIn.slice(0, 60)}` : ""} — by ${user.display_name}`
+    );
+
     // Notify in background — never make the counter wait on notifications
     if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
-      const label = line.part_name || line.part_code || `Line ${lineId}`;
-      const statusLabel =
-        status === "cancelled"
-          ? "Not needed"
-          : status === "not_ready"
-            ? "Not ready"
-            : status === "picked"
-              ? "Picked up"
-              : status === "partial"
-                ? "Partial"
-                : status.replace("_", " ");
       scheduleWaitUntil(
         c,
         notifyUsers(
@@ -9851,6 +9872,8 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       status,
       qty_received: qtyRecv,
       ticket_id: line.ticket_id,
+      resolved_by: user.display_name,
+      resolved_at: status === "pending" ? null : new Date().toISOString(),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
