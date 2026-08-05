@@ -175,9 +175,12 @@ export function ToolLoanLedgerPage() {
     });
   }
 
-  const loadAll = useCallback(async () => {
-    setError("");
-    setLoading(true);
+  const loadAll = useCallback(async (opts?: { quiet?: boolean }) => {
+    const quiet = !!opts?.quiet;
+    if (!quiet) {
+      setError("");
+      setLoading(true);
+    }
     try {
       const health = await api<{
         ok: boolean;
@@ -222,12 +225,13 @@ export function ToolLoanLedgerPage() {
         setPickerUsers([]);
       }
 
-      setOk("");
+      if (!quiet) setOk("");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Could not load ledger";
+      if (quiet) throw e instanceof Error ? e : new Error(msg);
       setError(msg);
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, []);
 
@@ -323,6 +327,7 @@ export function ToolLoanLedgerPage() {
         throw new Error("Select an employee from the list.");
       }
 
+      // Charge save must not share the short mobile default timeout (12s) — D1 + audit can be slower.
       const res = await api<{
         id: number;
         person_id: number;
@@ -332,18 +337,27 @@ export function ToolLoanLedgerPage() {
       }>("/tool-loan-ledger/charges", {
         method: "POST",
         body: JSON.stringify(payload),
+        timeoutMs: 45_000,
       });
 
       setLastChargePrintId(res.id);
       setAddReason("");
       setAddAmt("");
-      setOk(
-        `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. Print the acknowledgment for their signature.`
-      );
       setSelectedId(res.person_id);
-      await loadAll();
-      await loadDetail(res.person_id);
+      setOk(
+        `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. Opening acknowledgment form to print.`
+      );
+      // Print first — don't make success wait on a full ledger reload
       openChargeAgreementPrint(res.id);
+      // Refresh list quietly; never turn a saved charge into a red timeout banner
+      try {
+        await loadAll({ quiet: true });
+        await loadDetail(res.person_id);
+      } catch {
+        setOk(
+          `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. List may need Refresh — charge is saved.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Charge failed");
     } finally {
@@ -358,7 +372,7 @@ export function ToolLoanLedgerPage() {
     setError("");
     setOk("");
     try {
-      const res = await api<{ id: number }>("/tool-loan-ledger/charges", {
+      const res = await api<{ id: number; balance_after?: number }>("/tool-loan-ledger/charges", {
         method: "POST",
         body: JSON.stringify({
           person_id: selectedId,
@@ -368,13 +382,19 @@ export function ToolLoanLedgerPage() {
           amount: Number(chargeAmt),
           charge_kind: "other",
         }),
+        timeoutMs: 45_000,
       });
       setChargeDesc("");
       setChargeAmt("");
       setLastChargePrintId(res.id);
       setOk("Charge added. You can print the acknowledgment form.");
-      await loadDetail(selectedId);
-      await loadAll();
+      openChargeAgreementPrint(res.id);
+      try {
+        await loadDetail(selectedId);
+        await loadAll({ quiet: true });
+      } catch {
+        /* charge already saved — don't show false timeout error */
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Charge failed");
     } finally {
@@ -398,12 +418,17 @@ export function ToolLoanLedgerPage() {
           payment_type: payType,
           note: payNote.trim() || undefined,
         }),
+        timeoutMs: 45_000,
       });
       setPayAmt("");
       setPayNote("");
       setOk(payType === "spiff" ? "Spiff payment recorded." : "Payroll payment recorded.");
-      await loadDetail(selectedId);
-      await loadAll();
+      try {
+        await loadDetail(selectedId);
+        await loadAll({ quiet: true });
+      } catch {
+        /* payment already saved */
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Payment failed");
     } finally {
