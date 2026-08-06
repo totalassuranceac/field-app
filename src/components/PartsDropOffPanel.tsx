@@ -27,6 +27,18 @@ interface Dropoff {
   lines?: DropoffLine[];
 }
 
+interface PendingPlacement {
+  line_id: number;
+  ticket_id: number;
+  vendor_name: string;
+  part_name: string;
+  part_code: string | null;
+  qty: number;
+  resolved_at: string;
+  purchase_order: string | null;
+  ticket_notes: string | null;
+}
+
 /**
  * Parts already picked up from a vendor and left at the shop —
  * warehouse sees them as ready to put away / issue to a truck.
@@ -41,12 +53,15 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const [filter, setFilter] = useState<"waiting" | "all">("waiting");
   const [list, setList] = useState<Dropoff[]>([]);
   const [waiting, setWaiting] = useState(0);
+  const [pending, setPending] = useState<PendingPlacement[]>([]);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(true);
   const [actingId, setActingId] = useState<number | null>(null);
   const [fromPickup, setFromPickup] = useState(false);
+  const [pickupTicketId, setPickupTicketId] = useState<number | null>(null);
+  const [pickupLineId, setPickupLineId] = useState<number | null>(null);
 
   const [vendor, setVendor] = useState("");
   const [summary, setSummary] = useState("");
@@ -56,6 +71,42 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
     { code: "", name: "", qty: "1" },
   ]);
 
+  function startPlacement(opts: {
+    vendor: string;
+    part: string;
+    qty?: string;
+    ticketId?: number | null;
+    lineId?: number | null;
+    address?: string;
+    contact?: string;
+  }) {
+    setVendor(opts.vendor);
+    setSummary(opts.part);
+    setPartSlots([
+      {
+        code: "",
+        name: opts.part,
+        qty: opts.qty || "1",
+      },
+    ]);
+    setNotes("");
+    setForUnit("");
+    setPickupTicketId(opts.ticketId ?? null);
+    setPickupLineId(opts.lineId ?? null);
+    setFromPickup(true);
+    setShowForm(true);
+    setOk(
+      `Say where you placed the ${opts.vendor} parts (${opts.part}), then save.`
+    );
+    window.setTimeout(() => {
+      document.getElementById("dropoff-form")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      document.getElementById("dropoff-where-left")?.focus();
+    }, 80);
+  }
+
   // Prefill from Part pickup "Picked up" → drop-off handoff
   useEffect(() => {
     const from = searchParams.get("from");
@@ -64,26 +115,19 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
     const address = (searchParams.get("address") || "").trim();
     const contact = (searchParams.get("contact") || "").trim();
     const qty = (searchParams.get("qty") || "1").trim() || "1";
+    const ticketId = Number(searchParams.get("pickup_id")) || null;
+    const lineId = Number(searchParams.get("line_id")) || null;
     if (from !== "pickup" && !v && !part) return;
 
-    if (v) setVendor(v);
-    if (part) {
-      setSummary(part);
-      setPartSlots([{ code: "", name: part, qty }]);
-    }
-    const noteBits = [
-      address ? `Job / address: ${address}` : "",
-      contact ? `Contact: ${contact}` : "",
-      "Dropped after vendor pickup",
-    ].filter(Boolean);
-    setNotes(noteBits.join(" · "));
-    setShowForm(true);
-    setFromPickup(true);
-    setOk(
-      part
-        ? `Picked up selected: ${part}. Confirm where you’re dropping it off, then save.`
-        : "Picked up — confirm drop-off details, then save."
-    );
+    startPlacement({
+      vendor: v,
+      part: part || "Parts from vendor",
+      qty,
+      ticketId,
+      lineId,
+      address,
+      contact,
+    });
 
     // Clear query so a refresh doesn’t re-apply forever
     const next = new URLSearchParams(searchParams);
@@ -91,12 +135,6 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       next.delete(k)
     );
     setSearchParams(next, { replace: true });
-    window.setTimeout(() => {
-      document.getElementById("dropoff-form")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 80);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -110,14 +148,23 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
           : "other";
 
   const load = useCallback(async () => {
-    const d = await api<{
-      dropoffs: Dropoff[];
-      waiting?: number;
-      error?: string;
-    }>(`/inventory/parts-dropoffs?status=${filter === "waiting" ? "waiting" : "all"}`);
+    const [d, p] = await Promise.all([
+      api<{
+        dropoffs: Dropoff[];
+        waiting?: number;
+        error?: string;
+      }>(`/inventory/parts-dropoffs?status=${filter === "waiting" ? "waiting" : "all"}`),
+      api<{ pending?: PendingPlacement[]; count?: number }>(
+        "/inventory/parts-dropoffs/pending-placement"
+      ).catch(() => ({ pending: [] as PendingPlacement[] })),
+    ]);
     setList(d.dropoffs || []);
     setWaiting(d.waiting ?? 0);
+    setPending(p.pending || []);
     if (d.error) setError(d.error);
+    if ((p.pending || []).length) {
+      window.dispatchEvent(new CustomEvent("notifications-changed"));
+    }
   }, [filter]);
 
   useEffect(() => {
@@ -126,6 +173,10 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (fromPickup && !notes.trim()) {
+      setError("Say where you placed the parts (counter, cage, shelf, truck…), then save.");
+      return;
+    }
     setBusy(true);
     setError("");
     setOk("");
@@ -147,18 +198,24 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
           notes: notes.trim() || null,
           parts: parts.length ? parts : undefined,
           source: defaultSource,
+          pickup_ticket_id: pickupTicketId,
+          pickup_line_id: pickupLineId,
         }),
       });
-      setOk("Logged — warehouse can see these parts are at the shop.");
+      setOk("Logged — warehouse can see these parts and where you left them.");
       setVendor("");
       setSummary("");
       setForUnit("");
       setNotes("");
       setPartSlots([{ code: "", name: "", qty: "1" }]);
+      setPickupTicketId(null);
+      setPickupLineId(null);
       setShowForm(false);
+      setFromPickup(false);
       setFilter("waiting");
       await load();
       window.dispatchEvent(new CustomEvent("parts-dropoffs-changed"));
+      window.dispatchEvent(new CustomEvent("notifications-changed"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save");
     } finally {
@@ -216,8 +273,11 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
           <div>
             <h2 style={{ margin: 0 }}>Brought to shop</h2>
             <p className="page-header-sub">
-              Log vendor parts left at the shop ·{" "}
+              Record where vendor parts are at the shop ·{" "}
               <Link to="/part-pickup">Still at the store?</Link>
+              {pending.length > 0
+                ? ` · ${pending.length} pickup${pending.length === 1 ? "" : "s"} need placement`
+                : ""}
             </p>
           </div>
           <div className="vendor-run-toolbar">
@@ -252,6 +312,60 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
+      {pending.length > 0 && (
+        <div className="card parts-place-pending" style={{ marginBottom: "0.85rem" }}>
+          <h3 style={{ margin: "0 0 0.35rem", fontSize: "1rem" }}>
+            Need placement ({pending.length})
+          </h3>
+          <p className="muted" style={{ margin: "0 0 0.65rem", fontSize: "0.88rem" }}>
+            You marked these picked up but haven&apos;t said where you left them yet. Tap one to
+            finish.
+          </p>
+          <ul className="parts-place-pending-list" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            {pending.map((p) => (
+              <li
+                key={p.line_id}
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "0.5rem 0",
+                  borderTop: "1px solid var(--border, #334155)",
+                }}
+              >
+                <div style={{ minWidth: 0, flex: "1 1 12rem" }}>
+                  <strong>{p.vendor_name}</strong>
+                  <div className="muted" style={{ fontSize: "0.88rem" }}>
+                    {p.qty > 1 ? `${p.qty}× ` : ""}
+                    {p.part_name}
+                    {p.resolved_at
+                      ? ` · picked ${String(p.resolved_at).replace("T", " ").slice(0, 16)}`
+                      : ""}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn primary small"
+                  onClick={() =>
+                    startPlacement({
+                      vendor: p.vendor_name,
+                      part: p.part_name,
+                      qty: String(p.qty || 1),
+                      ticketId: p.ticket_id,
+                      lineId: p.line_id,
+                    })
+                  }
+                >
+                  Where placed?
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {showForm && (
         <form
           className={`card form vendor-run-form dense-form${fromPickup ? " parts-dropoff-from-pickup" : ""}`}
@@ -259,21 +373,28 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
           id="dropoff-form"
         >
           <h3 className="dense-form-title">
-            {fromPickup ? "Where are you dropping this off?" : "Log drop-off"}
+            {fromPickup ? "Where did you place the parts?" : "Log drop-off"}
           </h3>
+          {fromPickup && (
+            <p className="muted" style={{ margin: "0 0 0.65rem", fontSize: "0.88rem" }}>
+              Required: counter, cage, shelf, truck, etc. — so warehouse can find them.
+            </p>
+          )}
           <div className="dense-form-grid">
             <label>
               Vendor
               <input
                 value={vendor}
                 onChange={(e) => setVendor(e.target.value)}
-                placeholder="Carrier, Lennox, ACE…"
+                placeholder="Carrier, Lennox, Solar, ACE…"
                 required
                 list="parts-dropoff-vendors"
               />
               <datalist id="parts-dropoff-vendors">
                 <option value="Carrier" />
                 <option value="Lennox" />
+                <option value="Solar" />
+                <option value="Solar Supply" />
                 <option value="ACE" />
                 <option value="Johnstone" />
                 <option value="Ferguson" />
@@ -296,11 +417,14 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
               />
             </label>
             <label>
-              Where left <span className="muted">(opt.)</span>
+              Where you placed them{fromPickup ? " *" : " "}
+              {!fromPickup && <span className="muted">(opt.)</span>}
               <input
+                id="dropoff-where-left"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="Counter · cage…"
+                placeholder="Counter · cage · shelf · truck 12…"
+                required={fromPickup}
               />
             </label>
           </div>

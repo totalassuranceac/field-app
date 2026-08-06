@@ -438,8 +438,8 @@ export function Layout({ children }: { children: ReactNode }) {
     {
       to: "/live",
       label: "Live map",
-      // Not on warehouse short-list (they focus on parts)
-      show: adminShell || isOffice || isDriver || isMechanic,
+      // Warehouse needs map to find techs for parts delivery / pickup
+      show: adminShell || isOffice || isDriver || isMechanic || isWarehouse,
     },
     {
       to: "/yard",

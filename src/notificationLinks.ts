@@ -93,8 +93,10 @@ export function notificationLink(n: {
   if (kind.startsWith("warranty_") || kind === "warranty_aging" || kind === "warranty_urgent")
     return "/warranties";
   if (
+    kind === "parts_place_reminder" ||
     kind === "parts_dropoff" ||
     entity === "parts_dropoff" ||
+    text.includes("where did you put") ||
     text.includes("parts at shop") ||
     text.includes("drop-off") ||
     text.includes("dropoff")

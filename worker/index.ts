@@ -9866,6 +9866,37 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       );
     }
 
+    // Reminder for the person who picked up: record where parts were left at the office
+    if (status === "picked" || status === "partial") {
+      scheduleWaitUntil(
+        c,
+        (async () => {
+          try {
+            const existing = await c.env.DB.prepare(
+              `SELECT id FROM notifications
+               WHERE user_id = ? AND kind = 'parts_place_reminder'
+                 AND entity_type = 'part_pickup' AND entity_id = ?
+                 AND read_at IS NULL
+               LIMIT 1`
+            )
+              .bind(user.id, String(line.ticket_id))
+              .first<{ id: number }>();
+            if (existing) return;
+            await notifyUsers(
+              c.env.DB,
+              [user.id],
+              "parts_place_reminder",
+              `Where did you put the ${line.vendor_name} parts?`,
+              `${label}${qtyRecv != null ? ` · qty ${qtyRecv}` : ""} — when you're back at the office, open Parts drop-off and record where you left them (counter, cage, shelf, truck…).`,
+              { type: "part_pickup", id: line.ticket_id }
+            );
+          } catch {
+            /* non-fatal */
+          }
+        })()
+      );
+    }
+
     return c.json({
       ok: true,
       line_id: lineId,
@@ -9915,12 +9946,15 @@ async function ensurePartsDropoffTables(db: D1Database): Promise<void> {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`,
     `CREATE INDEX IF NOT EXISTS idx_parts_dropoff_lines_dropoff ON parts_dropoff_lines(dropoff_id, line_no)`,
+    `ALTER TABLE parts_dropoffs ADD COLUMN pickup_ticket_id INTEGER`,
+    `ALTER TABLE parts_dropoffs ADD COLUMN pickup_line_id INTEGER`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_dropoffs_pickup_line ON parts_dropoffs(pickup_line_id)`,
   ];
   for (const sql of stmts) {
     try {
       await db.prepare(sql).run();
     } catch {
-      /* exists */
+      /* exists / already has column */
     }
   }
   partsDropoffTablesReady = true;
@@ -9941,6 +9975,102 @@ async function countPartsDropoffWaiting(db: D1Database): Promise<number> {
 api.get("/inventory/parts-dropoffs/count", async (c) => {
   const waiting = await countPartsDropoffWaiting(c.env.DB);
   return c.json({ waiting });
+});
+
+/**
+ * Parts the current user marked picked up recently but never logged "where placed"
+ * (Brought to shop / drop-off). Used so they can finish after returning to the office.
+ */
+api.get("/inventory/parts-dropoffs/pending-placement", async (c) => {
+  const user = c.get("user");
+  await ensurePartsDropoffTables(c.env.DB);
+  try {
+    const rows = await c.env.DB.prepare(
+      `SELECT l.id as line_id, l.ticket_id, l.part_name, l.part_code, l.qty_received,
+              l.qty_requested, l.resolved_at, t.vendor_name, t.purchase_order, t.notes as ticket_notes
+       FROM part_pickup_ticket_lines l
+       JOIN part_pickup_tickets t ON t.id = l.ticket_id
+       WHERE l.status IN ('picked', 'partial')
+         AND l.resolved_by_user_id = ?
+         AND l.resolved_at IS NOT NULL
+         AND l.resolved_at >= datetime('now', '-3 days')
+         AND NOT EXISTS (
+           SELECT 1 FROM parts_dropoffs d
+           WHERE d.status != 'cancelled'
+             AND (
+               d.pickup_line_id = l.id
+               OR (
+                 d.pickup_line_id IS NULL
+                 AND d.dropped_by_user_id = l.resolved_by_user_id
+                 AND lower(trim(d.vendor_name)) = lower(trim(t.vendor_name))
+                 AND d.created_at >= datetime(l.resolved_at, '-2 hours')
+               )
+             )
+         )
+       ORDER BY l.resolved_at DESC
+       LIMIT 40`
+    )
+      .bind(user.id)
+      .all<{
+        line_id: number;
+        ticket_id: number;
+        part_name: string | null;
+        part_code: string | null;
+        qty_received: number | null;
+        qty_requested: number | null;
+        resolved_at: string;
+        vendor_name: string;
+        purchase_order: string | null;
+        ticket_notes: string | null;
+      }>();
+
+    const pending = (rows.results || []).map((r) => ({
+      line_id: r.line_id,
+      ticket_id: r.ticket_id,
+      vendor_name: r.vendor_name,
+      part_name: r.part_name || r.part_code || "Parts",
+      part_code: r.part_code,
+      qty: r.qty_received ?? r.qty_requested ?? 1,
+      resolved_at: r.resolved_at,
+      purchase_order: r.purchase_order,
+      ticket_notes: r.ticket_notes,
+    }));
+
+    // Ensure an unread reminder exists so the bell shows something actionable
+    for (const p of pending.slice(0, 10)) {
+      try {
+        const existing = await c.env.DB.prepare(
+          `SELECT id FROM notifications
+           WHERE user_id = ? AND kind = 'parts_place_reminder'
+             AND entity_type = 'part_pickup' AND entity_id = ?
+             AND read_at IS NULL
+           LIMIT 1`
+        )
+          .bind(user.id, String(p.ticket_id))
+          .first();
+        if (!existing) {
+          await notifyUsers(
+            c.env.DB,
+            [user.id],
+            "parts_place_reminder",
+            `Where did you put the ${p.vendor_name} parts?`,
+            `${p.part_name} · open Brought to shop and record where you left them.`,
+            { type: "part_pickup", id: p.ticket_id }
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return c.json({ pending, count: pending.length });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) {
+      return c.json({ pending: [], count: 0, error: "Pickup tables not ready" });
+    }
+    return c.json({ pending: [], count: 0, error: msg }, 500);
+  }
 });
 
 /** List drop-offs: waiting (default) | received | all */
@@ -10017,10 +10147,14 @@ api.post("/inventory/parts-dropoffs", async (c) => {
     notes?: string | null;
     parts?: Array<{ part_code?: string | null; part_name?: string | null; qty?: number }>;
     source?: "office" | "tech" | "warehouse" | "other";
+    pickup_ticket_id?: number | null;
+    pickup_line_id?: number | null;
   }>();
 
   const vendor = (body.vendor_name || "").trim();
   if (!vendor) return c.json({ error: "Vendor name is required" }, 400);
+  const pickupTicketId = Number(body.pickup_ticket_id) || null;
+  const pickupLineId = Number(body.pickup_line_id) || null;
 
   const partsIn = body.parts || [];
   let summary = (body.part_summary || "").trim();
@@ -10043,14 +10177,37 @@ api.post("/inventory/parts-dropoffs", async (c) => {
   const source = body.source || defaultVendorRunSource(user.role);
 
   try {
-    const ins = await c.env.DB.prepare(
-      `INSERT INTO parts_dropoffs (
-         vendor_name, part_summary, for_unit, notes, status,
-         dropped_by_user_id, source, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, 'waiting', ?, ?, datetime('now'), datetime('now'))`
-    )
-      .bind(vendor, summary, forUnit, notes, user.id, source)
-      .run();
+    let ins;
+    try {
+      ins = await c.env.DB.prepare(
+        `INSERT INTO parts_dropoffs (
+           vendor_name, part_summary, for_unit, notes, status,
+           dropped_by_user_id, source, pickup_ticket_id, pickup_line_id,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'waiting', ?, ?, ?, ?, datetime('now'), datetime('now'))`
+      )
+        .bind(
+          vendor,
+          summary,
+          forUnit,
+          notes,
+          user.id,
+          source,
+          pickupTicketId,
+          pickupLineId
+        )
+        .run();
+    } catch {
+      // Older schema without pickup link columns
+      ins = await c.env.DB.prepare(
+        `INSERT INTO parts_dropoffs (
+           vendor_name, part_summary, for_unit, notes, status,
+           dropped_by_user_id, source, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'waiting', ?, ?, datetime('now'), datetime('now'))`
+      )
+        .bind(vendor, summary, forUnit, notes, user.id, source)
+        .run();
+    }
     const dropoffId = Number(ins.meta.last_row_id);
 
     let lineNo = 1;
@@ -10077,12 +10234,24 @@ api.post("/inventory/parts-dropoffs", async (c) => {
           targets.filter((id) => id !== user.id),
           "parts_dropoff",
           `Parts at shop · ${vendor}`,
-          `${summary}${forUnit ? ` · unit ${forUnit}` : ""} — dropped by ${user.display_name}`,
+          `${summary}${forUnit ? ` · unit ${forUnit}` : ""}${notes ? ` · ${notes.slice(0, 80)}` : ""} — dropped by ${user.display_name}`,
           { type: "parts_dropoff", id: dropoffId }
         ).catch(() => {
           /* non-fatal */
         })
       );
+    } catch {
+      /* optional */
+    }
+
+    // Clear this user's "where did you put the parts?" reminders for this vendor (or all open)
+    try {
+      await c.env.DB.prepare(
+        `UPDATE notifications SET read_at = datetime('now')
+         WHERE user_id = ? AND kind = 'parts_place_reminder' AND read_at IS NULL`
+      )
+        .bind(user.id)
+        .run();
     } catch {
       /* optional */
     }
@@ -10093,7 +10262,7 @@ api.post("/inventory/parts-dropoffs", async (c) => {
       "create",
       "parts_dropoff",
       dropoffId,
-      `Drop-off ${vendor}: ${summary.slice(0, 80)}`
+      `Drop-off ${vendor}: ${summary.slice(0, 80)}${notes ? ` · ${notes.slice(0, 40)}` : ""}`
     );
 
     const row = await c.env.DB.prepare(

@@ -10351,7 +10351,8 @@ tr.row-low td {
   padding: 0;
   margin: 0;
   font: inherit;
-  font-weight: 650;
+  font-weight: 700;
+  font-size: 0.95rem;
   color: var(--text, #f8fafc);
   text-decoration: none;
   cursor: pointer;
@@ -10361,6 +10362,92 @@ tr.row-low td {
   color: var(--accent, #60a5fa);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+.payroll-unified-table .owner-weekly-cell {
+  background: color-mix(in srgb, #e31c23 10%, transparent) !important;
+}
+.payroll-unified-table .weekly-total-amt {
+  color: #fca5a5;
+}
+.payroll-unified-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.85rem;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0.35rem 0 0.5rem;
+}
+.payroll-unified-table tbody tr.is-selected td {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 18%, transparent) !important;
+  box-shadow: inset 3px 0 0 var(--accent, #3b82f6);
+}
+.person-ledger-card {
+  margin-top: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 40%, var(--border, #334155));
+  border-radius: 12px;
+  padding: 0.9rem 1rem 1.1rem;
+  scroll-margin-top: 1rem;
+}
+.person-ledger-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--border, #334155);
+}
+.person-ledger-head-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.person-charge-panel {
+  margin-top: 0.85rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #b45309 40%, var(--border, #334155));
+  background: color-mix(in srgb, #b45309 8%, transparent);
+}
+.person-charge-panel h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+.person-print-header {
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid #000;
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+.charge-history-table tbody tr.charge-row-reprintable {
+  cursor: pointer;
+}
+.charge-history-table tbody tr.charge-row-reprintable:hover td {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 12%, transparent);
+}
+.charge-history-table tbody tr.charge-row-reprintable:focus-visible {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: -2px;
+}
+.charge-desc-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 650;
+  color: var(--accent, #60a5fa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.charge-desc-link:hover {
+  color: var(--accent-hover, #93c5fd);
+  text-decoration-thickness: 2px;
 }
 .weekly-balance {
   font-variant-numeric: tabular-nums;
@@ -10537,6 +10624,21 @@ tr.row-low td {
   cursor: pointer;
   user-select: none;
 }
+.show-zero-toggle {
+  margin: 0;
+  padding: 0.2rem 0;
+}
+.show-zero-toggle input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--accent, #3b82f6);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.weekly-row-zero td {
+  opacity: 0.72;
+}
 .person-default-weekly {
   display: flex;
   flex-wrap: wrap;
@@ -10604,8 +10706,24 @@ tr.row-low td {
 }
 .owner-report-brand {
   display: flex;
-  gap: 0.85rem;
+  flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
+  gap: 0.75rem;
+  min-width: 0;
+  text-align: left;
+}
+.owner-report-logo {
+  height: 3.1rem;
+  width: auto;
+  max-width: 3.5rem;
+  object-fit: contain;
+  object-position: left center;
+  display: block;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
 }
 .owner-report-logo-mark {
   width: 2.75rem;
@@ -10621,16 +10739,18 @@ tr.row-low td {
   flex-shrink: 0;
 }
 .owner-report-company {
-  font-weight: 800;
-  font-size: 1.15rem;
-  color: var(--text, #0f172a);
-  letter-spacing: -0.02em;
+  display: none;
 }
 .owner-report-subtitle {
-  font-size: 0.98rem;
-  color: var(--muted, #5a6a7a);
-  font-weight: 600;
-  margin-top: 0.15rem;
+  font-size: 1rem;
+  color: var(--text, #e2e8f0);
+  font-weight: 700;
+  margin: 0;
+  padding: 0;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  text-align: left;
+  max-width: 14rem;
 }
 .owner-report-meta {
   display: flex;
@@ -10754,13 +10874,9 @@ tr.row-low td {
   }
 }
 @media print {
+  /* Hide chrome; only show ledger content we explicitly un-hide */
   body * {
     visibility: hidden !important;
-  }
-  .tool-loan-ledger,
-  .tool-loan-ledger #owner-payroll-report,
-  .tool-loan-ledger #owner-payroll-report * {
-    visibility: visible !important;
   }
   .tool-loan-ledger {
     position: absolute;
@@ -10770,14 +10886,32 @@ tr.row-low td {
     padding: 0 !important;
     margin: 0 !important;
     background: #fff !important;
+    visibility: visible !important;
+  }
+  /* Default print (Print report is server-side; browser print of page = payroll table) */
+  body:not(.print-person-ledger) .tool-loan-ledger #owner-payroll-report,
+  body:not(.print-person-ledger) .tool-loan-ledger #owner-payroll-report * {
+    visibility: visible !important;
+  }
+  /* Employee sheet: only that person's card */
+  body.print-person-ledger .tool-loan-ledger #employee-ledger-detail,
+  body.print-person-ledger .tool-loan-ledger #employee-ledger-detail * {
+    visibility: visible !important;
+  }
+  body.print-person-ledger .tool-loan-ledger #owner-payroll-report,
+  body.print-person-ledger .tool-loan-ledger #owner-payroll-report * {
+    display: none !important;
+    visibility: hidden !important;
   }
   .tool-loan-ledger .no-print,
   .tool-loan-ledger .banner,
   .tool-loan-ledger-grid {
     display: none !important;
+    visibility: hidden !important;
   }
   .tool-loan-ledger .print-only {
-    display: inline !important;
+    display: block !important;
+    visibility: visible !important;
   }
   .tool-loan-ledger .linkish {
     display: none !important;
@@ -10804,6 +10938,17 @@ tr.row-low td {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
+  .owner-report-logo {
+    height: 2.75rem;
+    max-width: 3.25rem;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .owner-report-subtitle {
+    color: #0c1f4a !important;
+    font-weight: 700 !important;
+    text-align: left !important;
+  }
   .owner-weekly-cell,
   .owner-totals-row td {
     -webkit-print-color-adjust: exact;
@@ -10814,6 +10959,34 @@ tr.row-low td {
   }
   .owner-report-footer {
     display: block !important;
+    visibility: visible !important;
+  }
+  body.print-person-ledger .person-ledger-card {
+    display: block !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  body.print-person-ledger .person-print-header {
+    display: block !important;
+    visibility: visible !important;
+    color: #000 !important;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid #000;
+  }
+  body.print-person-ledger .person-ledger-card h3 {
+    color: #000 !important;
+    margin-top: 1rem;
+  }
+  body.print-person-ledger .person-ledger-card .data-table,
+  body.print-person-ledger .person-ledger-card .data-table th,
+  body.print-person-ledger .person-ledger-card .data-table td {
+    color: #000 !important;
+    border-color: #94a3b8 !important;
     visibility: visible !important;
   }
   @page {

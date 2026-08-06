@@ -777,6 +777,7 @@ export function DashboardPage() {
           title: "Warehouse delivery request",
           hint: "Field needs a run",
         },
+        { to: "/live", icon: "🗺", title: "Live map", hint: "Find techs · units on the road" },
         { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · any unit" },
         { to: "/assets", icon: "🧪", title: "Company assets", hint: "Bottles · ladders · tools" },
         { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Company card photos" },

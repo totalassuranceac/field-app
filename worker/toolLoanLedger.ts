@@ -8,10 +8,12 @@ import { writeAudit } from "./audit";
 
 type App = Hono<{ Bindings: Env; Variables: Variables }>;
 
-/** Excel display name → preferred app display_name (confirmed map). */
+/** Excel / short names → preferred display_name (must match employees roster). */
 const EXCEL_NAME_ALIASES: Record<string, string> = {
-  "bianca ramirez": "Bianca",
-  "charles beard": "CharlesBeard",
+  bianca: "Bianca Ramirez",
+  "bianca ramirez": "Bianca Ramirez",
+  charlesbeard: "Charles Beard",
+  "charles beard": "Charles Beard",
   "geovany montes": "Geo Montes",
   "kirk crumbly": "Kirk Crumbley",
   "marcus tover": "Marcus Tovar",
@@ -498,6 +500,7 @@ export function registerToolLoanLedger(api: App): void {
   /**
    * People already on the ledger (any balance, including $0) plus active app users
    * not yet linked — so office can add a charge without the employee request flow.
+   * Also returns the full active employee payroll roster for the “include $0” list.
    */
   api.get("/tool-loan-ledger/employee-picker", async (c) => {
     const user = c.get("user");
@@ -506,17 +509,87 @@ export function registerToolLoanLedger(api: App): void {
     await ensureToolLoanLedgerTables(c.env.DB);
     const people = await balancesForPeople(c.env.DB);
     const users = await c.env.DB.prepare(
-      `SELECT id, display_name, role FROM users
+      `SELECT id, display_name, role, employee_id FROM users
        WHERE IFNULL(active, 1) = 1
        ORDER BY display_name COLLATE NOCASE`
-    ).all<{ id: number; display_name: string; role: string }>();
+    ).all<{ id: number; display_name: string; role: string; employee_id: number | null }>();
     const linkedUserIds = new Set(
       people.map((p) => p.user_id).filter((id): id is number => id != null)
     );
     const users_not_on_ledger = (users.results || []).filter((u) => !linkedUserIds.has(u.id));
+
+    // Prefer active employees; fall back to any employees if the active flag is sparse.
+    let emps = await c.env.DB.prepare(
+      `SELECT id, name FROM employees WHERE IFNULL(active, 1) = 1 ORDER BY name COLLATE NOCASE`
+    ).all<{ id: number; name: string }>();
+    if (!(emps.results || []).length) {
+      emps = await c.env.DB.prepare(
+        `SELECT id, name FROM employees ORDER BY name COLLATE NOCASE`
+      ).all<{ id: number; name: string }>();
+    }
+    const userByEmployeeId = new Map<number, number>();
+    const userByName = new Map<string, number>();
+    for (const u of users.results || []) {
+      if (u.employee_id != null && !userByEmployeeId.has(u.employee_id)) {
+        userByEmployeeId.set(u.employee_id, u.id);
+      }
+      const un =
+        String(u.display_name || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      if (un && !userByName.has(un)) userByName.set(un, u.id);
+    }
+    const active_employees: { id: number; name: string; user_id: number | null }[] = (
+      emps.results || []
+    ).map((e) => {
+      const nn = String(e.name || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return {
+        id: e.id,
+        name: e.name,
+        user_id: userByEmployeeId.get(e.id) ?? userByName.get(nn) ?? null,
+      };
+    });
+
+    // Ensure every active app user also appears on the roster (even without employees row)
+    const seenEmpNames = new Set(
+      active_employees.map((e) =>
+        String(e.name || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+    );
+    for (const u of users.results || []) {
+      const un =
+        String(u.display_name || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      if (!un || seenEmpNames.has(un)) continue;
+      // Skip pure system roles that never get tool loans
+      const role = String(u.role || "").toLowerCase();
+      if (role === "tv" || role === "system") continue;
+      seenEmpNames.add(un);
+      active_employees.push({
+        id: -u.id,
+        name: u.display_name,
+        user_id: u.id,
+      });
+    }
+    active_employees.sort((a, b) => a.name.localeCompare(b.name));
+
     return c.json({
       people,
       users_not_on_ledger,
+      active_employees,
     });
   });
 
@@ -726,6 +799,22 @@ export function registerToolLoanLedger(api: App): void {
       summary?.suggested_weekly ??
       policyWeeklyDeduction(balanceNow);
 
+    // Who is printing the form (office printed-name line) — always resolve from session + DB
+    let officePrinterName = String(user?.display_name || "").trim();
+    if (!officePrinterName && user?.id) {
+      const urow = await c.env.DB.prepare(
+        `SELECT display_name, username, email FROM users WHERE id = ?`
+      )
+        .bind(user.id)
+        .first<{ display_name: string | null; username: string | null; email: string | null }>();
+      officePrinterName = String(
+        urow?.display_name || urow?.username || urow?.email || ""
+      ).trim();
+    }
+    if (!officePrinterName) {
+      officePrinterName = String(user?.username || user?.email || "Office").trim() || "Office";
+    }
+
     const money = (n: number) =>
       n.toLocaleString("en-US", { style: "currency", currency: "USD" });
     const esc = (s: string) =>
@@ -873,6 +962,19 @@ export function registerToolLoanLedger(api: App): void {
       border-bottom: 1px solid #0f172a;
       height: 1.4rem;
     }
+    /* Pre-filled printed name — separate from blank signature lines so print always shows text */
+    .sign-block .print-name-value {
+      margin-top: 1.1rem;
+      border-bottom: 1px solid #000;
+      min-height: 1.65rem;
+      padding: 0.2rem 0 0.25rem;
+      font-size: 14px;
+      font-weight: 700;
+      color: #000 !important;
+      line-height: 1.35;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
     .sign-block .cap {
       margin-top: 0.35rem;
       font-size: 10px;
@@ -911,7 +1013,7 @@ export function registerToolLoanLedger(api: App): void {
       <span>Prepared</span>
       <strong>${esc(prepared)}</strong>
       <span style="display:block;margin-top:0.45rem">By</span>
-      <strong>${esc(user.display_name || "Office")}</strong>
+      <strong>${esc(officePrinterName)}</strong>
       <span style="display:block;margin-top:0.45rem">Charge #</span>
       <strong>${charge.id}</strong>
     </div>
@@ -964,7 +1066,7 @@ export function registerToolLoanLedger(api: App): void {
     <div class="sign-block">
       <div class="line"></div>
       <div class="cap">Employee signature</div>
-      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="print-name-value">${esc(charge.display_name)}</div>
       <div class="cap">Printed name</div>
       <div class="line" style="margin-top:1.1rem"></div>
       <div class="cap">Date</div>
@@ -972,7 +1074,7 @@ export function registerToolLoanLedger(api: App): void {
     <div class="sign-block">
       <div class="line"></div>
       <div class="cap">Office / supervisor signature</div>
-      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="print-name-value">${esc(officePrinterName)}</div>
       <div class="cap">Printed name</div>
       <div class="line" style="margin-top:1.1rem"></div>
       <div class="cap">Date</div>

@@ -698,16 +698,19 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       });
       setOk(
         status === "picked"
-          ? "Marked picked up — choose drop-off location…"
+          ? "Marked picked up — you’ll get a reminder to record where you placed the parts when back at the office."
           : status === "not_ready"
             ? "Marked not ready at vendor."
             : status === "partial"
-              ? "Marked partial pickup — choose drop-off location…"
+              ? "Marked partial pickup — you’ll get a reminder to record where you placed the parts when back at the office."
               : status === "cancelled"
                 ? "Marked not needed — off the pickup list."
                 : "Updated."
       );
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
+      if (status === "picked" || status === "partial") {
+        window.dispatchEvent(new CustomEvent("notifications-changed"));
+      }
       // Refresh in background — never leave the button hung on this
       void load().catch(() => {
         /* optimistic state already applied */
@@ -1198,6 +1201,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                   <TicketCard
                     key={t.id}
                     ticket={t}
+                    currentUserId={user?.id ?? null}
                     canEdit={
                       canEditAny ||
                       (t.logged_by_user_id != null && t.logged_by_user_id === user?.id)
@@ -1214,6 +1218,24 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                       }))
                     }
                     onResolve={resolveLine}
+                    onPlaceParts={(line) => {
+                      const params = new URLSearchParams();
+                      params.set("from", "pickup");
+                      params.set("vendor", t.vendor_name || "");
+                      const part =
+                        (line.part_name || line.part_code || "").trim() || "Parts from vendor";
+                      params.set("part", part);
+                      if (t.notes?.trim()) params.set("address", t.notes.trim());
+                      if (t.purchase_order?.trim()) params.set("contact", t.purchase_order.trim());
+                      params.set("pickup_id", String(t.id));
+                      params.set("line_id", String(line.id));
+                      if (line.qty_received != null && Number.isFinite(line.qty_received)) {
+                        params.set("qty", String(line.qty_received));
+                      } else if (line.qty_requested) {
+                        params.set("qty", String(line.qty_requested));
+                      }
+                      navigate(`/parts-dropoff?${params.toString()}`);
+                    }}
                     onSaveOwner={async (payload) => {
                       setBusy(true);
                       setError("");
@@ -1237,19 +1259,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function TicketCard({
-  ticket: t,
-  canEdit,
-  canResolve,
-  canNotNeeded,
-  busy,
-  resolvingId,
-  expanded,
-  onToggle,
-  onResolve,
-  onSaveOwner,
-}: {
+type TicketCardProps = {
   ticket: Ticket;
+  currentUserId: number | null;
   /** Owner / office / warehouse / admin may edit description, address, ready date */
   canEdit: boolean;
   canResolve: boolean;
@@ -1264,13 +1276,29 @@ function TicketCard({
     qtyReceived?: number | null,
     notes?: string
   ) => Promise<void>;
+  onPlaceParts: (line: TicketLine) => void;
   onSaveOwner: (payload: {
     lineId: number;
     part_name: string;
     job_address: string;
     needed_for_date: string;
   }) => Promise<void>;
-}) {
+};
+
+function TicketCard({
+  ticket: t,
+  currentUserId,
+  canEdit,
+  canResolve,
+  canNotNeeded,
+  busy,
+  resolvingId,
+  expanded,
+  onToggle,
+  onResolve,
+  onPlaceParts,
+  onSaveOwner,
+}: TicketCardProps) {
   const primaryLine = t.lines[0];
   const partText =
     (primaryLine?.part_name || primaryLine?.part_code || "").trim() ||
@@ -1284,6 +1312,14 @@ function TicketCard({
   const contactText = (t.purchase_order || "").trim();
   const ready = isTicketReadyToPick(t);
   const readyLabel = formatReadyDate(t.needed_for_date);
+  /** Lines this user picked (or partial) — can log where parts were left */
+  const myPlacedLines = t.lines.filter(
+    (l) =>
+      (l.status === "picked" || l.status === "partial") &&
+      currentUserId != null &&
+      l.resolved_by_user_id === currentUserId
+  );
+  const primaryMyPlace = myPlacedLines[0] || null;
 
   const [editDesc, setEditDesc] = useState(partText);
   const [editAddr, setEditAddr] = useState(addressText);
@@ -1369,6 +1405,21 @@ function TicketCard({
               }}
             >
               {resolvingId === primaryOpen.id ? "…" : "Picked up"}
+            </button>
+          </div>
+        )}
+        {!primaryOpen && primaryMyPlace && (
+          <div className="pp-ticket-quick-actions">
+            <button
+              type="button"
+              className="btn primary btn-sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPlaceParts(primaryMyPlace);
+              }}
+              title="Record where you left these parts at the shop"
+            >
+              Where placed?
             </button>
           </div>
         )}
@@ -1595,28 +1646,65 @@ function TicketCard({
                       )}
                     </div>
                   )}
-                  {locked && canResolve && (
+                  {locked && (line.status === "picked" || line.status === "partial") && (
                     <div className="pp-line-actions">
-                      <button
-                        type="button"
-                        className="btn secondary btn-sm"
-                        disabled={busy || resolvingId === line.id}
-                        title="Put this back on the Waiting list if it was closed by mistake"
-                        onClick={() => {
-                          if (
-                            !window.confirm(
-                              `Put “${label}” back on the Waiting list?\n\nUse this if it was marked picked or not needed by mistake and still needs pickup.`
-                            )
-                          ) {
-                            return;
-                          }
-                          void onResolve(line.id, "pending");
-                        }}
-                      >
-                        {resolvingId === line.id ? "Saving…" : "Put back on Waiting list"}
-                      </button>
+                      {currentUserId != null &&
+                        line.resolved_by_user_id === currentUserId && (
+                          <button
+                            type="button"
+                            className="btn primary btn-sm"
+                            onClick={() => onPlaceParts(line)}
+                            title="Say where you left these parts at the office/shop"
+                          >
+                            Where placed?
+                          </button>
+                        )}
+                      {canResolve && (
+                        <button
+                          type="button"
+                          className="btn secondary btn-sm"
+                          disabled={busy || resolvingId === line.id}
+                          title="Put this back on the Waiting list if it was closed by mistake"
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Put “${label}” back on the Waiting list?\n\nUse this if it was marked picked or not needed by mistake and still needs pickup.`
+                              )
+                            ) {
+                              return;
+                            }
+                            void onResolve(line.id, "pending");
+                          }}
+                        >
+                          {resolvingId === line.id ? "Saving…" : "Put back on Waiting list"}
+                        </button>
+                      )}
                     </div>
                   )}
+                  {locked &&
+                    line.status === "cancelled" &&
+                    canResolve && (
+                      <div className="pp-line-actions">
+                        <button
+                          type="button"
+                          className="btn secondary btn-sm"
+                          disabled={busy || resolvingId === line.id}
+                          title="Put this back on the Waiting list if it was closed by mistake"
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Put “${label}” back on the Waiting list?\n\nUse this if it was marked picked or not needed by mistake and still needs pickup.`
+                              )
+                            ) {
+                              return;
+                            }
+                            void onResolve(line.id, "pending");
+                          }}
+                        >
+                          {resolvingId === line.id ? "Saving…" : "Put back on Waiting list"}
+                        </button>
+                      </div>
+                    )}
                 </li>
               );
             })}

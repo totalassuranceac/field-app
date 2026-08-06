@@ -76,7 +76,12 @@ export function NotificationBell() {
   useEffect(() => {
     void load();
     const id = window.setInterval(() => void load(), 25_000);
-    return () => window.clearInterval(id);
+    const onChanged = () => void load();
+    window.addEventListener("notifications-changed", onChanged);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("notifications-changed", onChanged);
+    };
   }, [load]);
 
   useEffect(() => {
