@@ -1347,6 +1347,7 @@ export function AdminPage() {
                                 ["driver", "Field"],
                                 ["mechanic", "Mechanic"],
                                 ["office", "Office"],
+                                ["supervisor", "Supervisor"],
                                 ["warehouse", "Warehouse"],
                                 ["admin", "Admin"],
                                 ["viewer", "Viewer"],
@@ -1475,6 +1476,7 @@ export function AdminPage() {
                       ["driver", "Field"],
                       ["mechanic", "Mechanic"],
                       ["office", "Office"],
+                      ["supervisor", "Supervisor"],
                       ["warehouse", "Warehouse"],
                       ["admin", "Admin"],
                       ["viewer", "Viewer"],
@@ -1501,7 +1503,11 @@ export function AdminPage() {
                   <select value={uManager} onChange={(e) => setUManager(e.target.value)}>
                     <option value="">None</option>
                     {users
-                      .filter((u) => u.active && ["admin", "office", "mechanic"].includes(u.role))
+                      .filter(
+                        (u) =>
+                          u.active &&
+                          ["admin", "office", "mechanic", "supervisor"].includes(u.role)
+                      )
                       .map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.display_name}
@@ -2030,27 +2036,11 @@ export function AdminPage() {
                 />
               </label>
               <hr style={{ border: "none", borderTop: "1px solid var(--line)", margin: "0.5rem 0" }} />
-              <h3 style={{ margin: "0 0 0.35rem", fontSize: "1rem" }}>Free phone alerts</h3>
+              <h3 style={{ margin: "0 0 0.35rem", fontSize: "1rem" }}>Discord alerts (optional)</h3>
               <p className="muted" style={{ margin: "0 0 0.5rem", fontSize: "0.88rem" }}>
-                Fleet word: ntfy → <strong>{settings.ntfy_topic || "totalassurance"}</strong> (real
-                emergencies — mechanic stays here). Admin tests use{" "}
-                <strong>totalassurance-admin</strong> so the mechanic is not buzzed.
+                Optional webhook for shop/office Discord when a repair or emergency is reported.
+                Phone alerts use SMS (Twilio) and in-app notifications.
               </p>
-              <label>
-                Alert word (keep it easy — default is totalassurance)
-                <input
-                  value={settings.ntfy_topic || "totalassurance"}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      ntfy_topic: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""),
-                    })
-                  }
-                  placeholder="totalassurance"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </label>
               <label>
                 Discord webhook (optional)
                 <input

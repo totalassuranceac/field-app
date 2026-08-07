@@ -1,4 +1,5 @@
-import type { PublicUser } from "./types";
+import type { Env, PublicUser } from "./types";
+import { logSms, normalizePhone, sendSms, smsConfigured } from "./sms";
 
 export async function notifyUsers(
   db: D1Database,
@@ -25,6 +26,127 @@ export async function notifyUsers(
       )
       .run();
   }
+}
+
+/** Keep texts short — prefer one segment when possible. */
+export function shortSms(text: string, max = 280): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+/**
+ * Personal SMS only — never broadcast.
+ * Texts only active users who have a phone on file, when Twilio is configured.
+ * Dedupes the same context to the same user within 6 hours (efficient SMS).
+ */
+export async function smsUsers(
+  env: Env,
+  db: D1Database,
+  userIds: number[],
+  message: string,
+  context: string,
+  opts?: { excludeUserId?: number | null; fromUserId?: number | null }
+): Promise<number> {
+  if (!smsConfigured(env)) return 0;
+  const text = shortSms(message);
+  if (!text) return 0;
+
+  const uniq = [
+    ...new Set(
+      userIds.filter((id) => id > 0 && id !== (opts?.excludeUserId ?? -1))
+    ),
+  ];
+  if (!uniq.length) return 0;
+
+  const ph = uniq.map(() => "?").join(",");
+  const rows = await db
+    .prepare(
+      `SELECT id, phone FROM users
+       WHERE active = 1 AND id IN (${ph})
+         AND phone IS NOT NULL AND TRIM(phone) != ''`
+    )
+    .bind(...uniq)
+    .all<{ id: number; phone: string }>();
+
+  let sent = 0;
+  const seenPhone = new Set<string>();
+  for (const row of rows.results || []) {
+    const phone = normalizePhone(row.phone);
+    if (!phone || seenPhone.has(phone)) continue;
+    seenPhone.add(phone);
+
+    // Dedupe: same alert context already texted this person recently
+    try {
+      const recent = await db
+        .prepare(
+          `SELECT id FROM sms_log
+           WHERE to_user_id = ? AND context = ? AND status = 'sent'
+             AND created_at > datetime('now', '-6 hours')
+           LIMIT 1`
+        )
+        .bind(row.id, context.slice(0, 120))
+        .first();
+      if (recent) continue;
+    } catch {
+      /* sms_log optional */
+    }
+
+    const result = await sendSms(env, phone, text);
+    await logSms(db, {
+      from_user_id: opts?.fromUserId ?? null,
+      to_user_id: row.id,
+      to_phone: phone,
+      body: text,
+      status: result.ok ? "sent" : "failed",
+      provider_sid: result.ok ? result.sid : null,
+      error: result.ok ? null : result.error,
+      context: context.slice(0, 120),
+    });
+    if (result.ok) sent += 1;
+  }
+  return sent;
+}
+
+/**
+ * In-app bell + optional personal SMS for the same people.
+ * Use only for alerts that belong to that employee (parts they requested,
+ * warranties they dropped, their unit scheduled, etc.).
+ */
+export async function notifyAndSms(
+  env: Env,
+  db: D1Database,
+  userIds: number[],
+  opts: {
+    kind: string;
+    title: string;
+    body?: string | null;
+    entity?: { type: string; id: string | number };
+    /** Short SMS body (required to text). Omit or empty = in-app only. */
+    sms?: string | null;
+    excludeUserId?: number | null;
+    fromUserId?: number | null;
+    /** Dedup key for SMS; defaults to kind:entityId */
+    smsContext?: string;
+  }
+): Promise<{ notified: number; sms: number }> {
+  let ids = [...new Set(userIds.filter((id) => id > 0))];
+  if (opts.excludeUserId) ids = ids.filter((id) => id !== opts.excludeUserId);
+  if (!ids.length) return { notified: 0, sms: 0 };
+
+  await notifyUsers(db, ids, opts.kind, opts.title, opts.body, opts.entity);
+
+  let sms = 0;
+  if (opts.sms && opts.sms.trim()) {
+    const ctx =
+      opts.smsContext ||
+      `${opts.kind}:${opts.entity?.type || ""}:${opts.entity?.id ?? ""}`;
+    sms = await smsUsers(env, db, ids, opts.sms, ctx, {
+      excludeUserId: opts.excludeUserId,
+      fromUserId: opts.fromUserId,
+    });
+  }
+  return { notified: ids.length, sms };
 }
 
 export async function usersByRoles(db: D1Database, roles: string[]): Promise<number[]> {
@@ -158,8 +280,12 @@ export function shopTodayIso(): string {
 
 /**
  * Morning (or first open) reminder: vans scheduled for *today* — tell the tech once per day.
+ * Pass env to also SMS techs with phones on file.
  */
-export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
+export async function notifyShopBringInsToday(
+  db: D1Database,
+  env?: Env
+): Promise<number> {
   const today = shopTodayIso();
   let jobs: Array<{
     id: number;
@@ -169,12 +295,13 @@ export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
     reported_by_user_id: number | null;
     vehicle_id: number;
     unit_number: string;
+    tech_confirm_status: string | null;
   }> = [];
   try {
     const rows = await db
       .prepare(
         `SELECT i.id, i.title, i.scheduled_date, i.schedule_notes, i.reported_by_user_id,
-                i.vehicle_id, v.unit_number
+                i.vehicle_id, v.unit_number, i.tech_confirm_status
          FROM vehicle_issues i
          JOIN vehicles v ON v.id = i.vehicle_id
          WHERE i.status = 'scheduled'
@@ -190,10 +317,36 @@ export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
         reported_by_user_id: number | null;
         vehicle_id: number;
         unit_number: string;
+        tech_confirm_status: string | null;
       }>();
     jobs = rows.results || [];
   } catch {
-    return 0;
+    // Fallback without tech_confirm_status if migration not applied
+    try {
+      const rows = await db
+        .prepare(
+          `SELECT i.id, i.title, i.scheduled_date, i.schedule_notes, i.reported_by_user_id,
+                  i.vehicle_id, v.unit_number
+           FROM vehicle_issues i
+           JOIN vehicles v ON v.id = i.vehicle_id
+           WHERE i.status = 'scheduled'
+             AND i.scheduled_date IS NOT NULL
+             AND substr(i.scheduled_date, 1, 10) = ?`
+        )
+        .bind(today)
+        .all<{
+          id: number;
+          title: string;
+          scheduled_date: string | null;
+          schedule_notes: string | null;
+          reported_by_user_id: number | null;
+          vehicle_id: number;
+          unit_number: string;
+        }>();
+      jobs = (rows.results || []).map((j) => ({ ...j, tech_confirm_status: null }));
+    } catch {
+      return 0;
+    }
   }
 
   let created = 0;
@@ -203,8 +356,17 @@ export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
       reportedByUserId: job.reported_by_user_id,
     });
     const notes = (job.schedule_notes || "").trim();
+    const pendingConfirm =
+      !job.tech_confirm_status ||
+      job.tech_confirm_status === "pending" ||
+      job.tech_confirm_status === "declined";
     const title = `Today: bring unit ${job.unit_number} to the shop`;
-    const body = [job.title, notes || null, "Open Repairs in the app for details."]
+    const body = [
+      job.title,
+      notes || null,
+      pendingConfirm ? "Confirm in the app if you haven’t yet." : null,
+      "Open Repairs in the app for details.",
+    ]
       .filter(Boolean)
       .join(" · ");
 
@@ -219,10 +381,25 @@ export async function notifyShopBringInsToday(db: D1Database): Promise<number> {
         .bind(uid, String(job.id))
         .first();
       if (existing) continue;
-      await notifyUsers(db, [uid], "repair_bring_in_today", title, body, {
-        type: "issue",
-        id: job.id,
-      });
+      if (env) {
+        await notifyAndSms(env, db, [uid], {
+          kind: "repair_bring_in_today",
+          title,
+          body,
+          entity: { type: "issue", id: job.id },
+          sms: shortSms(
+            pendingConfirm
+              ? `TA: Bring unit ${job.unit_number} to shop TODAY. ${job.title}. Open app to CONFIRM.`
+              : `TA: Bring unit ${job.unit_number} to shop TODAY. ${job.title}`
+          ),
+          smsContext: `repair_bring_in_today:${job.id}:${today}`,
+        });
+      } else {
+        await notifyUsers(db, [uid], "repair_bring_in_today", title, body, {
+          type: "issue",
+          id: job.id,
+        });
+      }
       created++;
     }
   }

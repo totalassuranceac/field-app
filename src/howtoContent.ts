@@ -294,11 +294,12 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Choose the unit and describe the problem clearly (what, where, when it started).",
       "Pick severity / urgency so the shop can prioritize.",
       "Add photos if they help (leak, dash light, damage).",
-      "Submit. When the shop books a day, you get a notification and a Home checklist item — bring the unit in on that date.",
+      "Submit. When the shop books a day, you get a notification (and SMS if set up) — open the app and tap Confirm appointment.",
+      "If you cannot make that date, tap Can’t make it and leave a short reason so the shop can reschedule.",
     ],
     tips: [
       "If it is unsafe to drive, say so in the description and contact shop/dispatch by phone too.",
-      "Also check Notifications and Home — scheduled jobs say “Bring unit to shop” with the date.",
+      "Home checklist shows Confirm shop appointment until you accept. Shop can see who confirmed and who did not.",
     ],
   },
   {
@@ -573,13 +574,15 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     steps: [
       "Open Repairs & shop.",
       "Filter open / scheduled work for your bay or day.",
-      "Set Scheduled and pick the date the van should come in — the tech gets an in-app alert automatically.",
+      "Set Scheduled and pick the date the van should come in — the tech gets an app alert + SMS to CONFIRM.",
+      "Watch badges: Awaiting confirm / Confirmed / Declined. If a van no-shows, check whether they confirmed.",
       "If the app says no user is linked to the unit, call them and fix the assigned driver under Vehicles.",
       "Mark In progress only when the unit is actually in the bay (that marks it out of service).",
       "Record what you fixed and parts used when closing — tech is notified when done or cancelled.",
     ],
     tips: [
       "Booking a future date does not take the truck off the road — only In progress does.",
+      "Changing the shop date resets confirmation — the tech must confirm the new appointment.",
     ],
   },
   {

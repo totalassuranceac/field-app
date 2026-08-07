@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT,
   password_salt TEXT,
   role TEXT NOT NULL DEFAULT 'driver'
-    CHECK (role IN ('admin', 'office', 'driver', 'mechanic', 'viewer')),
+    CHECK (role IN ('admin', 'office', 'driver', 'mechanic', 'viewer', 'supervisor')),
   employee_id INTEGER,
   phone TEXT,
   must_change_password INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +124,11 @@ CREATE TABLE IF NOT EXISTS vehicle_issues (
     CHECK (status IN ('open', 'scheduled', 'in_progress', 'completed', 'cancelled')),
   scheduled_date TEXT,
   schedule_notes TEXT,
+  /** pending | confirmed | declined — set when mechanic schedules shop visit */
+  tech_confirm_status TEXT,
+  tech_confirmed_at TEXT,
+  tech_confirmed_by_user_id INTEGER REFERENCES users(id),
+  tech_confirm_note TEXT,
   completed_at TEXT,
   completion_notes TEXT,
   photo_key TEXT,

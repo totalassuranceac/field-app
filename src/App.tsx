@@ -36,6 +36,9 @@ const AuditPage = lazy(() =>
 const LiveMapPage = lazy(() =>
   import("./pages/LiveMapPage").then((m) => ({ default: m.LiveMapPage }))
 );
+const WarehouseCamerasPage = lazy(() =>
+  import("./pages/WarehouseCamerasPage").then((m) => ({ default: m.WarehouseCamerasPage }))
+);
 const InspectionsPage = lazy(() =>
   import("./pages/InspectionsPage").then((m) => ({ default: m.InspectionsPage }))
 );
@@ -226,6 +229,12 @@ export default function App() {
                       }
                     />
                     <Route path="/live" element={<LazyPage title="Live map" Page={LiveMapPage} />} />
+                    <Route
+                      path="/warehouse-cameras"
+                      element={
+                        <LazyPage title="Security cameras" Page={WarehouseCamerasPage} />
+                      }
+                    />
                     <Route path="/fuel" element={<LazyPage title="Fuel log" Page={FuelPage} />} />
                     <Route
                       path="/fuel/receipt-review"
@@ -278,7 +287,7 @@ export default function App() {
                     />
                     <Route
                       path="/parts-receipts"
-                      element={<LazyPage title="Parts receipts" Page={PartsPurchasesPage} />}
+                      element={<LazyPage title="Bought parts" Page={PartsPurchasesPage} />}
                     />
                     <Route
                       path="/downtime"

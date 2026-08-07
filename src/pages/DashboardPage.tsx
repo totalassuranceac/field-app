@@ -47,6 +47,8 @@ interface Dash {
       scheduled_date: string | null;
       severity: string;
       unit_number: string;
+      tech_confirm_status?: string | null;
+      schedule_notes?: string | null;
     }>;
   };
   recent_fuel: Array<{
@@ -755,7 +757,7 @@ export function DashboardPage() {
           title: "Warehouse delivery request",
           hint: "Need materials on site",
         },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Invoice / packing slip photo" },
+        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
         { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo shelf · write log # on box" },
         { to: "/issues", icon: "🔧", title: "Report a problem", hint: "Something’s wrong on the truck" },
         { to: "/assets", icon: "🧰", title: "My truck gear", hint: "Bottles & tools" },
@@ -780,7 +782,7 @@ export function DashboardPage() {
         { to: "/live", icon: "🗺", title: "Live map", hint: "Find techs · units on the road" },
         { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · any unit" },
         { to: "/assets", icon: "🧪", title: "Company assets", hint: "Bottles · ladders · tools" },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Company card photos" },
+        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
         { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
         { to: "/part-pickup", icon: "🏪", title: "Part pickup request", hint: "Parts ready at a store" },
       ];
@@ -801,7 +803,7 @@ export function DashboardPage() {
           hint: "AutoZone · First Call · track",
         },
         { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · odometer" },
-        { to: "/parts-receipts", icon: "🧾", title: "Parts invoices", hint: "Company card purchases" },
+        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
         { to: "/yard", icon: "📋", title: "Yard", hint: "Stickers · cams · GPS" },
         { to: "/vehicles", icon: "🚐", title: "Trucks", hint: "Fleet registry" },
         { to: "/live", icon: "🗺", title: "Live map", hint: "Where units are" },
@@ -956,18 +958,30 @@ export function DashboardPage() {
                 </span>
                 <span>
                   <strong>
-                    {myRepairs.some((r) => r.status === "scheduled")
-                      ? "Bring unit to shop (scheduled)"
-                      : "Open repairs on your units"}
+                    {myRepairs.some(
+                      (r) =>
+                        r.status === "scheduled" && r.tech_confirm_status !== "confirmed"
+                    )
+                      ? "Confirm shop appointment"
+                      : myRepairs.some((r) => r.status === "scheduled")
+                        ? "Bring unit to shop (scheduled)"
+                        : "Open repairs on your units"}
                   </strong>
                   <span className="muted">
                     {myRepairs.length
                       ? myRepairs
-                          .map((r) =>
-                            r.status === "scheduled" && r.scheduled_date
-                              ? `Unit ${r.unit_number} · ${r.scheduled_date}`
-                              : `Unit ${r.unit_number} · ${r.status}`
-                          )
+                          .map((r) => {
+                            if (r.status === "scheduled" && r.scheduled_date) {
+                              const conf =
+                                r.tech_confirm_status === "confirmed"
+                                  ? "confirmed"
+                                  : r.tech_confirm_status === "declined"
+                                    ? "declined"
+                                    : "needs confirm";
+                              return `Unit ${r.unit_number} · ${r.scheduled_date} · ${conf}`;
+                            }
+                            return `Unit ${r.unit_number} · ${r.status}`;
+                          })
                           .join(" · ")
                       : "None waiting on you"}
                   </span>
@@ -1049,23 +1063,31 @@ export function DashboardPage() {
                   <span>{v.last_check_date ? `Last ${v.last_check_date}` : "Never checked"}</span>
                 </Link>
               ))}
-              {myRepairs.map((r) => (
-                <Link
-                  key={`r-${r.id}`}
-                  className="home-pill alert"
-                  to={`/issues?id=${r.id}`}
-                >
-                  <strong>
-                    {r.status === "scheduled"
-                      ? `BRING IN ${r.unit_number}`
-                      : `${r.unit_number} · ${r.status}`}
-                  </strong>
-                  <span>
-                    {r.title}
-                    {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
-                  </span>
-                </Link>
-              ))}
+              {myRepairs.map((r) => {
+                const needsConfirm =
+                  r.status === "scheduled" &&
+                  r.tech_confirm_status !== "confirmed";
+                return (
+                  <Link
+                    key={`r-${r.id}`}
+                    className={`home-pill alert${needsConfirm ? " needs-confirm" : ""}`}
+                    to={`/issues?id=${r.id}`}
+                  >
+                    <strong>
+                      {r.status === "scheduled"
+                        ? needsConfirm
+                          ? `CONFIRM · BRING IN ${r.unit_number}`
+                          : `BRING IN ${r.unit_number}`
+                        : `${r.unit_number} · ${r.status}`}
+                    </strong>
+                    <span>
+                      {r.title}
+                      {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
+                      {needsConfirm ? " · tap to confirm" : r.tech_confirm_status === "confirmed" ? " · confirmed" : ""}
+                    </span>
+                  </Link>
+                );
+              })}
             </div>
           )}
         </section>

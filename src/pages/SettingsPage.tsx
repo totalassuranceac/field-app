@@ -2,15 +2,11 @@ import { FormEvent, useEffect, useState } from "react";
 import { api, can } from "../api";
 import { useTheme } from "../theme";
 import { useAuth } from "../auth";
-import { NtfySetupBanner } from "../components/NtfySetupBanner";
 import { PasswordField } from "../components/PasswordField";
-import {
-  DEFAULT_NTFY_TOPIC,
-  NTFY_ADMIN_TEST_TOPIC,
-  publishNtfyFromClient,
-  reportClientPushResult,
-  type ClientPushPayload,
-} from "../ntfyClient";
+
+/** Public legal pages — used for SMS opt-in (Twilio A2P) */
+const PRIVACY_URL = "https://www.totalassuranceac.com/privacy-policy/";
+const TERMS_URL = "https://www.totalassuranceac.com/terms-of-service/";
 
 interface SmsContact {
   user_id: number | null;
@@ -24,6 +20,9 @@ export function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const { user, refresh, logout } = useAuth();
   const [phone, setPhone] = useState(user?.phone || "");
+  /** Explicit SMS consent (required when saving a mobile number) */
+  const [smsConsent, setSmsConsent] = useState(Boolean(user?.phone?.trim()));
+  const [phoneBusy, setPhoneBusy] = useState(false);
   const [currentPw, setCurrentPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -40,16 +39,11 @@ export function SettingsPage() {
   const [mechanicPhone, setMechanicPhone] = useState("");
   const [officePhone, setOfficePhone] = useState("");
   const [rolePhonesBusy, setRolePhonesBusy] = useState(false);
-  const [ntfyTopic, setNtfyTopic] = useState("");
-  const [ntfyServer, setNtfyServer] = useState("https://ntfy.sh");
-  const [discordUrl, setDiscordUrl] = useState("");
-  const [freeNtfyOn, setFreeNtfyOn] = useState(false);
-  const [freeDiscordOn, setFreeDiscordOn] = useState(false);
-  const [lastNtfyStatus, setLastNtfyStatus] = useState("");
-  const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {
     setPhone(user?.phone || "");
+    // Existing number on file = already opted in previously
+    if (user?.phone?.trim()) setSmsConsent(true);
   }, [user?.phone]);
 
   useEffect(() => {
@@ -72,23 +66,11 @@ export function SettingsPage() {
         shop_phone?: string;
         mechanic_phone?: string;
         office_phone?: string;
-        free_alerts?: {
-          ntfy: boolean;
-          ntfy_topic?: string;
-          ntfy_server?: string;
-          discord: boolean;
-          last_ntfy_status?: string;
-        };
       }>("/sms/status")
         .then((s) => {
           setShopPhone(s.shop_phone || "");
           setMechanicPhone(s.mechanic_phone || "");
           setOfficePhone(s.office_phone || "");
-          setFreeNtfyOn(Boolean(s.free_alerts?.ntfy));
-          setFreeDiscordOn(Boolean(s.free_alerts?.discord));
-          setNtfyTopic(s.free_alerts?.ntfy_topic || "totalassurance");
-          setNtfyServer(s.free_alerts?.ntfy_server || "https://ntfy.sh");
-          setLastNtfyStatus(s.free_alerts?.last_ntfy_status || "");
         })
         .catch(() => {});
     }
@@ -98,15 +80,27 @@ export function SettingsPage() {
     e.preventDefault();
     setError("");
     setOk("");
+    const trimmed = phone.trim();
+    if (trimmed && !smsConsent) {
+      setError("Check the SMS consent box to save your number and receive texts.");
+      return;
+    }
+    setPhoneBusy(true);
     try {
       await api("/auth/profile", {
         method: "PATCH",
-        body: JSON.stringify({ phone: phone.trim() || null }),
+        body: JSON.stringify({ phone: trimmed || null }),
       });
       await refresh();
-      setOk("Phone saved — used for SMS and repair reminders.");
+      setOk(
+        trimmed
+          ? "Phone saved — you opted in to Total Assurance account notification SMS."
+          : "Phone cleared — you will not receive SMS from Field App."
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save phone");
+    } finally {
+      setPhoneBusy(false);
     }
   }
 
@@ -137,92 +131,6 @@ export function SettingsPage() {
       setError(err instanceof Error ? err.message : "Could not save phone numbers");
     } finally {
       setRolePhonesBusy(false);
-    }
-  }
-
-  async function saveFreeAlerts(e: FormEvent) {
-    e.preventDefault();
-    setError("");
-    setOk("");
-    try {
-      const topic = (ntfyTopic.trim() || "totalassurance").toLowerCase();
-      setNtfyTopic(topic);
-      await api("/alerts/channels", {
-        method: "PUT",
-        body: JSON.stringify({
-          ntfy_topic: topic,
-          ntfy_server: ntfyServer.trim() || "https://ntfy.sh",
-          discord_webhook_url: discordUrl.trim(),
-        }),
-      });
-      setFreeNtfyOn(true);
-      setFreeDiscordOn(Boolean(discordUrl.trim()));
-      setOk(`Saved. Tell the team: install ntfy and join “${topic}”.`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save free alerts");
-    }
-  }
-
-  /** Quiet admin channel only — does not notify mechanic on fleet topic. */
-  async function testFreeAlert() {
-    setTestBusy(true);
-    setError("");
-    setOk("");
-    try {
-      const fleetTopic = (ntfyTopic.trim() || DEFAULT_NTFY_TOPIC).toLowerCase();
-      setNtfyTopic(fleetTopic);
-      await api("/alerts/channels", {
-        method: "PUT",
-        body: JSON.stringify({
-          ntfy_topic: fleetTopic,
-          ntfy_server: ntfyServer.trim() || "https://ntfy.sh",
-        }),
-      });
-      const r = await api<{
-        ok: boolean;
-        ntfy: boolean;
-        discord: boolean;
-        details: string[];
-        hint?: string;
-        test_topic?: string;
-        fleet_topic?: string;
-        client_push?: ClientPushPayload;
-      }>("/alerts/test", { method: "POST", body: JSON.stringify({}) });
-
-      const topic = r.test_topic || r.client_push?.topic || NTFY_ADMIN_TEST_TOPIC;
-      const fleet = r.fleet_topic || fleetTopic;
-
-      const payload: ClientPushPayload = r.client_push || {
-        server: ntfyServer.trim() || "https://ntfy.sh",
-        topic,
-        title: "TA Fleet admin test",
-        message: `Admin test from ${user?.display_name || "fleet"}. Topic: ${topic}.`,
-        priority: 5,
-        tags: ["rotating_light", "warning"],
-      };
-      const push = await publishNtfyFromClient({ ...payload, topic, priority: 5 });
-      void reportClientPushResult(api, push);
-
-      setLastNtfyStatus(
-        [
-          push.ok ? `test → ${topic}: ${push.detail}` : `test failed: ${push.detail}`,
-          r.ntfy ? "server backup: ok" : `server backup: ${(r.details || []).join("; ") || "failed"}`,
-        ].join(" · ")
-      );
-
-      if (push.ok || r.ntfy) {
-        setOk(
-          `Test sent only to “${topic}”. Fleet “${fleet}” was not notified — mechanic stays quiet. Subscribe to “${topic}” in ntfy if you didn’t get it.`
-        );
-      } else {
-        setError(
-          `Test failed: ${push.detail || "unknown"}. In ntfy, Subscribe to “${topic}” (admin tests only).`
-        );
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Test failed");
-    } finally {
-      setTestBusy(false);
     }
   }
 
@@ -369,23 +277,6 @@ export function SettingsPage() {
               </dd>
             </div>
           </dl>
-          <form className="form" onSubmit={savePhone} style={{ marginTop: "0.75rem" }}>
-            <label>
-              Your cell phone (for SMS)
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="(361) 555-0100"
-                inputMode="tel"
-              />
-            </label>
-            <button className="btn secondary" type="submit">
-              Save phone
-            </button>
-          </form>
-          <p className="muted" style={{ fontSize: "0.88rem", marginTop: "0.75rem" }}>
-            Shop can text this number about repairs. Keep it current.
-          </p>
           <button
             className="btn secondary"
             type="button"
@@ -398,13 +289,94 @@ export function SettingsPage() {
 
         {!forced && (
           <>
-            {/* Collapsed by default — phone alert checklist lives here, not on Home */}
-            <div className="settings-ntfy-wrap">
-              <NtfySetupBanner variant="compact" defaultOpen={false} />
+            {/* Primary SMS opt-in — designed so one screenshot shows full consent for Twilio A2P */}
+            <div className="card sms-optin-card" style={{ gridColumn: "1 / -1" }}>
+              <h2>SMS account notifications</h2>
+              <p style={{ marginTop: 0, fontSize: "0.95rem", lineHeight: 1.45 }}>
+                <strong>Total Assurance AC &amp; Heating</strong> may send operational text messages
+                to employees about shop appointments, repair status, parts readiness, warranty
+                updates, and other work-related Field App alerts. This is not marketing.
+              </p>
+
+              <form className="form" onSubmit={savePhone}>
+                <label>
+                  Mobile phone number
+                  <input
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="(361) 555-0100"
+                    inputMode="tel"
+                    autoComplete="tel"
+                  />
+                </label>
+
+                <div className="sms-consent-box">
+                  <label className="sms-consent-label">
+                    <input
+                      type="checkbox"
+                      checked={smsConsent}
+                      onChange={(e) => setSmsConsent(e.target.checked)}
+                    />
+                    <span>
+                      I agree to receive recurring <strong>account notification</strong> text
+                      messages from <strong>Total Assurance AC &amp; Heating</strong> about repairs,
+                      appointments, parts, and shop communications related to my job. Message
+                      frequency varies. Message and data rates may apply. Reply{" "}
+                      <strong>STOP</strong> to opt out, <strong>HELP</strong> for help. Mobile
+                      numbers are not shared with third parties or affiliates for marketing or
+                      promotional purposes.{" "}
+                      <a href={PRIVACY_URL} target="_blank" rel="noreferrer">
+                        Privacy Policy
+                      </a>
+                      {" · "}
+                      <a href={TERMS_URL} target="_blank" rel="noreferrer">
+                        Terms of Service
+                      </a>
+                    </span>
+                  </label>
+                </div>
+
+                <p className="muted" style={{ margin: "0.35rem 0 0.75rem", fontSize: "0.85rem" }}>
+                  Saving your number with the box checked is your consent. Clear the number and save
+                  to stop SMS, or reply STOP to any message. In-app notifications still work without
+                  SMS.
+                </p>
+
+                <div className="toolbar" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
+                  <button className="btn" type="submit" disabled={phoneBusy}>
+                    {phoneBusy ? "Saving…" : phone.trim() ? "Save & enable SMS" : "Clear phone"}
+                  </button>
+                  {phone.trim() && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={phoneBusy}
+                      onClick={() => {
+                        setPhone("");
+                        setSmsConsent(false);
+                      }}
+                    >
+                      Clear number
+                    </button>
+                  )}
+                </div>
+              </form>
+
+              <p className="muted" style={{ margin: "0.85rem 0 0", fontSize: "0.8rem" }}>
+                Privacy:{" "}
+                <a href={PRIVACY_URL} target="_blank" rel="noreferrer">
+                  {PRIVACY_URL}
+                </a>
+                <br />
+                Terms:{" "}
+                <a href={TERMS_URL} target="_blank" rel="noreferrer">
+                  {TERMS_URL}
+                </a>
+              </p>
             </div>
 
             <div className="card">
-              <h2>Text messages (SMS)</h2>
+              <h2>Send a text</h2>
               {!smsConfigured ? (
                 <p className="muted" style={{ marginTop: 0 }}>
                   SMS is not connected yet. An admin needs to add Twilio credentials on the server
@@ -412,8 +384,8 @@ export function SettingsPage() {
                 </p>
               ) : !contacts.length ? (
                 <p className="muted" style={{ marginTop: 0 }}>
-                  No contacts with phone numbers yet. Drivers and shop staff need a phone saved on
-                  their account.
+                  No contacts with phone numbers yet. Drivers and shop staff need a phone saved
+                  above with SMS consent.
                 </p>
               ) : (
                 <form className="form" onSubmit={sendText}>
@@ -454,137 +426,6 @@ export function SettingsPage() {
                 </form>
               )}
             </div>
-
-            {(can(user, "manageSettings") || can(user, "manageIssues")) && (
-              <div className="card">
-                <h2>Phone alerts — free</h2>
-                <p style={{ marginTop: 0, fontSize: "0.95rem" }}>
-                  Tell mechanics and office:{" "}
-                  <strong>install ntfy and join “{ntfyTopic || "totalassurance"}”</strong>
-                </p>
-
-                <div
-                  className="info-banner"
-                  style={{ marginBottom: "0.85rem", fontSize: "0.95rem", lineHeight: 1.45 }}
-                >
-                  <strong>Instructions for the team (copy these):</strong>
-                  <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.25rem" }}>
-                    <li>
-                      Download the free app named <strong>ntfy</strong> (n-t-f-y) on your phone
-                    </li>
-                    <li>
-                      Open it → tap <strong>+</strong> or <strong>Subscribe</strong>
-                    </li>
-                    <li>
-                      Type exactly:{" "}
-                      <code
-                        style={{
-                          fontSize: "1.05rem",
-                          fontWeight: 700,
-                          letterSpacing: "0.02em",
-                          padding: "0.1rem 0.35rem",
-                          background: "var(--bg)",
-                          borderRadius: "6px",
-                        }}
-                      >
-                        {ntfyTopic || "totalassurance"}
-                      </code>
-                    </li>
-                    <li>Allow notifications when the phone asks</li>
-                    <li>Done — you’ll get a buzz when someone reports a repair or flat</li>
-                  </ol>
-                </div>
-
-                <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
-                  Flat tires also alert the <strong>3 closest drivers</strong> in the app (Live map).
-                </p>
-
-                <form className="form" onSubmit={saveFreeAlerts}>
-                  <label>
-                    Alert word (everyone types this in ntfy — keep it simple)
-                    <input
-                      value={ntfyTopic}
-                      onChange={(e) =>
-                        setNtfyTopic(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
-                      }
-                      placeholder="totalassurance"
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                  </label>
-                  <div className="toolbar">
-                    <button
-                      className="btn secondary"
-                      type="button"
-                      onClick={() => setNtfyTopic("totalassurance")}
-                    >
-                      Use totalassurance
-                    </button>
-                    <button className="btn" type="submit">
-                      Save
-                    </button>
-                  </div>
-                  <div className="toolbar" style={{ marginTop: "0.65rem" }}>
-                    <button
-                      className="btn"
-                      type="button"
-                      disabled={testBusy}
-                      title={`Quiet test on ${NTFY_ADMIN_TEST_TOPIC} — mechanic on fleet channel is not notified`}
-                      onClick={() => {
-                        if (!ntfyTopic.trim()) setNtfyTopic(DEFAULT_NTFY_TOPIC);
-                        void testFreeAlert();
-                      }}
-                    >
-                      {testBusy
-                        ? "Sending…"
-                        : `Send test (${NTFY_ADMIN_TEST_TOPIC})`}
-                    </button>
-                  </div>
-                </form>
-                <p className="muted" style={{ margin: "0.55rem 0 0", fontSize: "0.82rem" }}>
-                  <strong>Tests</strong> → <code>{NTFY_ADMIN_TEST_TOPIC}</code> (you only, if
-                  subscribed). <strong>Real emergencies</strong> →{" "}
-                  <code>{ntfyTopic || DEFAULT_NTFY_TOPIC}</code> (you + mechanic + team). Your cell
-                  number is for SMS, not ntfy.
-                </p>
-                {lastNtfyStatus && (
-                  <p
-                    className="muted"
-                    style={{
-                      margin: "0.65rem 0 0",
-                      fontSize: "0.78rem",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    Last push status: {lastNtfyStatus}
-                  </p>
-                )}
-                <p className="muted" style={{ marginBottom: 0, fontSize: "0.8rem" }}>
-                  App links:{" "}
-                  <a href="https://ntfy.sh" target="_blank" rel="noreferrer">
-                    ntfy.sh
-                  </a>
-                  {" · "}
-                  <a
-                    href="https://play.google.com/store/apps/details?id=io.heckel.ntfy"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Android
-                  </a>
-                  {" · "}
-                  <a
-                    href="https://apps.apple.com/app/ntfy/id1625396347"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    iPhone
-                  </a>
-                  {freeDiscordOn ? " · Discord also on" : ""}
-                  {smsConfigured ? " · Twilio SMS also on" : ""}
-                </p>
-              </div>
-            )}
 
             {(can(user, "manageSettings") || can(user, "manageIssues")) && (
               <div className="card">

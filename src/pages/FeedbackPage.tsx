@@ -61,7 +61,8 @@ function formatWhen(iso: string | null | undefined): string {
  */
 export function FeedbackPage() {
   const { user } = useAuth();
-  const isReviewer = user?.role === "admin" || user?.role === "office";
+  const isReviewer =
+    user?.role === "admin" || user?.role === "office" || user?.role === "supervisor";
 
   const [tab, setTab] = useState<"submit" | "mine" | "inbox">("submit");
   const [mine, setMine] = useState<FeedbackItem[]>([]);

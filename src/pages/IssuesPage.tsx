@@ -14,12 +14,6 @@ import {
   parseShopConcerns,
   unpackWorkPerformed,
 } from "../issueCatalog";
-import {
-  buildIssuePush,
-  publishNtfyFromClient,
-  reportClientPushResult,
-  type ClientPushPayload,
-} from "../ntfyClient";
 import type { Vehicle } from "./VehiclesPage";
 
 /** What shop should read first — description for free-text "other" reports */
@@ -59,6 +53,12 @@ interface Issue {
   parts_used: string | null;
   labor_hours: number | null;
   created_at: string;
+  /** pending | confirmed | declined — tech appointment accountability */
+  tech_confirm_status?: string | null;
+  tech_confirmed_at?: string | null;
+  tech_confirmed_by_user_id?: number | null;
+  tech_confirmed_by_name?: string | null;
+  tech_confirm_note?: string | null;
 }
 
 /** All open problems for one unit — shop board + print work list */
@@ -211,6 +211,9 @@ export function IssuesPage() {
     vehicleId: number;
     unitNumber: string;
   } | null>(null);
+  const [confirmBusyId, setConfirmBusyId] = useState<number | null>(null);
+  const [declineId, setDeclineId] = useState<number | null>(null);
+  const [declineNote, setDeclineNote] = useState("");
 
   async function load() {
     // Deep-link always loads the shop board so the target ticket is present
@@ -360,32 +363,16 @@ export function IssuesPage() {
     }
     const opt = DRIVER_ISSUE_OPTIONS.find((o) => o.value === category);
     const emergency = Boolean(isEmergency || opt?.emergency);
-    const unitNumber =
-      vehicles.find((v) => v.id === Number(vehicleId))?.unit_number || "?";
     const issueTitle = opt?.label || category;
-
-    // Same path as Settings "Send test" — publish from THIS phone, immediately.
-    // Do not wait for the API (server cannot reach ntfy reliably).
-    const localPush = buildIssuePush({
-      unitNumber,
-      title: issueTitle,
-      description,
-      reporterName: user?.display_name,
-      emergency,
-    });
 
     submitLock.current = true;
     setSubmitting(true);
     try {
-      // Save ticket first, then ONE phone push (never double-publish)
       const res = await api<{
         message?: string;
         emergency?: boolean;
         duplicate?: boolean;
         notified_user_ids?: number[];
-        ntfy?: boolean;
-        ntfy_detail?: string;
-        client_push?: ClientPushPayload;
       }>("/issues", {
         method: "POST",
         body: JSON.stringify({
@@ -398,11 +385,6 @@ export function IssuesPage() {
         }),
       });
 
-      // Prefer server payload (correct topic); fall back to local. Exactly one publish.
-      const payload = res.client_push || localPush;
-      const push = await publishNtfyFromClient(payload);
-      void reportClientPushResult(api, push);
-
       setShowNew(false);
       setCategory("");
       setDescription("");
@@ -413,10 +395,7 @@ export function IssuesPage() {
         (emergency
           ? "Emergency dispatched — shop notified."
           : "Repair request submitted — shop notified.");
-      const pushNote = push.ok
-        ? " Phone push sent."
-        : ` Phone push failed (${push.detail}). Shop still has it in the app.`;
-      setOk(baseMsg.replace(/\s*Sending phone push…?\s*$/i, "").trim() + pushNote);
+      setOk(baseMsg.replace(/\s*Sending phone push…?\s*$/i, "").trim());
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send — try again.");
@@ -463,15 +442,25 @@ export function IssuesPage() {
     });
   }
 
-  // Deep-link from in-app notification: /issues?id=28 → schedule that ticket
+  // Deep-link from in-app notification: /issues?id=28
+  // Shop → open manage panel; tech → scroll to ticket (confirm appointment)
   useEffect(() => {
     const raw = searchParams.get("id");
-    if (!raw || !issues.length || !canShop) return;
+    if (!raw || !issues.length) return;
     const id = Number(raw);
     if (!Number.isFinite(id)) return;
     const hit = issues.find((i) => i.id === id);
     if (!hit) return;
-    openManage(hit);
+    if (canShop) {
+      openManage(hit);
+    } else {
+      window.setTimeout(() => {
+        document.getElementById(`issue-${id}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      }, 80);
+    }
     const next = new URLSearchParams(searchParams);
     next.delete("id");
     setSearchParams(next, { replace: true });
@@ -591,14 +580,79 @@ export function IssuesPage() {
     }
   }
 
+  async function confirmSchedule(issueId: number, action: "confirm" | "decline", note?: string) {
+    setError("");
+    setOk("");
+    setConfirmBusyId(issueId);
+    try {
+      await api(`/issues/${issueId}/confirm-schedule`, {
+        method: "POST",
+        body: JSON.stringify({ action, note: note || undefined }),
+      });
+      setDeclineId(null);
+      setDeclineNote("");
+      setOk(
+        action === "confirm"
+          ? "Appointment confirmed — shop can see you accepted."
+          : "Decline sent to the shop. They will reschedule."
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update appointment");
+    } finally {
+      setConfirmBusyId(null);
+    }
+  }
+
+  function confirmBadge(i: Issue) {
+    if (i.status !== "scheduled") return null;
+    const st = i.tech_confirm_status || "pending";
+    if (st === "confirmed") {
+      const who = i.tech_confirmed_by_name || "Tech";
+      const when = i.tech_confirmed_at
+        ? String(i.tech_confirmed_at).slice(0, 16).replace("T", " ")
+        : "";
+      return (
+        <span className="log-item-badge confirm-badge is-confirmed" title={when || undefined}>
+          Confirmed{i.tech_confirmed_by_name ? ` · ${who}` : ""}
+        </span>
+      );
+    }
+    if (st === "declined") {
+      return (
+        <span
+          className="log-item-badge confirm-badge is-declined"
+          title={i.tech_confirm_note || undefined}
+        >
+          Declined{i.tech_confirm_note ? `: ${i.tech_confirm_note.slice(0, 40)}` : ""}
+        </span>
+      );
+    }
+    return (
+      <span className="log-item-badge confirm-badge is-pending log-item-badge-needs">
+        Awaiting confirm
+      </span>
+    );
+  }
+
   function renderIssueRow(i: Issue, opts?: { scheduleCta?: boolean }) {
     const head = issueHeadline(i);
     const shopNote = i.work_performed || "";
     const when = i.scheduled_date || String(i.created_at || "").slice(0, 10) || "—";
+    const needsTechConfirm =
+      i.status === "scheduled" &&
+      (i.tech_confirm_status === "pending" ||
+        !i.tech_confirm_status ||
+        i.tech_confirm_status === "declined");
+    // Drivers always; admin can confirm when testing their own unit; shop still uses badges
+    const showConfirmCta =
+      i.status === "scheduled" &&
+      (isDriver || user?.role === "admin" || user?.role === "office");
     return (
       <li
         key={i.id}
         className={`shop-unit-issue st-${i.status}${i.is_emergency ? " is-emergency" : ""}`}
+        id={`issue-${i.id}`}
       >
         <div className="shop-unit-issue-head">
           {!!i.is_emergency && <span className="log-item-badge">Emergency</span>}
@@ -616,6 +670,7 @@ export function IssuesPage() {
             </span>
           )}
           <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
+          {confirmBadge(i)}
           <span className="shop-unit-issue-title">{head}</span>
         </div>
         {i.issue_category && i.issue_category !== "other" && (
@@ -656,11 +711,94 @@ export function IssuesPage() {
           ) : null}
           Reported by {i.reporter_name} · {i.severity} · {when}
         </div>
+        {i.status === "scheduled" && i.schedule_notes && (
+          <div className="shop-unit-issue-meta">
+            <span className="muted">Shop notes: </span>
+            {i.schedule_notes}
+          </div>
+        )}
+        {showConfirmCta && (
+          <div className="schedule-confirm-box no-print">
+            {i.tech_confirm_status === "confirmed" ? (
+              <p className="schedule-confirm-ok">
+                You confirmed this shop appointment
+                {i.tech_confirmed_at
+                  ? ` · ${String(i.tech_confirmed_at).slice(0, 16).replace("T", " ")}`
+                  : ""}
+                .
+              </p>
+            ) : (
+              <>
+                <p className="schedule-confirm-prompt">
+                  <strong>Confirm you’ll bring unit {i.unit_number}</strong>
+                  {i.scheduled_date ? ` on ${String(i.scheduled_date).slice(0, 10)}` : ""}?
+                  This records that you saw the appointment.
+                </p>
+                <div className="log-item-actions">
+                  <button
+                    type="button"
+                    className="btn primary btn-sm"
+                    disabled={confirmBusyId === i.id}
+                    onClick={() => void confirmSchedule(i.id, "confirm")}
+                  >
+                    {confirmBusyId === i.id ? "Saving…" : "Confirm appointment"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    disabled={confirmBusyId === i.id}
+                    onClick={() => {
+                      setDeclineId(i.id);
+                      setDeclineNote("");
+                    }}
+                  >
+                    Can’t make it
+                  </button>
+                </div>
+                {declineId === i.id && (
+                  <div className="schedule-decline-form">
+                    <label>
+                      Why can’t you make it? (shop will see this)
+                      <textarea
+                        value={declineNote}
+                        onChange={(e) => setDeclineNote(e.target.value)}
+                        rows={2}
+                        placeholder="e.g. On a job until 4pm · PTO · unit not with me"
+                      />
+                    </label>
+                    <div className="log-item-actions">
+                      <button
+                        type="button"
+                        className="btn primary btn-sm"
+                        disabled={confirmBusyId === i.id || !declineNote.trim()}
+                        onClick={() => void confirmSchedule(i.id, "decline", declineNote.trim())}
+                      >
+                        Send decline
+                      </button>
+                      <button
+                        type="button"
+                        className="btn secondary btn-sm"
+                        onClick={() => setDeclineId(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
         {canShop && (
           <div className="log-item-actions no-print">
             <button className="btn btn-sm" type="button" onClick={() => openManage(i)}>
               {i.status === "open" || opts?.scheduleCta ? "Schedule / shop work" : "Shop work"}
             </button>
+            {needsTechConfirm && i.status === "scheduled" && (
+              <span className="muted" style={{ fontSize: "0.82rem", alignSelf: "center" }}>
+                Tech has not confirmed yet
+              </span>
+            )}
           </div>
         )}
       </li>
@@ -1077,7 +1215,7 @@ export function IssuesPage() {
               {(category === "flat_tire" || isEmergency) && (
                 <div className="error" style={{ margin: 0 }}>
                   <strong>Emergency</strong> — this notifies the mechanic, office, and admin right
-                  away (and free phone push if ntfy is set up).
+                  away in the app (and SMS if Twilio is set up).
                 </div>
               )}
               <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
@@ -1157,6 +1295,27 @@ export function IssuesPage() {
                 <span className="muted"> · by {manage.reporter_name}</span>
               ) : null}
             </p>
+            {manage.status === "scheduled" && (
+              <p className="schedule-confirm-manage" style={{ marginTop: 0 }}>
+                <strong>Tech confirm: </strong>
+                {manage.tech_confirm_status === "confirmed" ? (
+                  <span className="confirm-text-ok">
+                    Confirmed
+                    {manage.tech_confirmed_by_name ? ` by ${manage.tech_confirmed_by_name}` : ""}
+                    {manage.tech_confirmed_at
+                      ? ` · ${String(manage.tech_confirmed_at).slice(0, 16).replace("T", " ")}`
+                      : ""}
+                  </span>
+                ) : manage.tech_confirm_status === "declined" ? (
+                  <span className="confirm-text-bad">
+                    Declined
+                    {manage.tech_confirm_note ? ` — ${manage.tech_confirm_note}` : ""}
+                  </span>
+                ) : (
+                  <span className="confirm-text-pending">Awaiting tech confirmation</span>
+                )}
+              </p>
+            )}
             {isMechanic && smsConfigured && smsContacts.length > 0 && (
               <form
                 className="form"

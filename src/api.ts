@@ -197,10 +197,100 @@ export async function api<T = unknown>(
   return data as T;
 }
 
-export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer" | "warehouse";
+/**
+ * Authenticated binary fetch (JPEG snapshots, file downloads).
+ * Same cookies / timeout behavior as api(), but returns a Blob.
+ */
+export async function apiBinary(
+  path: string,
+  options: ApiOptions = {}
+): Promise<Blob> {
+  const { timeoutMs: timeoutOpt, ...fetchInit } = options;
+  const timeoutMs = timeoutOpt !== undefined ? timeoutOpt : DEFAULT_TIMEOUT_MS;
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    throw new ApiError(0, "You appear to be offline. Check your connection and try again.");
+  }
+
+  const headers = new Headers(fetchInit.headers || {});
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (controller && timeoutMs > 0) {
+    if (fetchInit.signal) {
+      if (fetchInit.signal.aborted) controller.abort();
+      else {
+        fetchInit.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      ...fetchInit,
+      headers,
+      credentials: "include",
+      signal: controller?.signal ?? fetchInit.signal,
+    });
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      throw new ApiError(0, "Server took too long to respond. Check signal and try again.");
+    }
+    throw new ApiError(
+      0,
+      "Network error — could not reach the server. Check connection and try again."
+    );
+  }
+  if (timer) clearTimeout(timer);
+
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new ApiError(401, "Session expired. Please sign in again.");
+  }
+
+  if (!res.ok) {
+    let msg = res.statusText || `Request failed (${res.status})`;
+    try {
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+      if (data && typeof data === "object" && data !== null) {
+        const obj = data as { error?: string; message?: string };
+        if (obj.error) msg = String(obj.error);
+        else if (obj.message) msg = String(obj.message);
+      } else if (text && text.length < 200 && !text.includes("<")) {
+        msg = text;
+      }
+    } catch {
+      /* keep status text */
+    }
+    throw new ApiError(res.status, msg.replace(/\s+/g, " ").trim().slice(0, 220));
+  }
+
+  const blob = await res.blob();
+  if (!blob.size) {
+    throw new ApiError(502, "Empty image from camera proxy");
+  }
+  return blob;
+}
+
+export type Role =
+  | "admin"
+  | "office"
+  | "driver"
+  | "mechanic"
+  | "viewer"
+  | "warehouse"
+  | "supervisor";
 
 /** Roles admin can preview as (session "view as") */
 export const VIEW_AS_ROLES: Role[] = [
+  "supervisor",
   "warehouse",
   "office",
   "driver",
@@ -272,9 +362,16 @@ export function isViewer(user: User | null | undefined): boolean {
   return user?.role === "viewer";
 }
 
-/** Admin shell (full nav / command center) for admin or viewer. */
+/**
+ * Broad nav shell (fleet + warehouse + company menus).
+ * Admin, viewer (read-only), and supervisor (ops, no system settings).
+ */
 export function usesAdminShell(user: User | null | undefined): boolean {
-  return user?.role === "admin" || user?.role === "viewer";
+  return (
+    user?.role === "admin" ||
+    user?.role === "viewer" ||
+    user?.role === "supervisor"
+  );
 }
 
 /**
@@ -300,24 +397,54 @@ export function can(user: User | null, action: string): boolean {
 
   const map: Record<string, Role[]> = {
     manageUsers: ["admin"],
-    manageEmployees: ["admin", "office"],
-    manageVehicles: ["admin", "office", "mechanic"],
-    manageVehicleCompliance: ["admin", "office", "mechanic"],
-    logFuel: ["admin", "office", "driver", "mechanic", "warehouse"],
-    editFuel: ["admin", "office"],
-    logPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse"],
-    viewPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"],
-    viewAlerts: ["admin", "office", "mechanic", "viewer"],
-    manageAlerts: ["admin", "office", "mechanic"],
-    reportIssues: ["admin", "office", "driver", "mechanic"],
-    manageIssues: ["admin", "mechanic", "office"],
-    viewAudit: ["admin", "viewer"],
-    viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"],
+    manageEmployees: ["admin", "office", "supervisor"],
+    manageVehicles: ["admin", "office", "mechanic", "supervisor"],
+    manageVehicleCompliance: ["admin", "office", "mechanic", "supervisor"],
+    logFuel: ["admin", "office", "driver", "mechanic", "warehouse", "supervisor"],
+    editFuel: ["admin", "office", "supervisor"],
+    logPartsPurchase: [
+      "admin",
+      "office",
+      "driver",
+      "mechanic",
+      "warehouse",
+      "supervisor",
+    ],
+    viewPartsPurchase: [
+      "admin",
+      "office",
+      "driver",
+      "mechanic",
+      "warehouse",
+      "viewer",
+      "supervisor",
+    ],
+    viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"],
+    manageAlerts: ["admin", "office", "mechanic", "supervisor"],
+    reportIssues: ["admin", "office", "driver", "mechanic", "supervisor"],
+    manageIssues: ["admin", "mechanic", "office", "supervisor"],
+    viewAudit: ["admin", "viewer", "supervisor"],
+    viewReports: [
+      "admin",
+      "office",
+      "mechanic",
+      "viewer",
+      "warehouse",
+      "supervisor",
+    ],
     manageSettings: ["admin"],
-    viewInventory: ["admin", "office", "warehouse", "viewer"],
+    viewInventory: ["admin", "office", "warehouse", "viewer", "supervisor"],
     manageInventory: ["admin", "warehouse"],
     manageInventoryLevels: ["admin", "warehouse"],
-    viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic", "viewer"],
+    viewCompanyAssets: [
+      "admin",
+      "office",
+      "warehouse",
+      "driver",
+      "mechanic",
+      "viewer",
+      "supervisor",
+    ],
     manageCompanyAssets: ["admin", "warehouse"],
   };
   return (map[action] || []).includes(r);
@@ -355,6 +482,8 @@ export function roleLabel(role: Role | string | undefined): string {
       return "Warehouse";
     case "viewer":
       return "Viewer";
+    case "supervisor":
+      return "Supervisor";
     default:
       return role || "User";
   }
@@ -366,6 +495,7 @@ export function roleLabel(role: Role | string | undefined): string {
  */
 export function appBrandName(role?: Role | string | undefined): string {
   if (role === "viewer") return "Field App · Viewer";
+  if (role === "supervisor") return "Field App · Supervisor";
   return "Field App";
 }
 

@@ -236,6 +236,25 @@ async function bumpAttempt(id: string, lastError: string): Promise<void> {
 }
 
 let flushing = false;
+/** Prevent a stuck flush (hung fetch) from blocking every later "Send now". */
+let flushStartedAt = 0;
+const FLUSH_STALE_MS = 45_000;
+/** Each queued replay must finish or abort — no infinite hang on mobile. */
+const FLUSH_ITEM_TIMEOUT_MS = 15_000;
+
+export function isFlushInProgress(): boolean {
+  return flushing;
+}
+
+/** Drop every pending offline item (after user confirms). */
+export async function clearOfflineQueue(): Promise<number> {
+  const list = await listQueued();
+  for (const item of list) {
+    await removeQueued(item.id);
+  }
+  notify(0);
+  return list.length;
+}
 
 /**
  * Replay queued mutations oldest-first.
@@ -245,15 +264,26 @@ export async function flushOfflineQueue(): Promise<{
   sent: number;
   remaining: number;
   errors: string[];
+  labels?: string[];
 }> {
   if (flushing) {
-    return { sent: 0, remaining: await pendingCount(), errors: [] };
+    // Recover if a previous flush never finished (hung network)
+    if (flushStartedAt && Date.now() - flushStartedAt > FLUSH_STALE_MS) {
+      flushing = false;
+    } else {
+      return {
+        sent: 0,
+        remaining: await pendingCount(),
+        errors: ["Still sending previous attempt — wait a few seconds, then try again."],
+      };
+    }
   }
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     return { sent: 0, remaining: await pendingCount(), errors: ["Still offline"] };
   }
 
   flushing = true;
+  flushStartedAt = Date.now();
   let sent = 0;
   const errors: string[] = [];
 
@@ -278,15 +308,31 @@ export async function flushOfflineQueue(): Promise<{
           headers.set("Content-Type", "application/json");
         }
 
-        const res = await fetch(`/api${item.path}`, {
-          method: item.method,
-          headers,
-          body,
-          credentials: "include",
-        });
+        const controller =
+          typeof AbortController !== "undefined" ? new AbortController() : null;
+        let timedOut = false;
+        const timer =
+          controller &&
+          setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, FLUSH_ITEM_TIMEOUT_MS);
+
+        let res: Response;
+        try {
+          res = await fetch(`/api${item.path}`, {
+            method: item.method,
+            headers,
+            body,
+            credentials: "include",
+            signal: controller?.signal,
+          });
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
 
         if (res.status === 401) {
-          errors.push("Session expired — sign in again to sync pending changes.");
+          errors.push("Session expired — sign out and sign back in, then tap Send now.");
           break;
         }
 
@@ -315,9 +361,19 @@ export async function flushOfflineQueue(): Promise<{
         sent += 1;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        await bumpAttempt(item.id, msg);
-        if (isNetworkFailure(e)) {
-          errors.push("Still no connection — will retry when signal returns.");
+        const timedOut =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          msg.toLowerCase().includes("abort");
+        const errLabel = timedOut
+          ? "Request timed out (slow network)"
+          : msg;
+        await bumpAttempt(item.id, errLabel);
+        if (timedOut || isNetworkFailure(e)) {
+          errors.push(
+            timedOut
+              ? "Server took too long — try again on stronger Wi‑Fi, or sign out/in."
+              : "Still no connection — will retry when signal returns."
+          );
           break;
         }
         errors.push(`${item.label}: ${msg}`);
@@ -325,11 +381,18 @@ export async function flushOfflineQueue(): Promise<{
     }
   } finally {
     flushing = false;
+    flushStartedAt = 0;
   }
 
-  const remaining = await pendingCount();
+  const remainingList = await listQueued();
+  const remaining = remainingList.length;
   notify(remaining);
-  return { sent, remaining, errors };
+  return {
+    sent,
+    remaining,
+    errors,
+    labels: remainingList.map((q) => q.label),
+  };
 }
 
 let bootstrapped = false;

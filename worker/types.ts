@@ -1,4 +1,11 @@
-export type Role = "admin" | "office" | "driver" | "mechanic" | "viewer" | "warehouse";
+export type Role =
+  | "admin"
+  | "office"
+  | "driver"
+  | "mechanic"
+  | "viewer"
+  | "warehouse"
+  | "supervisor";
 
 export interface Env {
   DB: D1Database;
@@ -21,6 +28,10 @@ export interface Env {
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
   TWILIO_FROM_NUMBER?: string;
+  /** LTS / Hikvision NVR for in-app warehouse camera snapshots (use Cloudflare Tunnel URL) */
+  WAREHOUSE_NVR_URL?: string;
+  WAREHOUSE_NVR_USER?: string;
+  WAREHOUSE_NVR_PASS?: string;
   /** ServiceTitan API v2 (pricebook photos + future sync) */
   ST_TENANT_ID?: string;
   ST_CLIENT_ID?: string;
@@ -139,6 +150,11 @@ export interface VehicleIssueRow {
   status: "open" | "scheduled" | "in_progress" | "completed" | "cancelled";
   scheduled_date: string | null;
   schedule_notes: string | null;
+  /** pending | confirmed | declined when status is scheduled */
+  tech_confirm_status: string | null;
+  tech_confirmed_at: string | null;
+  tech_confirmed_by_user_id: number | null;
+  tech_confirm_note: string | null;
   completed_at: string | null;
   completion_notes: string | null;
   photo_key: string | null;

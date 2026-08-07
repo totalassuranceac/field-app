@@ -20,10 +20,20 @@ export function toPublicUser(u: UserRow): PublicUser {
   };
 }
 
-/** Persist role for users table (CHECK allows admin|office|driver|mechanic|viewer only). */
+/**
+ * Persist role for users table.
+ * Warehouse is still office + is_warehouse=1 (legacy CHECK workaround).
+ * Supervisor is a first-class role value (migration 063).
+ */
 export function dbRoleFor(role: Role): { role: Role; is_warehouse: number } {
   if (role === "warehouse") return { role: "office", is_warehouse: 1 };
+  if (role === "supervisor") return { role: "supervisor", is_warehouse: 0 };
   return { role, is_warehouse: 0 };
+}
+
+/** Office leadership + supervisors (day-to-day ops, not full admin). */
+export function isOfficeSide(role: string): boolean {
+  return role === "admin" || role === "office" || role === "supervisor";
 }
 
 function bufToHex(buf: ArrayBuffer): string {
@@ -134,45 +144,85 @@ export function roleAtLeast(role: Role, allowed: Role[]): boolean {
 }
 
 export const ROLE_PERMS = {
+  /** Login accounts / role assignment — admin only */
   manageUsers: ["admin"] as Role[],
-  manageEmployees: ["admin", "office"] as Role[],
-  manageVehicles: ["admin", "office", "mechanic"] as Role[],
+  /** Employee directory edits — office + supervisors (not system settings) */
+  manageEmployees: ["admin", "office", "supervisor"] as Role[],
+  manageVehicles: ["admin", "office", "mechanic", "supervisor"] as Role[],
   /** Registration stickers + insurance dates (office, shop, admin — not field drivers). */
-  manageVehicleCompliance: ["admin", "office", "mechanic"] as Role[],
+  manageVehicleCompliance: ["admin", "office", "mechanic", "supervisor"] as Role[],
   /** Any staff can log a fuel receipt photo (warehouse / shop included). */
-  logFuel: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
-  editAnyFuel: ["admin", "office"] as Role[],
-  viewFuel: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"] as Role[],
+  logFuel: ["admin", "office", "driver", "mechanic", "warehouse", "supervisor"] as Role[],
+  editAnyFuel: ["admin", "office", "supervisor"] as Role[],
+  viewFuel: [
+    "admin",
+    "office",
+    "driver",
+    "mechanic",
+    "warehouse",
+    "viewer",
+    "supervisor",
+  ] as Role[],
   /** Company-card parts receipts (invoice / packing slip photos) */
-  logPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse"] as Role[],
-  viewPartsPurchase: ["admin", "office", "driver", "mechanic", "warehouse", "viewer"] as Role[],
+  logPartsPurchase: [
+    "admin",
+    "office",
+    "driver",
+    "mechanic",
+    "warehouse",
+    "supervisor",
+  ] as Role[],
+  viewPartsPurchase: [
+    "admin",
+    "office",
+    "driver",
+    "mechanic",
+    "warehouse",
+    "viewer",
+    "supervisor",
+  ] as Role[],
   /** Read mileage flags + tracking health (viewers browse-only) */
-  viewAlerts: ["admin", "office", "mechanic", "viewer"] as Role[],
+  viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"] as Role[],
   /** Ack / dismiss flags — admin, office, mechanic (shop eyes) */
-  manageAlerts: ["admin", "office", "mechanic"] as Role[],
-  reportIssues: ["admin", "office", "driver", "mechanic"] as Role[],
-  manageIssues: ["admin", "mechanic", "office"] as Role[],
-  /** Audit trail: admin + viewer (browse only; mutations still admin-only) */
-  viewAudit: ["admin", "viewer"] as Role[],
-  viewReports: ["admin", "office", "mechanic", "viewer", "warehouse"] as Role[],
+  manageAlerts: ["admin", "office", "mechanic", "supervisor"] as Role[],
+  reportIssues: ["admin", "office", "driver", "mechanic", "supervisor"] as Role[],
+  manageIssues: ["admin", "mechanic", "office", "supervisor"] as Role[],
+  /** Audit trail: admin + viewer + supervisor (browse only) */
+  viewAudit: ["admin", "viewer", "supervisor"] as Role[],
+  viewReports: [
+    "admin",
+    "office",
+    "mechanic",
+    "viewer",
+    "warehouse",
+    "supervisor",
+  ] as Role[],
+  /** System / integration settings — admin only */
   manageSettings: ["admin"] as Role[],
   /** Read company settings / people lists without write (viewer explores app) */
-  browseAdmin: ["admin", "viewer"] as Role[],
+  browseAdmin: ["admin", "viewer", "supervisor"] as Role[],
   /**
    * Inventory
-   * - view: admin, office, warehouse, viewer (techs do not browse full catalog)
-   * - manage: issue/receive, transfers, import (admin + warehouse; office view-only helpers)
+   * - view: admin, office, warehouse, viewer, supervisor
+   * - manage: issue/receive, transfers, import (admin + warehouse only)
    * - levels: min/max only admin + warehouse
    */
-  viewInventory: ["admin", "office", "warehouse", "viewer"] as Role[],
+  viewInventory: ["admin", "office", "warehouse", "viewer", "supervisor"] as Role[],
   manageInventory: ["admin", "warehouse"] as Role[],
   manageInventoryLevels: ["admin", "warehouse"] as Role[],
   /**
    * Company assets (bottles, ladders, tools) — outside pricebook
-   * - view: warehouse/office/admin/viewer full; field + mechanic can see (field scoped in routes)
-   * - manage: warehouse + admin only
+   * - view: broad; manage: warehouse + admin only
    */
-  viewCompanyAssets: ["admin", "office", "warehouse", "driver", "mechanic", "viewer"] as Role[],
+  viewCompanyAssets: [
+    "admin",
+    "office",
+    "warehouse",
+    "driver",
+    "mechanic",
+    "viewer",
+    "supervisor",
+  ] as Role[],
   manageCompanyAssets: ["admin", "warehouse"] as Role[],
 };
 

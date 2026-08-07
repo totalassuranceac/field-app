@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
@@ -37,6 +37,42 @@ interface PendingPlacement {
   resolved_at: string;
   purchase_order: string | null;
   ticket_notes: string | null;
+}
+
+/** Goodman 08-06-26  11:05a */
+function formatVendorWhen(iso: string): string {
+  try {
+    const s = String(iso || "").replace("T", " ").trim();
+    const datePart = s.slice(0, 10);
+    const [y, m, day] = datePart.split("-");
+    if (!y || !m || !day) return s.slice(0, 16);
+    let hh = Number(s.slice(11, 13));
+    const mm = s.slice(14, 16) || "00";
+    if (!Number.isFinite(hh)) return `${m}-${day}-${y.slice(2)}`;
+    const ampm = hh >= 12 ? "p" : "a";
+    hh = hh % 12 || 12;
+    return `${m}-${day}-${y.slice(2)}  ${hh}:${mm}${ampm}`;
+  } catch {
+    return String(iso || "").slice(0, 16);
+  }
+}
+
+/** "1315 E Johnston Ave - TXV and Motor" for warehouse to label boxes */
+function dropoffJobPartLine(d: Dropoff): string {
+  const address = (d.for_unit || "").trim();
+  let part = "";
+  if (d.lines && d.lines.length > 0) {
+    part = d.lines
+      .map((l) => {
+        const name = (l.part_name || l.part_code || "Part").trim();
+        return l.qty && l.qty !== 1 ? `${l.qty}× ${name}` : name;
+      })
+      .join(", ");
+  } else {
+    part = (d.part_summary || "").trim();
+  }
+  if (address && part) return `${address} — ${part}`;
+  return part || address || "Parts";
 }
 
 /**
@@ -90,7 +126,8 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       },
     ]);
     setNotes("");
-    setForUnit("");
+    // Job address goes on the drop-off so warehouse can label boxes by address
+    setForUnit((opts.address || "").trim());
     setPickupTicketId(opts.ticketId ?? null);
     setPickupLineId(opts.lineId ?? null);
     setFromPickup(true);
@@ -171,10 +208,43 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
     load().catch((e) => setError(e instanceof Error ? e.message : "Load failed"));
   }, [load]);
 
+  /** Group drop-offs by vendor for warehouse labeling (address — part under each store). */
+  const vendorGroups = useMemo(() => {
+    const map = new Map<
+      string,
+      { vendor: string; sortKey: string; items: Dropoff[] }
+    >();
+    for (const d of list) {
+      const vendor = (d.vendor_name || "Unknown").trim() || "Unknown";
+      const key = vendor.toLowerCase();
+      let g = map.get(key);
+      if (!g) {
+        g = { vendor, sortKey: key, items: [] };
+        map.set(key, g);
+      }
+      g.items.push(d);
+    }
+    const groups = [...map.values()];
+    for (const g of groups) {
+      g.items.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    }
+    // Vendors ordered by earliest drop-off in the group (run order)
+    groups.sort((a, b) => {
+      const ta = a.items[0]?.created_at || "";
+      const tb = b.items[0]?.created_at || "";
+      return String(ta).localeCompare(String(tb));
+    });
+    return groups;
+  }, [list]);
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (fromPickup && !notes.trim()) {
       setError("Say where you placed the parts (counter, cage, shelf, truck…), then save.");
+      return;
+    }
+    if (fromPickup && !forUnit.trim()) {
+      setError("Enter the job address so warehouse can write it on the boxes.");
       return;
     }
     setBusy(true);
@@ -355,6 +425,7 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
                       qty: String(p.qty || 1),
                       ticketId: p.ticket_id,
                       lineId: p.line_id,
+                      address: p.ticket_notes || undefined,
                     })
                   }
                 >
@@ -409,11 +480,12 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
               />
             </label>
             <label>
-              Unit / job <span className="muted">(opt.)</span>
+              Job address / unit *
               <input
                 value={forUnit}
                 onChange={(e) => setForUnit(e.target.value)}
-                placeholder="Unit 012 · address"
+                placeholder="1315 E Johnston Ave"
+                required={fromPickup}
               />
             </label>
             <label>
@@ -502,88 +574,68 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
               : "No recent drop-offs."}
           </div>
         ) : (
-          list.map((d) => (
-            <article key={d.id} className={`card parts-dropoff-card st-${d.status}`}>
-              <div className="parts-dropoff-card-head">
-                <div className="parts-dropoff-card-title">
-                  <strong className="parts-dropoff-vendor">{d.vendor_name}</strong>
-                  <span
-                    className={`pp-status-pill st-${
-                      d.status === "waiting"
-                        ? "pending"
-                        : d.status === "received"
-                          ? "picked"
-                          : "cancelled"
-                    }`}
-                  >
-                    {d.status === "waiting"
-                      ? "At shop"
-                      : d.status === "received"
-                        ? "Received"
-                        : "Cancelled"}
-                  </span>
-                  <span className="muted parts-dropoff-when">
-                    {String(d.created_at).replace("T", " ").slice(5, 16)}
-                    {d.dropped_by_name ? ` · ${d.dropped_by_name}` : ""}
-                  </span>
-                </div>
-                {d.status === "waiting" && (
-                  <div className="parts-dropoff-actions">
-                    {canReceive && (
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        disabled={actingId === d.id}
-                        onClick={() => void markReceived(d.id)}
-                      >
-                        {actingId === d.id ? "…" : "Received"}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="btn secondary btn-sm"
-                      disabled={actingId === d.id}
-                      onClick={() => void cancelDropoff(d.id)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
-              </div>
-              <p className="parts-dropoff-summary">
-                {d.part_summary}
-                {(d.for_unit || d.notes) && (
-                  <span className="muted parts-dropoff-meta">
-                    {" · "}
-                    {[d.for_unit ? `For ${d.for_unit}` : null, d.notes]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
-                )}
-              </p>
-              {d.lines && d.lines.length > 0 && (
-                <ul className="parts-dropoff-lines">
-                  {d.lines.map((l) => (
-                    <li key={l.id}>
-                      <span className="parts-dropoff-qty">{l.qty}×</span>{" "}
-                      {l.part_name || l.part_code || "Part"}
-                      {l.part_code && l.part_name ? (
-                        <span className="muted"> · {l.part_code}</span>
-                      ) : null}
+          vendorGroups.map((g) => {
+            const when = formatVendorWhen(g.items[0]?.created_at || "");
+            const waitingCount = g.items.filter((d) => d.status === "waiting").length;
+            return (
+              <section key={g.sortKey} className="card parts-dropoff-vendor-group">
+                <header className="parts-dropoff-vendor-head">
+                  <h3 className="parts-dropoff-vendor-title">
+                    <span className="parts-dropoff-vendor-name">{g.vendor}</span>
+                    <span className="parts-dropoff-vendor-when">{when}</span>
+                  </h3>
+                  {waitingCount > 0 && (
+                    <span className="pp-status-pill st-pending">
+                      {waitingCount} at shop
+                    </span>
+                  )}
+                </header>
+                <ul className="parts-dropoff-job-list">
+                  {g.items.map((d) => (
+                    <li key={d.id} className={`parts-dropoff-job-row st-${d.status}`}>
+                      <div className="parts-dropoff-job-main">
+                        <span className="parts-dropoff-job-line">
+                          {dropoffJobPartLine(d)}
+                        </span>
+                        <span className="muted parts-dropoff-job-meta">
+                          {d.notes ? `Left: ${d.notes}` : ""}
+                          {d.dropped_by_name
+                            ? `${d.notes ? " · " : ""}${d.dropped_by_name}`
+                            : ""}
+                          {d.status === "received" && d.received_by_name
+                            ? ` · received ${d.received_by_name}`
+                            : ""}
+                          {d.status === "cancelled" ? " · cancelled" : ""}
+                        </span>
+                      </div>
+                      {d.status === "waiting" && (
+                        <div className="parts-dropoff-actions">
+                          {canReceive && (
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              disabled={actingId === d.id}
+                              onClick={() => void markReceived(d.id)}
+                            >
+                              {actingId === d.id ? "…" : "Received"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn secondary btn-sm"
+                            disabled={actingId === d.id}
+                            onClick={() => void cancelDropoff(d.id)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
-              )}
-              {d.status === "received" && d.received_by_name && (
-                <p className="muted parts-dropoff-received">
-                  By {d.received_by_name}
-                  {d.received_at
-                    ? ` · ${String(d.received_at).replace("T", " ").slice(5, 16)}`
-                    : ""}
-                </p>
-              )}
-            </article>
-          ))
+              </section>
+            );
+          })
         )}
       </div>
     </div>

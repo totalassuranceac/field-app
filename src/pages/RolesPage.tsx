@@ -7,7 +7,15 @@ import {
 } from "../api";
 import { useAuth } from "../auth";
 
-const ROLES: Role[] = ["admin", "warehouse", "office", "driver", "mechanic", "viewer"];
+const ROLES: Role[] = [
+  "admin",
+  "supervisor",
+  "warehouse",
+  "office",
+  "driver",
+  "mechanic",
+  "viewer",
+];
 
 const FEATURES: Array<{ path: string; label: string; need?: string; note?: string }> = [
   { path: "/inventory", label: "Inventory / pickup / stock", need: "viewInventory" },

@@ -13,7 +13,7 @@
     <meta name="format-detection" content="telephone=no" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <title>Field App · Total Assurance</title>
-    <!-- build: 2026-07-31-tool-loan-ledger-v2 -->
+    <!-- build: 2026-08-07-sms-optin-no-ntfy -->
     <script>
       // Apply saved theme before paint so dark mode is not a white flash
       try {
@@ -29,12 +29,12 @@
 
       // Drop stuck service workers / caches so phones don't keep an old broken app shell
       (function () {
-        var BUILD = "2026-07-31-tool-loan-print-v6";
+        var BUILD = "2026-08-07-sms-optin-no-ntfy-v1";
         try {
           var prev = localStorage.getItem("ta_app_build");
           if (prev !== BUILD) {
             localStorage.setItem("ta_app_build", BUILD);
-            if (window.caches && prev) {
+            if (window.caches) {
               caches.keys().then(function (keys) {
                 return Promise.all(
                   keys.map(function (k) {
@@ -43,6 +43,14 @@
                 );
               });
             }
+            // One forced reload after build change so lazy chunks (Settings) are not stale
+            try {
+              if (prev && !sessionStorage.getItem("ta_build_reloaded_" + BUILD)) {
+                sessionStorage.setItem("ta_build_reloaded_" + BUILD, "1");
+                location.replace("/?v=" + encodeURIComponent(BUILD) + "&t=" + Date.now());
+                return;
+              }
+            } catch (e) {}
           }
         } catch (e) {}
         try {

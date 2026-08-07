@@ -30,20 +30,17 @@ import { catalogEntry } from "./issueCatalog";
 import {
   ensureOilChangeScheduled,
   markNotificationRead,
+  notifyAndSms,
   notifyOpsActionItems,
   notifyShopBringInsToday,
   notifyUsers,
   notifyWeeklyChecksDue,
+  shortSms,
   userIdsForIssue,
   usersByRoles,
 } from "./notifications";
 import { logSms, normalizePhone, sendSms, smsConfigured } from "./sms";
-import {
-  alertFleetIncident,
-  fanOutAlert,
-  sendDiscord,
-  type AlertPayload,
-} from "./alertChannels";
+import { alertFleetIncident } from "./alertChannels";
 import { getOcrHints, recordOcrFeedback, type OcrFieldSnapshot } from "./ocrLearn";
 import {
   adjustStockQty,
@@ -208,8 +205,7 @@ function isSecure(c: { req: { url: string } }): boolean {
 
 /**
  * Keep a promise alive after the HTTP response is sent.
- * Fire-and-forget (void p) is killed by Cloudflare when the response finishes —
- * that was why emergency push never ran after we moved ntfy off the request path.
+ * Fire-and-forget (void p) is killed by Cloudflare when the response finishes.
  */
 function scheduleWaitUntil(
   c: { executionCtx: { waitUntil: (p: Promise<unknown>) => void } },
@@ -813,7 +809,9 @@ api.get("/dashboard", async (c) => {
     .all();
 
   const myRepairs = await c.env.DB.prepare(
-    `SELECT i.id, i.title, i.status, i.scheduled_date, i.severity, v.unit_number
+    `SELECT i.id, i.title, i.status, i.scheduled_date, i.severity, v.unit_number,
+            i.tech_confirm_status, i.tech_confirmed_at, i.tech_confirm_note,
+            i.schedule_notes
      FROM vehicle_issues i
      JOIN vehicles v ON v.id = i.vehicle_id
      WHERE i.status IN ('scheduled', 'in_progress')
@@ -2766,34 +2764,98 @@ api.get("/parts-purchases", requireRoles(ROLE_PERMS.viewPartsPurchase), async (c
   }
 });
 
+/** Clean store names for parts receipt dropdown / save. */
+function canonicalizePartsStoreName(raw: string): string | null {
+  const n = String(raw || "").trim();
+  if (!n) return null;
+  const k = n
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!k) return null;
+
+  // Placeholders / noise (not real purchase stores)
+  if (k.includes("replenish")) return null;
+  if (k.includes("default vendor") || k === "imported default vendor") return null;
+  if (k.includes("alcapulco") || k.includes("acapulco")) return null;
+
+  // One official name per brand family
+  if (k === "carrier" || k.startsWith("carrier ")) return "Carrier Enterprise";
+  if (k === "ferguson" || k.startsWith("ferguson ")) return "Ferguson Supply";
+  if (k === "lennox" || k.startsWith("lennox ")) return "Lennox Industries";
+
+  return n;
+}
+
 /** Vendor name suggestions for datalist (part_vendors + recent tickets + prior receipts). */
 api.get("/parts-purchases/vendors", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
-  const names = new Set<string>();
+  /** lower(trim) → preferred display name */
+  const byKey = new Map<string, string>();
+  function addName(raw: string | null | undefined) {
+    const n = canonicalizePartsStoreName(String(raw || ""));
+    if (!n) return;
+    const key = n
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!key) return;
+    // Canonical brands always win
+    if (
+      n === "Carrier Enterprise" ||
+      n === "Ferguson Supply" ||
+      n === "Lennox Industries"
+    ) {
+      byKey.set(key, n);
+      return;
+    }
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, n);
+      return;
+    }
+    const prevLower = prev === prev.toLowerCase();
+    const nextLower = n === n.toLowerCase();
+    if (prevLower && !nextLower) byKey.set(key, n);
+  }
   try {
     const a = await c.env.DB.prepare(
-      `SELECT DISTINCT vendor_name as n FROM part_vendors WHERE vendor_name IS NOT NULL AND trim(vendor_name) != '' LIMIT 80`
+      `SELECT DISTINCT vendor_name as n FROM part_vendors
+       WHERE vendor_name IS NOT NULL AND trim(vendor_name) != ''
+       LIMIT 200`
     ).all<{ n: string }>();
-    for (const r of a.results || []) if (r.n) names.add(r.n.trim());
+    for (const r of a.results || []) addName(r.n);
   } catch {
     /* table may not exist */
   }
   try {
     const b = await c.env.DB.prepare(
-      `SELECT DISTINCT vendor_name as n FROM part_pickup_tickets WHERE vendor_name IS NOT NULL AND trim(vendor_name) != '' ORDER BY id DESC LIMIT 40`
+      `SELECT DISTINCT vendor_name as n FROM part_pickup_tickets
+       WHERE vendor_name IS NOT NULL AND trim(vendor_name) != ''
+       ORDER BY id DESC LIMIT 80`
     ).all<{ n: string }>();
-    for (const r of b.results || []) if (r.n) names.add(r.n.trim());
+    for (const r of b.results || []) addName(r.n);
   } catch {
     /* optional */
   }
   try {
     const c2 = await c.env.DB.prepare(
-      `SELECT DISTINCT vendor_name as n FROM parts_purchase_receipts WHERE vendor_name IS NOT NULL ORDER BY id DESC LIMIT 40`
+      `SELECT DISTINCT vendor_name as n FROM parts_purchase_receipts
+       WHERE vendor_name IS NOT NULL
+       ORDER BY id DESC LIMIT 80`
     ).all<{ n: string }>();
-    for (const r of c2.results || []) if (r.n) names.add(r.n.trim());
+    for (const r of c2.results || []) addName(r.n);
   } catch {
     /* optional */
   }
-  return c.json({ vendors: [...names].sort((x, y) => x.localeCompare(y)).slice(0, 120) });
+  // Ensure preferred brand names always appear even if not in DB yet
+  addName("Carrier Enterprise");
+  addName("Ferguson Supply");
+  addName("Lennox Industries");
+  return c.json({
+    vendors: [...byKey.values()].sort((x, y) => x.localeCompare(y)).slice(0, 120),
+  });
 });
 
 api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
@@ -2818,11 +2880,52 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
     };
   }>();
 
-  const vendorName = (body.vendor_name || "").trim();
+  let vendorName = canonicalizePartsStoreName(String(body.vendor_name || "")) || "";
   const receiptKey = (body.receipt_key || "").trim();
-  if (!vendorName) return c.json({ error: "Vendor / store name is required" }, 400);
+  if (!vendorName) {
+    return c.json(
+      {
+        error:
+          "Store name is required (replenishment placeholders and blocked names cannot be used).",
+      },
+      400
+    );
+  }
   if (!receiptKey) {
     return c.json({ error: "Receipt photo is required. Take a picture of the invoice or packing slip." }, 400);
+  }
+
+  // Reuse existing store name ignoring case (avoid "Home Depot" vs "home depot")
+  // Skip if already a canonical brand name
+  const isCanonicalBrand =
+    vendorName === "Carrier Enterprise" ||
+    vendorName === "Ferguson Supply" ||
+    vendorName === "Lennox Industries";
+  if (!isCanonicalBrand) {
+    try {
+      const existing = await c.env.DB.prepare(
+        `SELECT vendor_name FROM parts_purchase_receipts
+         WHERE vendor_name IS NOT NULL AND lower(trim(vendor_name)) = lower(trim(?))
+         ORDER BY id DESC LIMIT 1`
+      )
+        .bind(vendorName)
+        .first<{ vendor_name: string }>();
+      const reused = canonicalizePartsStoreName(existing?.vendor_name || "");
+      if (reused) vendorName = reused;
+      else {
+        const fromTickets = await c.env.DB.prepare(
+          `SELECT vendor_name FROM part_pickup_tickets
+           WHERE vendor_name IS NOT NULL AND lower(trim(vendor_name)) = lower(trim(?))
+           ORDER BY id DESC LIMIT 1`
+        )
+          .bind(vendorName)
+          .first<{ vendor_name: string }>();
+        const tName = canonicalizePartsStoreName(fromTickets?.vendor_name || "");
+        if (tName) vendorName = tName;
+      }
+    } catch {
+      /* optional */
+    }
   }
 
   const kind = body.purchase_kind === "other" ? "other" : "vendor";
@@ -2858,13 +2961,7 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
       ? Number(body.parts_order_id)
       : null;
 
-  // Mechanics: vehicle required so parts history ties to the unit worked on
-  if ((user.role === "mechanic" || user.role === "driver") && !vehicleId) {
-    return c.json(
-      { error: "Select the vehicle this purchase was for (plate or unit #)." },
-      400
-    );
-  }
+  // Vehicle is optional — form only collects store, date, total, purpose, photo
 
   try {
     const r = await c.env.DB.prepare(
@@ -2951,7 +3048,7 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
 
     // Notify office/warehouse for visibility
     try {
-      const targets = await usersByRoles(c.env.DB, ["admin", "office", "warehouse"]);
+      const targets = await usersByRoles(c.env.DB, ["admin", "office", "warehouse", "supervisor"]);
       await notifyUsers(
         c.env.DB,
         targets.filter((tid) => tid !== user.id),
@@ -3319,10 +3416,13 @@ api.post("/alerts/:id/ack", requireRoles(ROLE_PERMS.manageAlerts), async (c) => 
 api.get("/issues", async (c) => {
   const status = c.req.query("status");
   const report = c.req.query("report");
-  let sql = `SELECT i.*, v.unit_number, v.assigned_driver, u.display_name as reporter_name
+  let sql = `SELECT i.*, v.unit_number, v.assigned_driver, u.display_name as reporter_name,
+      uc.display_name as tech_confirmed_by_name
     FROM vehicle_issues i
     JOIN vehicles v ON v.id = i.vehicle_id
-    JOIN users u ON u.id = i.reported_by_user_id WHERE 1=1`;
+    JOIN users u ON u.id = i.reported_by_user_id
+    LEFT JOIN users uc ON uc.id = i.tech_confirmed_by_user_id
+    WHERE 1=1`;
   const binds: unknown[] = [];
   if (report === "schedule") {
     sql += " AND i.status IN ('open','scheduled','in_progress')";
@@ -3408,44 +3508,13 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     )
     .first();
   if (recentDup) {
-    // Still hand client_push so a second intentional tap can re-ping phones
-    // without creating another ticket (shop may have missed the first push).
-    const unitDup = await c.env.DB.prepare("SELECT unit_number FROM vehicles WHERE id = ?")
-      .bind(body.vehicle_id)
-      .first<{ unit_number: string }>();
-    const unitNoDup = unitDup?.unit_number || "?";
-    const ntfyTopicDup =
-      ((await getSetting(c.env.DB, "ntfy_topic", "totalassurance")) || "totalassurance").trim() ||
-      "totalassurance";
-    let ntfyServerDup =
-      ((await getSetting(c.env.DB, "ntfy_server", "https://ntfy.sh")) || "https://ntfy.sh")
-        .trim()
-        .replace(/\/$/, "") || "https://ntfy.sh";
-    if (!/^https?:\/\//i.test(ntfyServerDup)) ntfyServerDup = `https://${ntfyServerDup}`;
-    const shortDup = (body.description || "").trim().slice(0, 120);
     return c.json({
       issue: recentDup,
       emergency: isEmergency,
       duplicate: true,
-      ntfy: false,
-      ntfy_retrying: false,
-      client_push: {
-        server: ntfyServerDup,
-        topic: ntfyTopicDup,
-        title: isEmergency
-          ? `EMERGENCY Unit ${unitNoDup}: ${title}`
-          : `Repair Unit ${unitNoDup}: ${title}`,
-        message: [
-          `From: ${user.display_name}`,
-          shortDup || (isEmergency ? "Needs help now — open the fleet app." : "New shop request."),
-          "(re-notify — same open request)",
-        ].join("\n"),
-        priority: isEmergency ? 5 : 4,
-        tags: isEmergency ? ["rotating_light", "exclamation"] : ["wrench"],
-      },
       message: isEmergency
-        ? "Emergency already reported — re-sending phone push. Do not create a new ticket."
-        : "Same request already submitted — re-sending phone push.",
+        ? "Emergency already reported — shop still has it in the app. Do not create a new ticket."
+        : "Same request already submitted — open tickets are on the shop board.",
     });
   }
 
@@ -3473,7 +3542,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     .first<{ unit_number: string }>();
 
   // In-app first (fast) — mechanics / office / admin always get a notification row
-  const notifyRoles = ["mechanic", "admin", "office"] as string[];
+  const notifyRoles = ["mechanic", "admin", "office", "supervisor"] as string[];
   const techs = await usersByRoles(c.env.DB, notifyRoles);
   const unitNoEarly = unit?.unit_number || "?";
   const detailLine = (body.description || "").trim().slice(0, 160);
@@ -3508,49 +3577,9 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
 
   const base = (c.env.APP_BASE_URL || new URL(c.req.url).origin).replace(/\/$/, "");
   const unitNo = unit?.unit_number || "?";
-  const shortDesc = (body.description || "").trim().slice(0, 120);
 
-  // Phone push payload (same channel as Settings → Send test)
-  const pushPayload: AlertPayload = {
-    title: isEmergency
-      ? `EMERGENCY Unit ${unitNo}: ${title}`
-      : `Repair Unit ${unitNo}: ${title}`,
-    body: [
-      `From: ${user.display_name}`,
-      shortDesc ||
-        (isEmergency ? "Needs help now — open the fleet app." : "New shop request."),
-      isEmergency
-        ? "Open Notifications / Repairs in Field App ASAP."
-        : "Open Repairs & shop board.",
-    ].join("\n"),
-    priority: isEmergency ? "urgent" : "high",
-    tags: isEmergency ? ["rotating_light", "exclamation"] : ["wrench"],
-  };
-
-  // Phone push: ONE notification only.
-  // Driver's browser publishes to ntfy (reliable). Server does NOT also push the
-  // same alert — that was causing 2–3 duplicate phone buzzes (client + worker
-  // retry + nearby/no-GPS fan-out all hit the same topic).
-  const ntfyTopic =
-    ((await getSetting(c.env.DB, "ntfy_topic", "totalassurance")) || "totalassurance").trim() ||
-    "totalassurance";
-  let ntfyServer =
-    ((await getSetting(c.env.DB, "ntfy_server", "https://ntfy.sh")) || "https://ntfy.sh")
-      .trim()
-      .replace(/\/$/, "") || "https://ntfy.sh";
-  if (!/^https?:\/\//i.test(ntfyServer)) ntfyServer = `https://${ntfyServer}`;
-
-  const clientPush = {
-    server: ntfyServer,
-    topic: ntfyTopic,
-    title: pushPayload.title,
-    message: pushPayload.body,
-    priority: isEmergency ? 5 : 4,
-    tags: pushPayload.tags || [],
-  };
-
-  // Background: nearby-driver in-app alerts only (no extra ntfy — same topic = dupes)
-  const nearbyJob = alertFleetIncident(c.env, c.env.DB, {
+  // Background: Discord + optional SMS to shop, plus nearby-driver in-app/SMS for emergencies
+  const fanOutJob = alertFleetIncident(c.env, c.env.DB, {
     fromUserId: user.id,
     fromName: user.display_name,
     unitNumber: unitNo,
@@ -3560,15 +3589,9 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     description: body.description,
     isEmergency,
     appBaseUrl: base,
-    skipMainPush: true,
-    skipNtfy: true,
   }).catch(() => null);
 
-  // Optional Discord only (not ntfy) so office chat still gets a line without double phone push
-  const discordOnlyJob = sendDiscord(c.env.DB, pushPayload).catch(() => null);
-
-  scheduleWaitUntil(c, nearbyJob);
-  scheduleWaitUntil(c, discordOnlyJob);
+  scheduleWaitUntil(c, fanOutJob);
 
   const issue = await c.env.DB.prepare("SELECT * FROM vehicle_issues WHERE id = ?").bind(id).first();
   return c.json(
@@ -3576,14 +3599,9 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       issue,
       emergency: isEmergency,
       notified_user_ids: techs,
-      /** Browser publishes exactly once — server will not ntfy the same alert */
-      client_push: clientPush,
-      ntfy: false,
-      ntfy_retrying: false,
-      ntfy_detail: "client_push_only",
       message: isEmergency
-        ? "Emergency dispatched — shop notified in the app. Sending phone push…"
-        : "Repair request submitted — shop notified. Sending phone push…",
+        ? "Emergency dispatched — shop notified in the app."
+        : "Repair request submitted — shop notified.",
     },
     201
   );
@@ -3664,6 +3682,26 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   // Optional: log oil change when completing shop work
   const recordOil = body.record_oil_change === true || body.record_oil_change === 1;
   if (!sets.length && !recordOil) return c.json({ error: "No fields" }, 400);
+  // Preview next status/date so we can reset tech confirmation on re-schedule
+  const nextStatusPreview =
+    body.status !== undefined ? String(body.status) : before.status;
+  const nextDatePreview =
+    body.scheduled_date !== undefined
+      ? body.scheduled_date === "" || body.scheduled_date == null
+        ? null
+        : String(body.scheduled_date).slice(0, 10)
+      : (before.scheduled_date || "").slice(0, 10) || null;
+  const prevDatePreview = (before.scheduled_date || "").slice(0, 10) || null;
+  const scheduleNeedsConfirm =
+    nextStatusPreview === "scheduled" &&
+    (before.status !== "scheduled" || prevDatePreview !== nextDatePreview);
+  if (scheduleNeedsConfirm) {
+    sets.push("tech_confirm_status = 'pending'");
+    sets.push("tech_confirmed_at = NULL");
+    sets.push("tech_confirmed_by_user_id = NULL");
+    sets.push("tech_confirm_note = NULL");
+  }
+
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     values.push(id);
@@ -3842,11 +3880,32 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
         excludeUserId: user.id,
       });
       if (notifyIds.length) {
-        await notifyUsers(c.env.DB, notifyIds, kind, title, detail, {
-          type: "issue",
-          id,
+        // Personal SMS only for this unit's tech(s) — not fleet-wide
+        let smsText: string | null = null;
+        if (becameScheduled) {
+          smsText = shortSms(
+            nextDate
+              ? `TA: Bring unit ${unitNo} to shop on ${nextDate}. ${afterRow.title}${notes ? ` · ${notes}` : ""}. Open app to CONFIRM.`
+              : `TA: Unit ${unitNo} scheduled for shop. ${afterRow.title}${notes ? ` · ${notes}` : ""}. Open app to CONFIRM.`
+          );
+        } else if (becameCancelled) {
+          smsText = shortSms(`TA: Shop job cancelled for unit ${unitNo}. ${afterRow.title}`);
+        } else if (becameCompleted) {
+          smsText = shortSms(`TA: Unit ${unitNo} repair complete. ${afterRow.title}`);
+        } else if (becameInProgress) {
+          smsText = shortSms(`TA: Unit ${unitNo} is in the shop. ${afterRow.title}`);
+        }
+        const r = await notifyAndSms(c.env, c.env.DB, notifyIds, {
+          kind,
+          title,
+          body: detail,
+          entity: { type: "issue", id },
+          sms: smsText,
+          excludeUserId: user.id,
+          fromUserId: user.id,
+          smsContext: `${kind}:${id}:${nextDate || afterRow.status}`,
         });
-        fieldNotified = notifyIds.length;
+        fieldNotified = r.notified;
       } else if (becameScheduled) {
         fieldNotifyWarning =
           "Scheduled, but no Field App user is linked to this unit (assigned driver / reporter). Call or text them manually, and fix vehicle assignment under Vehicles.";
@@ -3859,6 +3918,131 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
     issue: after,
     field_notified: fieldNotified,
     field_notify_warning: fieldNotifyWarning,
+  });
+});
+
+/**
+ * Tech confirms or declines a shop appointment (accountability).
+ * Allowed for users linked to the unit (assigned driver / reporter).
+ */
+api.post("/issues/:id/confirm-schedule", async (c) => {
+  const user = c.get("user");
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ action?: string; note?: string }>().catch(() => ({}));
+  const action = (body.action || "").toLowerCase();
+  if (action !== "confirm" && action !== "decline") {
+    return c.json({ error: "action must be confirm or decline" }, 400);
+  }
+  const note = (body.note || "").trim();
+  if (action === "decline" && !note) {
+    return c.json({ error: "Add a short reason when you can’t make the appointment." }, 400);
+  }
+
+  const issue = await c.env.DB.prepare(
+    `SELECT i.*, v.unit_number
+     FROM vehicle_issues i
+     JOIN vehicles v ON v.id = i.vehicle_id
+     WHERE i.id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: number;
+      vehicle_id: number;
+      status: string;
+      title: string;
+      scheduled_date: string | null;
+      schedule_notes: string | null;
+      reported_by_user_id: number | null;
+      unit_number: string;
+      tech_confirm_status: string | null;
+    }>();
+  if (!issue) return c.json({ error: "Not found" }, 404);
+  if (issue.status !== "scheduled") {
+    return c.json({ error: "Only scheduled shop appointments can be confirmed." }, 400);
+  }
+
+  // Shop roles can always act; field techs only if linked to the unit
+  const shopRoles = ["admin", "mechanic", "office"];
+  if (!shopRoles.includes(user.role)) {
+    const allowed = await userIdsForIssue(c.env.DB, {
+      vehicleId: issue.vehicle_id,
+      reportedByUserId: issue.reported_by_user_id,
+    });
+    if (!allowed.includes(user.id)) {
+      return c.json({ error: "This appointment is not for your unit." }, 403);
+    }
+  }
+
+  const status = action === "confirm" ? "confirmed" : "declined";
+  try {
+    await c.env.DB.prepare(
+      `UPDATE vehicle_issues SET
+         tech_confirm_status = ?,
+         tech_confirmed_at = datetime('now'),
+         tech_confirmed_by_user_id = ?,
+         tech_confirm_note = ?,
+         updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(status, user.id, note || null, id)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column|tech_confirm/i.test(msg)) {
+      return c.json(
+        { error: "Run migration 062_issue_schedule_confirm.sql to enable confirmations." },
+        503
+      );
+    }
+    throw e;
+  }
+
+  const unitNo = issue.unit_number || "?";
+  const when = (issue.scheduled_date || "").slice(0, 10) || "TBD";
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "vehicle_issue",
+    id,
+    action === "confirm"
+      ? `Tech confirmed shop appointment unit ${unitNo} · ${when}`
+      : `Tech declined shop appointment unit ${unitNo} · ${when}: ${note}`
+  );
+
+  // Decline is actionable for shop — notify + optional SMS
+  if (action === "decline") {
+    const shopIds = await usersByRoles(c.env.DB, ["mechanic", "admin", "office", "supervisor"]);
+    await notifyAndSms(c.env, c.env.DB, shopIds, {
+      kind: "repair_confirm_declined",
+      title: `Tech can’t make shop date · Unit ${unitNo}`,
+      body: `${user.display_name} declined ${when}: ${note} · ${issue.title}`,
+      entity: { type: "issue", id },
+      sms: shortSms(
+        `TA: ${user.display_name} can’t bring unit ${unitNo} on ${when}. Reason: ${note}`
+      ),
+      excludeUserId: user.id,
+      fromUserId: user.id,
+      smsContext: `repair_declined:${id}:${when}`,
+    });
+  }
+
+  const row = await c.env.DB.prepare(
+    `SELECT i.*, v.unit_number, v.assigned_driver, u.display_name as reporter_name,
+            uc.display_name as tech_confirmed_by_name
+     FROM vehicle_issues i
+     JOIN vehicles v ON v.id = i.vehicle_id
+     JOIN users u ON u.id = i.reported_by_user_id
+     LEFT JOIN users uc ON uc.id = i.tech_confirmed_by_user_id
+     WHERE i.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({
+    ok: true,
+    tech_confirm_status: status,
+    issue: row,
   });
 });
 
@@ -4056,7 +4240,7 @@ api.get("/notifications", async (c) => {
     /* optional */
   }
   try {
-    await notifyShopBringInsToday(c.env.DB);
+    await notifyShopBringInsToday(c.env.DB, c.env);
   } catch {
     /* optional */
   }
@@ -4106,12 +4290,15 @@ api.post("/notifications/weekly-remind", requireRoles(ROLE_PERMS.manageIssues), 
 });
 
 api.post("/notifications/shop-bring-in-remind", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
-  const n = await notifyShopBringInsToday(c.env.DB);
+  const n = await notifyShopBringInsToday(c.env.DB, c.env);
   return c.json({ created: n });
 });
 
 /** Office TV wallboard — one payload for glance view (auto-refresh client). */
-api.get("/tv-board", requireRoles(["admin", "office", "viewer", "mechanic"] as Role[]), async (c) => {
+api.get(
+  "/tv-board",
+  requireRoles(["admin", "office", "viewer", "mechanic", "supervisor"] as Role[]),
+  async (c) => {
   const today = (() => {
     try {
       return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -4253,7 +4440,7 @@ api.get("/reviews", async (c) => {
   }
 });
 
-api.post("/reviews", requireRoles(["admin", "office"]), async (c) => {
+api.post("/reviews", requireRoles(["admin", "office", "supervisor"]), async (c) => {
   const admin = c.get("user");
   const body = await c.req.json<{
     author_name?: string;
@@ -5310,35 +5497,63 @@ api.patch("/warranties/:id", async (c) => {
     throw e;
   }
 
-  if (newStatus === "approved" && before.dropped_off_by_user_id) {
-    await notifyUsers(
-      c.env.DB,
-      [before.dropped_off_by_user_id],
-      "warranty_approved",
-      `Warranty ${before.log_number} approved`,
-      `${before.part_name} claim was approved.`,
-      { type: "warranty", id }
-    );
-  }
-  if (newStatus === "rejected" && before.dropped_off_by_user_id) {
-    await notifyUsers(
-      c.env.DB,
-      [before.dropped_off_by_user_id],
-      "warranty_rejected",
-      `Warranty ${before.log_number} rejected`,
-      `${before.part_name} claim was rejected.`,
-      { type: "warranty", id }
-    );
-  }
-  if (newStatus === "not_warranty" && before.dropped_off_by_user_id) {
-    await notifyUsers(
-      c.env.DB,
-      [before.dropped_off_by_user_id],
-      "warranty_not_warranty",
-      `${before.log_number} removed from warranties`,
-      `${before.part_name} is no longer an open warranty claim.`,
-      { type: "warranty", id }
-    );
+  // Notify the tech who dropped it off — in-app + personal SMS (not all employees)
+  if (
+    before.dropped_off_by_user_id &&
+    before.dropped_off_by_user_id !== user.id
+  ) {
+    const statusChanged = newStatus !== before.status;
+    const noteAppended = Boolean(body.append_note?.trim());
+    if (statusChanged || noteAppended) {
+      const statusLabel: Record<string, string> = {
+        dropped_off: "dropped off",
+        claim_submitted: "claim submitted",
+        return_to_vendor: "return to vendor",
+        delivered: "delivered",
+        approved: "approved",
+        rejected: "rejected",
+        not_warranty: "not a warranty",
+      };
+      const kind = statusChanged
+        ? newStatus === "approved"
+          ? "warranty_approved"
+          : newStatus === "rejected"
+            ? "warranty_rejected"
+            : newStatus === "not_warranty"
+              ? "warranty_not_warranty"
+              : "warranty_update"
+        : "warranty_update";
+      const title = statusChanged
+        ? `Warranty ${before.log_number} · ${statusLabel[newStatus] || newStatus}`
+        : `Warranty ${before.log_number} update`;
+      const noteBit = body.append_note?.trim()
+        ? body.append_note.trim().slice(0, 120)
+        : null;
+      const detail = [
+        before.part_name,
+        statusChanged ? `Status: ${statusLabel[newStatus] || newStatus}` : null,
+        noteBit,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const smsText = shortSms(
+        statusChanged
+          ? `TA: Warranty ${before.log_number} is now ${statusLabel[newStatus] || newStatus}. ${before.part_name}${noteBit ? ` · ${noteBit}` : ""}`
+          : `TA: Warranty ${before.log_number} update: ${noteBit || before.part_name}`
+      );
+      await notifyAndSms(c.env, c.env.DB, [before.dropped_off_by_user_id], {
+        kind,
+        title,
+        body: detail,
+        entity: { type: "warranty", id },
+        sms: smsText,
+        excludeUserId: user.id,
+        fromUserId: user.id,
+        smsContext: statusChanged
+          ? `warranty:${id}:${newStatus}`
+          : `warranty_note:${id}:${Date.now()}`,
+      });
+    }
   }
 
   await writeAudit(c.env.DB, user, "update", "warranty", id, `Warranty ${before.log_number} → ${newStatus}`);
@@ -5428,7 +5643,7 @@ api.get("/handbook/status", requireRoles(["admin", "office", "viewer"]), async (
   }
 });
 
-api.post("/handbook", requireRoles(["admin", "office"]), async (c) => {
+api.post("/handbook", requireRoles(["admin", "office", "supervisor"]), async (c) => {
   const user = c.get("user");
   try {
     const form = await c.req.formData();
@@ -5627,19 +5842,8 @@ api.get("/sms/status", async (c) => {
   const shop = await getSetting(c.env.DB, "shop_sms_phone", "");
   const mechanic = await getSetting(c.env.DB, "mechanic_sms_phone", "");
   const office = await getSetting(c.env.DB, "office_sms_phone", "");
-  const { DEFAULT_NTFY_TOPIC } = await import("./alertChannels");
-  let ntfyTopic = (await getSetting(c.env.DB, "ntfy_topic", DEFAULT_NTFY_TOPIC)).trim();
-  // Always have a simple default ready so phones can subscribe immediately
-  if (!ntfyTopic) {
-    ntfyTopic = DEFAULT_NTFY_TOPIC;
-    await setSetting(c.env.DB, "ntfy_topic", DEFAULT_NTFY_TOPIC);
-  }
-  const ntfyServer = await getSetting(c.env.DB, "ntfy_server", "https://ntfy.sh");
   const discord = await getSetting(c.env.DB, "discord_webhook_url", "");
-  const canSeeShop = ["admin", "office", "mechanic"].includes(me.role);
-  const lastNtfy = canSeeShop
-    ? await getSetting(c.env.DB, "last_ntfy_status", "")
-    : "";
+  const canSeeShop = ["admin", "office", "mechanic", "supervisor"].includes(me.role);
   return c.json({
     configured: smsConfigured(c.env),
     shop_phone_set: Boolean(normalizePhone(shop)),
@@ -5647,20 +5851,14 @@ api.get("/sms/status", async (c) => {
     mechanic_phone: canSeeShop ? mechanic : undefined,
     office_phone: canSeeShop ? office : undefined,
     free_alerts: {
-      ntfy: true,
-      ntfy_topic: canSeeShop ? ntfyTopic : DEFAULT_NTFY_TOPIC,
-      ntfy_server: canSeeShop ? ntfyServer || "https://ntfy.sh" : undefined,
       discord: Boolean(discord.trim()),
       in_app: true,
-      /** One word everyone types in the ntfy app */
-      subscribe_word: ntfyTopic || DEFAULT_NTFY_TOPIC,
-      last_ntfy_status: lastNtfy || undefined,
     },
   });
 });
 
 /** Shop line for driver texts / emergency SMS — admin, office, or mechanic can update */
-api.put("/sms/shop-phone", requireRoles(["admin", "office", "mechanic"] as Role[]), async (c) => {
+api.put("/sms/shop-phone", requireRoles(["admin", "office", "mechanic", "supervisor"] as Role[]), async (c) => {
   const body = await c.req.json<{ phone?: string }>();
   const phone = (body.phone || "").trim();
   await setSetting(c.env.DB, "shop_sms_phone", phone);
@@ -5703,150 +5901,16 @@ api.put("/sms/role-phones", requireRoles(["admin"] as Role[]), async (c) => {
   });
 });
 
-/** Free alert channels: ntfy push + Discord webhook (admin/office/mechanic) */
-api.put("/alerts/channels", requireRoles(["admin", "office", "mechanic"] as Role[]), async (c) => {
+/** Optional Discord webhook for office alerts (admin/office/mechanic) */
+api.put("/alerts/channels", requireRoles(["admin", "office", "mechanic", "supervisor"] as Role[]), async (c) => {
   const body = await c.req.json<{
-    ntfy_topic?: string;
-    ntfy_server?: string;
-    ntfy_token?: string;
     discord_webhook_url?: string;
   }>();
-  if (body.ntfy_topic !== undefined) {
-    await setSetting(c.env.DB, "ntfy_topic", body.ntfy_topic.trim());
-  }
-  if (body.ntfy_server !== undefined) {
-    await setSetting(c.env.DB, "ntfy_server", body.ntfy_server.trim() || "https://ntfy.sh");
-  }
-  if (body.ntfy_token !== undefined) {
-    await setSetting(c.env.DB, "ntfy_token", body.ntfy_token.trim());
-  }
   if (body.discord_webhook_url !== undefined) {
     await setSetting(c.env.DB, "discord_webhook_url", body.discord_webhook_url.trim());
   }
-  await writeAudit(c.env.DB, c.get("user"), "update", "settings", "alert_channels", "Updated free alert channels");
+  await writeAudit(c.env.DB, c.get("user"), "update", "settings", "alert_channels", "Updated alert channels");
   return c.json({ ok: true });
-});
-
-/**
- * Diagnostic test push — admin test channel only (totalassurance-admin).
- * Real emergencies stay on the fleet topic (totalassurance) so the mechanic is not buzzed.
- */
-api.post("/alerts/test", requireRoles(["admin", "office", "mechanic"] as Role[]), async (c) => {
-  const me = c.get("user");
-  const { DEFAULT_NTFY_TOPIC, NTFY_ADMIN_TEST_TOPIC } = await import("./alertChannels");
-
-  const fleetTopic =
-    ((await getSetting(c.env.DB, "ntfy_topic", DEFAULT_NTFY_TOPIC)) || DEFAULT_NTFY_TOPIC).trim() ||
-    DEFAULT_NTFY_TOPIC;
-  const testTopic = NTFY_ADMIN_TEST_TOPIC;
-  let server =
-    ((await getSetting(c.env.DB, "ntfy_server", "https://ntfy.sh")) || "https://ntfy.sh")
-      .trim()
-      .replace(/\/$/, "") || "https://ntfy.sh";
-  if (!/^https?:\/\//i.test(server)) server = `https://${server}`;
-
-  const title = "TA Fleet admin test";
-  const body = `Admin test from ${me.display_name}. Topic: ${testTopic}. Fleet “${fleetTopic}” is NOT notified (mechanic stays quiet).`;
-
-  const clientPush = {
-    server,
-    topic: testTopic,
-    title,
-    message: body,
-    priority: 5,
-    tags: ["rotating_light", "warning"],
-  };
-
-  let serverNtfy = false;
-  let details: string[] = [];
-  try {
-    const r = await fanOutAlert(
-      c.env,
-      c.env.DB,
-      {
-        title,
-        body,
-        priority: "urgent",
-        tags: ["rotating_light", "warning"],
-      },
-      {
-        fromUserId: me.id,
-        context: "test_alert",
-        ntfyAttempts: 1,
-        ntfyTopic: testTopic,
-        skipDiscord: true,
-      }
-    );
-    serverNtfy = r.ntfy;
-    details = r.details || [];
-  } catch (e) {
-    details = [e instanceof Error ? e.message : "server push error"];
-  }
-
-  return c.json({
-    ok: true,
-    ntfy: serverNtfy,
-    client_push: clientPush,
-    test_topic: testTopic,
-    fleet_topic: fleetTopic,
-    admin_topic: testTopic,
-    discord: false,
-    sms: 0,
-    details,
-    hint: `Test → “${testTopic}” only. Subscribe to that word in ntfy for quiet tests. Fleet “${fleetTopic}” is for real emergencies.`,
-  });
-});
-
-/** Client reports whether browser-side ntfy publish succeeded (diagnostics). */
-api.post("/alerts/client-push-result", async (c) => {
-  const body = await c.req.json<{ ok?: boolean; detail?: string }>().catch(() => ({}));
-  const detail = String(body.detail || (body.ok ? "client ok" : "client fail")).slice(0, 280);
-  await setSetting(
-    c.env.DB,
-    "last_ntfy_status",
-    `${new Date().toISOString()} | client: ${body.ok ? "ok" : "fail"} — ${detail}`
-  );
-  return c.json({ ok: true });
-});
-
-/** Per-role ntfy checklist (channels + setup steps) with “I already have this” acks. */
-api.get("/alerts/my-subscriptions", async (c) => {
-  const me = c.get("user");
-  const { buildSubscriptionList } = await import("./ntfySubscriptions");
-  const list = await buildSubscriptionList(c.env.DB, me.id, me.role);
-  return c.json({
-    role: me.role,
-    ...list,
-    note:
-      "ntfy uses a shared word (channel), not your phone number. Everyone who must get fleet pushes needs the same fleet channel.",
-  });
-});
-
-api.post("/alerts/my-subscriptions/ack", async (c) => {
-  const me = c.get("user");
-  const body = await c.req.json<{ id?: string; done?: boolean }>().catch(() => ({}));
-  const id = (body.id || "").trim();
-  if (!id) return c.json({ error: "id required" }, 400);
-
-  const {
-    defsForRole,
-    loadAcks,
-    saveAcks,
-    buildSubscriptionList,
-  } = await import("./ntfySubscriptions");
-  const allowed = new Set(defsForRole(me.role).map((d) => d.id));
-  if (!allowed.has(id)) return c.json({ error: "Not required for your role" }, 400);
-
-  const acks = await loadAcks(c.env.DB, me.id);
-  const markDone = body.done !== false;
-  if (markDone) {
-    acks[id] = new Date().toISOString();
-  } else {
-    delete acks[id];
-  }
-  await saveAcks(c.env.DB, me.id, acks);
-  const list = await buildSubscriptionList(c.env.DB, me.id, me.role);
-  return c.json({ ok: true, ...list });
 });
 
 /** Contacts the current user can text (drivers for shop; shop for drivers). */
@@ -5897,7 +5961,7 @@ api.get("/sms/contacts", async (c) => {
         role: m.role,
       });
     }
-  } else if (["mechanic", "admin", "office"].includes(me.role)) {
+  } else if (["mechanic", "admin", "office", "supervisor"].includes(me.role)) {
     const drivers = await c.env.DB.prepare(
       `SELECT u.id, u.display_name, u.phone, u.role, u.employee_id, e.name as employee_name
        FROM users u
@@ -5956,7 +6020,7 @@ api.get("/sms/contacts", async (c) => {
 
 api.post("/sms/send", async (c) => {
   const me = c.get("user");
-  if (!["driver", "mechanic", "admin", "office"].includes(me.role)) {
+  if (!["driver", "mechanic", "admin", "office", "supervisor"].includes(me.role)) {
     return c.json({ error: "Not allowed to send SMS" }, 403);
   }
   const body = await c.req.json<{
@@ -5981,7 +6045,7 @@ api.post("/sms/send", async (c) => {
       return c.json({ error: "That person has no phone number on file" }, 400);
     }
     // Drivers may only text shop/mechanic roles
-    if (me.role === "driver" && !["mechanic", "admin", "office"].includes(target.role)) {
+    if (me.role === "driver" && !["mechanic", "admin", "office", "supervisor"].includes(target.role)) {
       return c.json({ error: "You can only text the shop / mechanic" }, 403);
     }
     // Mechanic / office text drivers; admin can text anyone with a phone on file
@@ -6000,7 +6064,7 @@ api.post("/sms/send", async (c) => {
         return c.json({ error: "Drivers can only text the configured shop number" }, 403);
       }
       toPhone = shopN;
-    } else if (["admin", "office", "mechanic"].includes(me.role)) {
+    } else if (["admin", "office", "mechanic", "supervisor"].includes(me.role)) {
       toPhone = normalizePhone(body.to_phone);
     }
   }
@@ -6685,6 +6749,319 @@ api.post("/users/:id/reset-password", requireRoles(ROLE_PERMS.manageUsers), asyn
     `Password reset for ${(before as { display_name: string }).display_name}`
   );
   return c.json({ ok: true, temporary_password: password });
+});
+
+// Warehouse cameras — in-app snapshots via NVR ISAPI (no user login to NVR)
+// Office / warehouse / admin only — not field drivers
+function canViewWarehouseCameras(u: { role: string; is_warehouse?: boolean }): boolean {
+  if (u.is_warehouse) return true;
+  return (
+    u.role === "admin" ||
+    u.role === "office" ||
+    u.role === "warehouse" ||
+    u.role === "supervisor"
+  );
+}
+
+api.get("/warehouse-cameras/config", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Security cameras are for office and warehouse only" }, 403);
+  }
+  const { resolveNvrConfig } = await import("./nvrProxy");
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  return c.json({
+    configured: cfg.configured,
+    nvr_base_url: cfg.baseUrl || "",
+    nvr_user: cfg.user,
+    /** Password never returned — only whether set */
+    nvr_pass_set: Boolean(cfg.pass),
+    channels: cfg.channels,
+    reachable_hint: cfg.reachableHint,
+    /** True when URL looks like shop LAN (needs Cloudflare Tunnel) */
+    needs_tunnel: /192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl),
+  });
+});
+
+api.put(
+  "/warehouse-cameras/config",
+  requireRoles(["admin"] as Role[]),
+  async (c) => {
+    const body = await c.req.json<{
+      nvr_base_url?: string;
+      nvr_user?: string;
+      nvr_pass?: string;
+      channels?: { id: number; label: string; enabled?: boolean }[];
+    }>();
+    if (body.nvr_base_url !== undefined) {
+      let url = (body.nvr_base_url || "").trim().replace(/\/+$/, "");
+      if (url && !/^https?:\/\//i.test(url)) {
+        return c.json({ error: "URL must start with http:// or https://" }, 400);
+      }
+      await setSetting(c.env.DB, "warehouse_nvr_url", url);
+    }
+    if (body.nvr_user !== undefined) {
+      await setSetting(c.env.DB, "warehouse_nvr_user", (body.nvr_user || "admin").trim());
+    }
+    if (body.nvr_pass !== undefined && body.nvr_pass !== "") {
+      // Empty string means "leave unchanged"
+      await setSetting(c.env.DB, "warehouse_nvr_pass", body.nvr_pass);
+    }
+    if (body.channels) {
+      await setSetting(c.env.DB, "warehouse_nvr_channels", JSON.stringify(body.channels));
+    }
+    await writeAudit(
+      c.env.DB,
+      c.get("user"),
+      "update",
+      "settings",
+      "warehouse_nvr",
+      "Updated security camera / NVR settings"
+    );
+    return c.json({ ok: true });
+  }
+);
+
+/** JPEG snapshot for one channel — auto-refreshed by the Field App UI */
+api.get("/warehouse-cameras/snapshot/:channelId", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const channelId = Number(c.req.param("channelId"));
+  const { resolveNvrConfig, fetchNvrSnapshot } = await import("./nvrProxy");
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  if (!cfg.configured) {
+    return c.json(
+      {
+        error:
+          "Cameras not configured yet. Contact admin to set up the NVR tunnel.",
+      },
+      503
+    );
+  }
+  if (/192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl)) {
+    return c.json(
+      {
+        error:
+          "NVR is only on shop Wi‑Fi (192.168…). Cloud cannot reach it — the always-on tunnel on the shop PC must be running.",
+      },
+      503
+    );
+  }
+  try {
+    const snap = await fetchNvrSnapshot(cfg.baseUrl, cfg.user, cfg.pass, channelId, true);
+    if (!snap.ok) {
+      return c.json({ error: snap.error }, snap.status === 401 ? 401 : 502);
+    }
+    return new Response(snap.bytes, {
+      status: 200,
+      headers: {
+        "Content-Type": snap.contentType,
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (e) {
+    return c.json(
+      {
+        error: e instanceof Error ? e.message : "Camera proxy failed",
+      },
+      502
+    );
+  }
+});
+
+/** Search recorded segments for a channel + time range (ISO UTC) */
+api.get("/warehouse-cameras/search", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const channelId = Number(c.req.query("channel") || "0");
+  const start = new Date(c.req.query("start") || "");
+  const end = new Date(c.req.query("end") || "");
+  const { resolveNvrConfig, searchNvrRecordings } = await import("./nvrProxy");
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  if (!cfg.configured) {
+    return c.json({ error: "Cameras not configured" }, 503);
+  }
+  if (/192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl)) {
+    return c.json({ error: "NVR tunnel not configured (shop LAN only URL)" }, 503);
+  }
+  // Cap search window to 6 hours
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    end <= start ||
+    end.getTime() - start.getTime() > 6 * 3600 * 1000
+  ) {
+    return c.json({ error: "Provide start & end (ISO). Max range 6 hours." }, 400);
+  }
+  const result = await searchNvrRecordings(
+    cfg.baseUrl,
+    cfg.user,
+    cfg.pass,
+    channelId,
+    start,
+    end
+  );
+  if (!result.ok) {
+    return c.json({ error: result.error }, result.status === 401 ? 401 : 502);
+  }
+  return c.json({
+    ok: true,
+    channelId,
+    start: start.toISOString(),
+    end: end.toISOString(),
+    segments: result.segments.map((s) => ({
+      start: s.start,
+      end: s.end,
+      trackId: s.trackId,
+    })),
+  });
+});
+
+/**
+ * Browser-playable MP4 clip (proxied through shop media proxy + ffmpeg).
+ * Query: channel, start, end (ISO UTC). Max 30 minutes per request.
+ */
+api.get("/warehouse-cameras/clip", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const channelId = Number(c.req.query("channel") || "0");
+  const start = new Date(c.req.query("start") || "");
+  let end = new Date(c.req.query("end") || "");
+  const { resolveNvrConfig, fetchNvrClipMp4 } = await import("./nvrProxy");
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  if (!cfg.configured) {
+    return c.json({ error: "Cameras not configured" }, 503);
+  }
+  if (/192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl)) {
+    return c.json({ error: "NVR tunnel not configured" }, 503);
+  }
+  if (Number.isNaN(start.getTime())) {
+    return c.json({ error: "Invalid start time" }, 400);
+  }
+  if (Number.isNaN(end.getTime()) || end <= start) {
+    end = new Date(start.getTime() + 150 * 1000);
+  }
+  // Max 30 minutes per request (client uses 2.5 min blocks)
+  if (end.getTime() - start.getTime() > 30 * 60 * 1000) {
+    end = new Date(start.getTime() + 30 * 60 * 1000);
+  }
+  try {
+    const clip = await fetchNvrClipMp4(cfg.baseUrl, channelId, start, end);
+    if (!clip.ok) {
+      return c.json({ error: clip.error }, clip.status === 404 ? 404 : 502);
+    }
+    return new Response(clip.bytes, {
+      status: 200,
+      headers: {
+        "Content-Type": clip.contentType || "video/mp4",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (e) {
+    return c.json(
+      { error: e instanceof Error ? e.message : "Clip failed" },
+      502
+    );
+  }
+});
+
+/** Admin diagnostic — why live wall is blank */
+api.get("/warehouse-cameras/diagnose", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const { resolveNvrConfig, fetchNvrSnapshot } = await import("./nvrProxy");
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  const steps: { ok: boolean; label: string; detail?: string }[] = [];
+
+  steps.push({
+    ok: Boolean(cfg.baseUrl),
+    label: "NVR URL saved",
+    detail: cfg.baseUrl || "Missing — open Setup and save a URL",
+  });
+  steps.push({
+    ok: Boolean(cfg.user),
+    label: "NVR username saved",
+    detail: cfg.user || "Missing",
+  });
+  steps.push({
+    ok: Boolean(cfg.pass),
+    label: "NVR password saved",
+    detail: cfg.pass ? "Set" : "Missing — enter password in Setup",
+  });
+
+  const isLan = /192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl);
+  steps.push({
+    ok: !isLan && Boolean(cfg.baseUrl),
+    label: "URL reachable from cloud (not only shop LAN)",
+    detail: isLan
+      ? `${cfg.baseUrl} is private. Use router port forwarding to the NVR (always on — no PC), then set URL to https://YOUR.PUBLIC.IP:PORT (e.g. :8443).`
+      : cfg.baseUrl
+        ? "Looks public — will try a test snapshot"
+        : "No URL",
+  });
+
+  let test: { ok: boolean; error?: string } = { ok: false };
+  if (cfg.configured && !isLan) {
+    // Clear detail of failure modes for support
+    try {
+      const base = cfg.baseUrl.replace(/\/+$/, "");
+      // Probe with LAN-style Host (fixes many WAN 403/1003 cases)
+      const probe = await fetch(`${base}/ISAPI/Streaming/channels/101/picture`, {
+        method: "GET",
+        headers: {
+          Accept: "image/jpeg",
+          "User-Agent": "Mozilla/5.0 FieldApp-Diagnose",
+          Host: "192.168.1.111",
+        },
+      });
+      const www = probe.headers.get("WWW-Authenticate") || "(none)";
+      const probeBody = (await probe.text()).replace(/\s+/g, " ").slice(0, 120);
+      steps.push({
+        ok: probe.status === 401 || probe.ok || (probe.status === 403 && /digest/i.test(www)),
+        label: "NVR answers snapshot URL (Host: 192.168.1.111)",
+        detail: `HTTP ${probe.status}; WWW-Authenticate: ${www.slice(0, 100)}; body: ${probeBody || "(empty)"}`,
+      });
+    } catch (e) {
+      steps.push({
+        ok: false,
+        label: "NVR answers snapshot URL",
+        detail: e instanceof Error ? e.message : "fetch failed",
+      });
+    }
+
+    const snap = await fetchNvrSnapshot(cfg.baseUrl, cfg.user, cfg.pass, 1, true);
+    test = snap.ok ? { ok: true } : { ok: false, error: snap.error };
+    steps.push({
+      ok: snap.ok,
+      label: "Test snapshot camera 1",
+      detail: snap.ok ? `OK (${snap.bytes.byteLength} bytes)` : snap.error,
+    });
+  } else if (cfg.configured && isLan) {
+    steps.push({
+      ok: false,
+      label: "Test snapshot camera 1",
+      detail: "Skipped — fix public URL first",
+    });
+  }
+
+  return c.json({
+    ok: steps.every((s) => s.ok),
+    steps,
+    configured: cfg.configured,
+    needs_tunnel: isLan,
+    channels: cfg.channels,
+    test,
+  });
 });
 
 // Settings
@@ -8708,14 +9085,18 @@ api.post("/inventory/pickups", async (c) => {
       )
         .bind(forUserId)
         .first<{ display_name: string }>();
-      await notifyUsers(
-        c.env.DB,
-        [forUserId],
-        "pickup_handoff",
-        `Parts staged for you · ${reqNo}`,
-        `${user.display_name} issued ${lines.length} line(s). Stock moves when warehouse scans your truck.`,
-        { type: "pickup", id: pid }
-      );
+      await notifyAndSms(c.env, c.env.DB, [forUserId], {
+        kind: "pickup_handoff",
+        title: `Parts staged for you · ${reqNo}`,
+        body: `${user.display_name} issued ${lines.length} line(s). Stock moves when warehouse scans your truck.`,
+        entity: { type: "pickup", id: pid },
+        sms: shortSms(
+          `TA: Parts ready for you (${reqNo}). ${user.display_name} staged ${lines.length} line(s) — open the app to finish.`
+        ),
+        excludeUserId: user.id,
+        fromUserId: user.id,
+        smsContext: `pickup_staged:${pid}`,
+      });
       await writeAudit(
         c.env.DB,
         user,
@@ -8748,14 +9129,18 @@ api.post("/inventory/pickups", async (c) => {
       { type: "pickup", id: pid }
     );
     if (forUserId && forUserId !== user.id) {
-      await notifyUsers(
-        c.env.DB,
-        [forUserId],
-        "pickup_request",
-        `Parts ready for you · ${reqNo}`,
-        `${user.display_name} set up a pickup list for you.`,
-        { type: "pickup", id: pid }
-      );
+      await notifyAndSms(c.env, c.env.DB, [forUserId], {
+        kind: "pickup_request",
+        title: `Parts ready for you · ${reqNo}`,
+        body: `${user.display_name} set up a pickup list for you.`,
+        entity: { type: "pickup", id: pid },
+        sms: shortSms(
+          `TA: Parts list for you (${reqNo}). ${user.display_name} set it up — check the app.`
+        ),
+        excludeUserId: user.id,
+        fromUserId: user.id,
+        smsContext: `pickup_for_you:${pid}`,
+      });
     }
     return c.json({ ok: true, id: pid, request_number: reqNo, status: "open" }, 201);
   } catch (e) {
@@ -8865,16 +9250,21 @@ api.post(
     }
 
     const note = `Custody ${pickup.request_number}: ${user.display_name} handed parts to ${receiver.display_name} (awaiting truck)`;
-    await notifyUsers(
-      c.env.DB,
-      [handedToId, pickup.requested_by_user_id].filter(
-        (x, i, a) => !!x && x !== user.id && a.indexOf(x) === i
+    const handoffIds = [handedToId, pickup.requested_by_user_id].filter(
+      (x, i, a) => !!x && x !== user.id && a.indexOf(x) === i
+    ) as number[];
+    await notifyAndSms(c.env, c.env.DB, handoffIds, {
+      kind: "pickup_handoff",
+      title: `Parts in your custody · ${pickup.request_number}`,
+      body: `${user.display_name} handed you parts. Choose which truck stock they go on to finish.`,
+      entity: { type: "pickup", id },
+      sms: shortSms(
+        `TA: Parts handed to you (${pickup.request_number}). Open the app to put them on your truck.`
       ),
-      "pickup_handoff",
-      `Parts in your custody · ${pickup.request_number}`,
-      `${user.display_name} handed you parts. Choose which truck stock they go on to finish.`,
-      { type: "pickup", id }
-    );
+      excludeUserId: user.id,
+      fromUserId: user.id,
+      smsContext: `pickup_handoff:${id}`,
+    });
     await writeAudit(c.env.DB, user, "update", "pickup", id, note);
 
     return c.json({
@@ -9435,7 +9825,7 @@ api.post("/inventory/part-pickups", async (c) => {
     );
   }
 
-  const isOfficeEntry = user.role === "admin" || user.role === "office";
+  const isOfficeEntry = user.role === "admin" || user.role === "office" || user.role === "supervisor";
   let contactName = (body.contact_name || "").trim() || null;
   const contactUserId =
     body.contact_user_id != null && Number(body.contact_user_id) > 0
@@ -9513,7 +9903,7 @@ api.post("/inventory/part-pickups", async (c) => {
     const bg = (async () => {
       try {
         // Always notify warehouse/office/admin — even when ready date is in the future
-        const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin"]);
+        const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin", "supervisor"]);
         const whenBit = isFuture
           ? ` · ready ${needed} (not today)`
           : ` · ready today`;
@@ -9583,7 +9973,7 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
     }
 
     const isOwner = ticket.logged_by_user_id != null && ticket.logged_by_user_id === user.id;
-    const isStaff = ["admin", "office", "warehouse"].includes(user.role);
+    const isStaff = ["admin", "office", "warehouse", "supervisor"].includes(user.role);
     if (!isOwner && !isStaff) {
       return c.json(
         {
@@ -9698,7 +10088,7 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
  */
 api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
   const user = c.get("user");
-  const canCounter = ["admin", "warehouse", "office"].includes(user.role);
+  const canCounter = ["admin", "warehouse", "office", "supervisor"].includes(user.role);
   const canNotNeeded = canCounter || ["driver", "mechanic"].includes(user.role);
   if (!canNotNeeded) {
     return c.json({ error: "You cannot update pickup status" }, 403);
@@ -9847,20 +10237,36 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       }${notesIn ? ` · ${notesIn.slice(0, 60)}` : ""} — by ${user.display_name}`
     );
 
-    // Notify in background — never make the counter wait on notifications
+    // Notify requester in background — SMS only when their part arrives (or partial/not ready)
     if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
+      const title = `${statusLabel} · ${line.vendor_name}`;
+      const detail = `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
+        body.notes ? ` · ${String(body.notes).trim()}` : ""
+      } — ${user.display_name}`;
+      // Text when the part shows up (or partial / not ready so they know the status)
+      const smsOn =
+        status === "picked" || status === "partial" || status === "not_ready";
+      const smsText = smsOn
+        ? shortSms(
+            status === "picked"
+              ? `TA: Your part is in · ${line.vendor_name}: ${label}${qtyRecv != null ? ` (qty ${qtyRecv})` : ""}. Open app for details.`
+              : status === "partial"
+                ? `TA: Partial pickup · ${line.vendor_name}: ${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}.`
+                : `TA: Not ready yet · ${line.vendor_name}: ${label}. We'll update when it arrives.`
+          )
+        : null;
       scheduleWaitUntil(
         c,
-        notifyUsers(
-          c.env.DB,
-          [line.logged_by_user_id],
-          "vendor_run",
-          `${statusLabel} · ${line.vendor_name}`,
-          `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
-            body.notes ? ` · ${String(body.notes).trim()}` : ""
-          } — ${user.display_name}`,
-          { type: "part_pickup", id: line.ticket_id }
-        ).catch(() => {
+        notifyAndSms(c.env, c.env.DB, [line.logged_by_user_id], {
+          kind: "vendor_run",
+          title,
+          body: detail,
+          entity: { type: "part_pickup", id: line.ticket_id },
+          sms: smsText,
+          excludeUserId: user.id,
+          fromUserId: user.id,
+          smsContext: `vendor_run:${lineId}:${status}`,
+        }).catch(() => {
           /* non-fatal */
         })
       );
@@ -10284,7 +10690,7 @@ api.post("/inventory/parts-dropoffs", async (c) => {
 /** Warehouse marks drop-off received (put away / ready to issue). */
 api.post("/inventory/parts-dropoffs/:id/receive", async (c) => {
   const user = c.get("user");
-  if (!["admin", "warehouse", "office"].includes(user.role)) {
+  if (!["admin", "warehouse", "office", "supervisor"].includes(user.role)) {
     return c.json({ error: "Warehouse / office marks drop-offs received" }, 403);
   }
   await ensurePartsDropoffTables(c.env.DB);
@@ -10344,7 +10750,7 @@ api.post("/inventory/parts-dropoffs/:id/cancel", async (c) => {
   if (before.status !== "waiting") return c.json({ error: "Only waiting drop-offs can be cancelled" }, 400);
 
   const isOwner = before.dropped_by_user_id === user.id;
-  const canManage = ["admin", "warehouse", "office"].includes(user.role);
+  const canManage = ["admin", "warehouse", "office", "supervisor"].includes(user.role);
   if (!isOwner && !canManage) {
     return c.json({ error: "Only the person who logged it, or warehouse, can cancel" }, 403);
   }
@@ -11232,7 +11638,7 @@ api.get("/inventory/truck-counts/:id", async (c) => {
 /** Create count sheet(s) for one unit or all active trucks with truck-stock parts. */
 api.post("/inventory/truck-counts", async (c) => {
   const user = c.get("user");
-  if (!["admin", "warehouse", "office"].includes(user.role)) {
+  if (!["admin", "warehouse", "office", "supervisor"].includes(user.role)) {
     return c.json({ error: "Only warehouse, office, or admin can open truck count sheets" }, 403);
   }
   const body = await c.req.json<{ vehicle_id?: number; all_active?: boolean }>().catch(() => ({}));
@@ -11495,7 +11901,7 @@ api.post("/inventory/truck-counts/:id/submit", async (c) => {
 /** Warehouse applies submitted (or open) counts into truck stock balances. */
 api.post("/inventory/truck-counts/:id/apply", async (c) => {
   const user = c.get("user");
-  if (!["admin", "warehouse", "office"].includes(user.role)) {
+  if (!["admin", "warehouse", "office", "supervisor"].includes(user.role)) {
     return c.json({ error: "Only warehouse, office, or admin can apply counts" }, 403);
   }
   const id = Number(c.req.param("id"));
@@ -11565,7 +11971,7 @@ api.post("/inventory/truck-counts/:id/apply", async (c) => {
 
 api.post("/inventory/truck-counts/:id/reopen", async (c) => {
   const user = c.get("user");
-  if (!["admin", "warehouse", "office"].includes(user.role)) {
+  if (!["admin", "warehouse", "office", "supervisor"].includes(user.role)) {
     return c.json({ error: "Not allowed" }, 403);
   }
   const id = Number(c.req.param("id"));
@@ -12017,7 +12423,8 @@ function canDecideTimeOff(
   actor: { id: number; role: string },
   req: { manager_user_id: number | null }
 ): boolean {
-  if (actor.role === "admin" || actor.role === "office") return true;
+  if (actor.role === "admin" || actor.role === "office" || actor.role === "supervisor")
+    return true;
   if (req.manager_user_id != null && Number(req.manager_user_id) === actor.id) return true;
   return false;
 }
@@ -12027,7 +12434,7 @@ api.get("/time-off/pending-count", async (c) => {
   await ensureTimeOffTables(c.env.DB);
   try {
     let n = 0;
-    if (user.role === "admin" || user.role === "office") {
+    if (user.role === "admin" || user.role === "office" || user.role === "supervisor") {
       const row = await c.env.DB.prepare(
         `SELECT COUNT(*) as c FROM time_off_requests WHERE status = 'pending'`
       ).first<{ c: number }>();
@@ -12068,7 +12475,7 @@ api.get("/time-off", async (c) => {
     const binds: unknown[] = [];
 
     if (view === "approvals") {
-      if (user.role === "admin" || user.role === "office") {
+      if (user.role === "admin" || user.role === "office" || user.role === "supervisor") {
         sql += ` WHERE r.status = 'pending' OR (
           r.status IN ('approved','declined') AND date(r.decided_at) >= date('now', '-60 days')
         )`;
@@ -12083,7 +12490,7 @@ api.get("/time-off", async (c) => {
       sql += ` ORDER BY
         CASE r.status WHEN 'pending' THEN 0 ELSE 1 END,
         r.start_date ASC, r.id DESC LIMIT 100`;
-    } else if (view === "all" && (user.role === "admin" || user.role === "office")) {
+    } else if (view === "all" && (user.role === "admin" || user.role === "office" || user.role === "supervisor")) {
       sql += ` ORDER BY r.created_at DESC LIMIT 150`;
     } else {
       // mine
@@ -12093,7 +12500,7 @@ api.get("/time-off", async (c) => {
 
     const rows = await c.env.DB.prepare(sql).bind(...binds).all();
     let pendingForMe = 0;
-    if (user.role === "admin" || user.role === "office") {
+    if (user.role === "admin" || user.role === "office" || user.role === "supervisor") {
       const p = await c.env.DB.prepare(
         `SELECT COUNT(*) as c FROM time_off_requests WHERE status = 'pending'`
       ).first<{ c: number }>();
@@ -12109,7 +12516,7 @@ api.get("/time-off", async (c) => {
     }
 
     // Am I anyone's manager?
-    let isManager = user.role === "admin" || user.role === "office";
+    let isManager = user.role === "admin" || user.role === "office" || user.role === "supervisor";
     if (!isManager) {
       try {
         const m = await c.env.DB.prepare(
@@ -12204,7 +12611,7 @@ api.post("/time-off", async (c) => {
     const notifyIds = new Set<number>();
     if (managerId) notifyIds.add(managerId);
     else {
-      const admins = await usersByRoles(c.env.DB, ["admin", "office"]);
+      const admins = await usersByRoles(c.env.DB, ["admin", "office", "supervisor"]);
       for (const a of admins) notifyIds.add(a);
     }
     notifyIds.delete(user.id);
@@ -12352,7 +12759,7 @@ api.post("/time-off/:id/cancel", async (c) => {
     return c.json({ error: "Only pending requests can be cancelled" }, 400);
   }
   const isOwner = before.user_id === user.id;
-  const isAdmin = user.role === "admin" || user.role === "office";
+  const isAdmin = user.role === "admin" || user.role === "office" || user.role === "supervisor";
   if (!isOwner && !isAdmin) {
     return c.json({ error: "Only you (or office/admin) can cancel this request" }, 403);
   }
@@ -12450,7 +12857,7 @@ async function ensureToolLoanTables(db: D1Database): Promise<void> {
 }
 
 function isOfficeRole(role: string): boolean {
-  return role === "admin" || role === "office";
+  return role === "admin" || role === "office" || role === "supervisor";
 }
 
 // Money ledger (charges / payments / payroll export) — office & admin
@@ -13125,7 +13532,7 @@ api.post("/tool-loans", async (c) => {
       .run();
     const id = Number(ins.meta.last_row_id);
 
-    const office = await usersByRoles(c.env.DB, ["admin", "office"]);
+    const office = await usersByRoles(c.env.DB, ["admin", "office", "supervisor"]);
     const notifyIds = office.filter((uid) => uid !== user.id);
 
     if (notifyIds.length) {
@@ -13501,7 +13908,13 @@ function canUsePartsOrderHub(role: string): boolean {
 }
 
 function canManageAllPartsOrders(role: string): boolean {
-  return role === "admin" || role === "office" || role === "warehouse" || role === "mechanic";
+  return (
+    role === "admin" ||
+    role === "office" ||
+    role === "warehouse" ||
+    role === "mechanic" ||
+    role === "supervisor"
+  );
 }
 
 api.get("/parts-orders/vendors", async (c) => {
@@ -13697,7 +14110,7 @@ api.post("/parts-orders", async (c) => {
 
     // Notify warehouse + office/admin (not the requester)
     const notifyIds = new Set<number>();
-    for (const uid of await usersByRoles(c.env.DB, ["admin", "office", "warehouse"])) {
+    for (const uid of await usersByRoles(c.env.DB, ["admin", "office", "warehouse", "supervisor"])) {
       notifyIds.add(uid);
     }
     notifyIds.delete(user.id);
@@ -13870,7 +14283,7 @@ api.post("/parts-orders/:id/status", async (c) => {
   // When mechanic marks ordered, ping warehouse
   if (next === "ordered" && before.status === "needed") {
     const ids = new Set(
-      await usersByRoles(c.env.DB, ["admin", "office", "warehouse"])
+      await usersByRoles(c.env.DB, ["admin", "office", "warehouse", "supervisor"])
     );
     ids.delete(user.id);
     if (ids.size) {
@@ -14641,7 +15054,7 @@ const FEEDBACK_CATEGORIES = new Set(["suggestion", "bug", "praise", "other"]);
 const FEEDBACK_STATUSES = new Set(["new", "reviewed", "done", "dismissed"]);
 
 function isFeedbackReviewer(role: string): boolean {
-  return role === "admin" || role === "office";
+  return role === "admin" || role === "office" || role === "supervisor";
 }
 
 api.get("/feedback/pending-count", async (c) => {
@@ -14759,7 +15172,7 @@ api.post("/feedback", async (c) => {
       .run();
     const id = Number(ins.meta.last_row_id);
 
-    const reviewers = await usersByRoles(c.env.DB, ["admin", "office"]);
+    const reviewers = await usersByRoles(c.env.DB, ["admin", "office", "supervisor"]);
     scheduleWaitUntil(
       c,
       notifyUsers(
@@ -14880,10 +15293,14 @@ app.all("*", async (c) => {
     path.endsWith(".webmanifest");
 
   if (isHtml) {
-    // Critical: installed PWAs were stuck on old broken JS after deploys
+    // Critical: installed PWAs / CF edge were stuck on old HTML after deploys
     headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    // Cloudflare respects CDN-Cache-Control for edge; without it, CF-Cache-Status: HIT can serve stale HTML
+    headers.set("CDN-Cache-Control", "no-store");
+    headers.set("Cloudflare-CDN-Cache-Control", "no-store");
     headers.set("Pragma", "no-cache");
     headers.set("Expires", "0");
+    headers.set("Surrogate-Control", "no-store");
   } else if (isAsset) {
     // Hashed bundles can be cached forever
     headers.set("Cache-Control", "public, max-age=31536000, immutable");
@@ -14897,7 +15314,7 @@ app.all("*", async (c) => {
 });
 
 // Explicit Workers entry so ExecutionContext is always passed into Hono
-// (needed for waitUntil / background ntfy retries).
+// (needed for waitUntil / background alert fan-out).
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
     return app.fetch(request, env, ctx);
@@ -14907,7 +15324,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          await notifyShopBringInsToday(env.DB);
+          await notifyShopBringInsToday(env.DB, env);
         } catch {
           /* best-effort */
         }

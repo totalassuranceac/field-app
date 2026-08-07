@@ -164,7 +164,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/tool-loan-ledger") ||
     pathname.startsWith("/reviews") ||
     pathname.startsWith("/notifications") ||
-    pathname.startsWith("/settings")
+    pathname.startsWith("/settings") ||
+    pathname.startsWith("/warehouse-cameras")
   ) {
     return "company";
   }
@@ -529,7 +530,8 @@ export function Layout({ children }: { children: ReactNode }) {
     },
     {
       to: "/parts-receipts",
-      label: "Parts invoices",
+      // Field-friendly: photo the receipt after buying with the company card
+      label: "Bought parts",
       show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
     },
     {
@@ -596,12 +598,18 @@ export function Layout({ children }: { children: ReactNode }) {
     },
   ];
 
-  // Company: people, help, inbox
+  // Company: people, facility views, help, inbox
   const companyNav: NavItem[] = [
     {
       to: "/admin",
       label: "People",
       show: adminShell || can(user, "manageUsers") || can(user, "manageEmployees"),
+    },
+    {
+      to: "/warehouse-cameras",
+      label: "Security cameras",
+      // Office / warehouse / supervisor / admin — not field techs
+      show: adminShell || isOffice || isWarehouse || user?.role === "supervisor",
     },
     {
       to: "/time-off",
@@ -630,7 +638,7 @@ export function Layout({ children }: { children: ReactNode }) {
     {
       to: "/tool-loan-ledger",
       label: "Tool loan payroll",
-      show: user.role === "admin" || user.role === "office",
+      show: user.role === "admin" || user.role === "office" || user.role === "supervisor",
     },
     { to: "/feedback", label: "App feedback", show: true },
     { to: "/howto", label: "How-to guides", show: true },
@@ -769,6 +777,7 @@ export function Layout({ children }: { children: ReactNode }) {
               }}
             >
               <option value="admin">Admin</option>
+              <option value="supervisor">Supervisor</option>
               <option value="warehouse">Warehouse</option>
               <option value="office">Office</option>
               <option value="driver">Field</option>

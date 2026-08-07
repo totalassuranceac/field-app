@@ -372,6 +372,54 @@ export function ToolLoanLedgerPage() {
     }
   }
 
+  async function voidCharge(chargeId: number, description: string) {
+    const reason = window.prompt(
+      `Void this loan/charge?\n\n${description}\n\nOptional reason (shown in audit):`,
+      ""
+    );
+    if (reason === null) return; // cancelled
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      await api(`/tool-loan-ledger/charges/${chargeId}/void`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() || undefined }),
+      });
+      setOk("Charge voided — balance updated.");
+      if (selectedId) await loadDetail(selectedId);
+      await loadAll({ quiet: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not void charge");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function voidPayment(paymentId: number, label: string) {
+    const reason = window.prompt(
+      `Void this payment?\n\n${label}\n\nOptional reason (shown in audit):`,
+      ""
+    );
+    if (reason === null) return;
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      await api(`/tool-loan-ledger/payments/${paymentId}/void`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() || undefined }),
+      });
+      setOk("Payment voided — balance updated.");
+      if (selectedId) await loadDetail(selectedId);
+      await loadAll({ quiet: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not void payment");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Direct office charge — no employee request / approval. */
   async function addOfficeCharge(e: FormEvent) {
     e.preventDefault();
@@ -1420,7 +1468,7 @@ export function ToolLoanLedgerPage() {
 
               <h3 style={{ fontSize: "1rem", marginTop: "1.25rem" }}>Loans / charges</h3>
               <p className="muted no-print" style={{ fontSize: "0.82rem", margin: "0.15rem 0 0.45rem" }}>
-                Click any loan to reprint its acknowledgment form for signature.
+                Click a loan to reprint acknowledgment · use Void if it was entered by mistake.
               </p>
               <div className="table-wrap">
                 <table className="data-table charge-history-table">
@@ -1429,53 +1477,24 @@ export function ToolLoanLedgerPage() {
                       <th>Date</th>
                       <th>Description</th>
                       <th className="num">Amount</th>
-                      <th className="no-print">Acknowledgment</th>
+                      <th className="no-print">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {detail.charges.map((c) => {
-                      const canReprint = !c.voided;
+                      const canAct = !c.voided;
                       return (
                         <tr
                           key={c.id}
-                          className={
-                            c.voided
-                              ? "muted"
-                              : "charge-row-reprintable"
-                          }
-                          onClick={
-                            canReprint
-                              ? () => openChargeAgreementPrint(c.id)
-                              : undefined
-                          }
-                          onKeyDown={
-                            canReprint
-                              ? (e) => {
-                                  if (e.key === "Enter" || e.key === " ") {
-                                    e.preventDefault();
-                                    openChargeAgreementPrint(c.id);
-                                  }
-                                }
-                              : undefined
-                          }
-                          role={canReprint ? "button" : undefined}
-                          tabIndex={canReprint ? 0 : undefined}
-                          title={
-                            canReprint
-                              ? "Click to reprint acknowledgment"
-                              : "Voided — cannot reprint"
-                          }
+                          className={c.voided ? "muted" : undefined}
                         >
                           <td>{c.charge_date?.slice(0, 10)}</td>
                           <td>
-                            {canReprint ? (
+                            {canAct ? (
                               <button
                                 type="button"
                                 className="charge-desc-link"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openChargeAgreementPrint(c.id);
-                                }}
+                                onClick={() => openChargeAgreementPrint(c.id)}
                               >
                                 {c.description}
                               </button>
@@ -1488,19 +1507,22 @@ export function ToolLoanLedgerPage() {
                           </td>
                           <td className="num">{money(Number(c.amount))}</td>
                           <td className="no-print">
-                            {canReprint ? (
+                            {canAct ? (
                               <button
                                 type="button"
                                 className="btn secondary small"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openChargeAgreementPrint(c.id);
-                                }}
+                                disabled={busy}
+                                onClick={() =>
+                                  void voidCharge(
+                                    c.id,
+                                    `${c.description} · ${money(Number(c.amount))}`
+                                  )
+                                }
                               >
-                                Reprint ack
+                                Void
                               </button>
                             ) : (
-                              <span className="muted">—</span>
+                              <span className="muted">voided</span>
                             )}
                           </td>
                         </tr>
@@ -1526,6 +1548,7 @@ export function ToolLoanLedgerPage() {
                       <th>Type</th>
                       <th>Note</th>
                       <th className="num">Amount</th>
+                      <th className="no-print"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1544,11 +1567,30 @@ export function ToolLoanLedgerPage() {
                           {p.note || "—"}
                         </td>
                         <td className="num">{money(Number(p.amount))}</td>
+                        <td className="no-print">
+                          {!p.voided ? (
+                            <button
+                              type="button"
+                              className="btn secondary small"
+                              disabled={busy}
+                              onClick={() =>
+                                void voidPayment(
+                                  p.id,
+                                  `${p.payment_type} · ${money(Number(p.amount))} · ${p.payment_date?.slice(0, 10) || ""}`
+                                )
+                              }
+                            >
+                              Void
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                     {!detail.payments.length && (
                       <tr>
-                        <td colSpan={4} className="muted" style={{ textAlign: "center" }}>
+                        <td colSpan={5} className="muted" style={{ textAlign: "center" }}>
                           No payments yet.
                         </td>
                       </tr>

@@ -2760,233 +2760,9 @@ tr.row-just-added td {
   border: 1px solid #f87171;
 }
 
-/* Compact collapsible phone-alert checklist (Settings only) */
-.settings-ntfy-wrap {
-  grid-column: 1 / -1;
-  margin-bottom: 0;
-}
-
-.ntfy-drawer.card {
-  padding: 0;
-  overflow: hidden;
-}
-
-.ntfy-drawer-summary {
-  list-style: none;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.55rem 0.75rem;
-  user-select: none;
-  font-weight: 700;
-  font-size: 0.9rem;
-}
-
-.ntfy-drawer-summary::-webkit-details-marker {
-  display: none;
-}
-
-.ntfy-drawer-summary::before {
-  content: "▸";
-  color: var(--muted);
-  font-size: 0.75rem;
-  margin-right: 0.15rem;
-}
-
-.ntfy-drawer[open] > .ntfy-drawer-summary::before {
-  content: "▾";
-}
-
-.ntfy-drawer-title {
-  flex: 1;
-  min-width: 0;
-}
-
-.ntfy-drawer-badge {
-  font-size: 0.68rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 0.12rem 0.4rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, #d69e2e 22%, var(--bg-elevated, #f8fafc));
-  color: #975a16;
-  border: 1px solid color-mix(in srgb, #d69e2e 40%, transparent);
-  flex-shrink: 0;
-}
-
-.ntfy-drawer-badge.is-done {
-  background: #c6f6d5;
-  color: #276749;
-  border-color: color-mix(in srgb, #38a169 40%, transparent);
-}
-
-.ntfy-drawer-body {
-  padding: 0 0.75rem 0.7rem;
-  border-top: 1px solid var(--border, var(--line));
-}
-
-.ntfy-drawer-status {
-  margin: 0.45rem 0 0.4rem;
-  font-size: 0.78rem;
-  line-height: 1.3;
-}
-
 .success-inline {
   color: #276749;
   font-weight: 600;
-}
-
-.ntfy-check-list-compact {
-  gap: 0.35rem !important;
-  margin-bottom: 0.4rem !important;
-}
-
-.ntfy-check-list-compact .ntfy-check-item {
-  padding: 0.45rem 0.55rem !important;
-  gap: 0.35rem !important;
-  border-radius: 8px !important;
-}
-
-.ntfy-check-list-compact .ntfy-check-why {
-  display: none;
-}
-
-.ntfy-check-list-compact .ntfy-check-how {
-  font-size: 0.75rem !important;
-  margin: 0 !important;
-}
-
-.ntfy-check-list-compact .ntfy-check-title-row {
-  margin-bottom: 0.1rem !important;
-  gap: 0.3rem !important;
-}
-
-.ntfy-check-list-compact .ntfy-check-title-row strong {
-  font-size: 0.85rem;
-}
-
-.ntfy-check-list-compact .ntfy-check-actions .btn {
-  min-height: 30px;
-  padding: 0.25rem 0.55rem;
-  font-size: 0.78rem;
-}
-
-.ntfy-setup-banner {
-  display: none; /* home banner removed — checklist lives in Settings */
-}
-
-.ntfy-setup-title {
-  display: block;
-  font-size: 1rem;
-  margin-bottom: 0.25rem;
-  color: #744210;
-}
-
-.ntfy-setup-lead {
-  margin: 0 0 0.5rem;
-  font-size: 0.92rem;
-  line-height: 1.4;
-  color: #5c4310;
-}
-
-.ntfy-setup-steps {
-  margin: 0;
-  padding-left: 1.2rem;
-  font-size: 0.88rem;
-  line-height: 1.45;
-  color: #4a3b12;
-}
-
-.ntfy-setup-steps li {
-  margin-bottom: 0.25rem;
-}
-
-.ntfy-topic-code {
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  padding: 0.05rem 0.3rem;
-  background: var(--bg-elevated, #fff);
-  border-radius: 5px;
-  border: 1px solid var(--border, #e2d08a);
-  color: var(--ink);
-}
-
-.ntfy-setup-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.ntfy-setup-card .ntfy-setup-steps {
-  margin-bottom: 0.75rem;
-}
-
-.ntfy-check-list {
-  list-style: none;
-  margin: 0 0 0.75rem;
-  padding: 0;
-  display: grid;
-  gap: 0.65rem;
-}
-
-.ntfy-check-item {
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.75rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, #d69e2e 40%, var(--border, #e2e8f0));
-  background: #fffef7;
-}
-
-.ntfy-check-item.is-done {
-  border-color: color-mix(in srgb, #38a169 40%, var(--border, #e2e8f0));
-  background: color-mix(in srgb, #c6f6d5 35%, #fff);
-}
-
-.ntfy-check-title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem 0.55rem;
-  margin-bottom: 0.25rem;
-}
-
-.ntfy-check-why {
-  margin: 0 0 0.25rem;
-  font-size: 0.88rem;
-  line-height: 1.4;
-}
-
-.ntfy-check-how {
-  margin: 0;
-  font-size: 0.82rem;
-  line-height: 1.35;
-}
-
-.ntfy-done-pill {
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #276749;
-  background: #c6f6d5;
-  padding: 0.1rem 0.4rem;
-  border-radius: 999px;
-}
-
-.ntfy-check-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.ntfy-store-links {
-  margin: 0.35rem 0 0;
-  font-size: 0.85rem;
 }
 
 .inv-import-steps {
@@ -5468,14 +5244,6 @@ tr.row-dup td {
   border-color: #94a3b8;
 }
 
-.ntfy-setup-card .ntfy-check-item {
-  background: color-mix(in srgb, var(--accent, #2b6cb0) 4%, var(--card, #fff));
-}
-
-.ntfy-setup-card .ntfy-check-item.is-done {
-  background: color-mix(in srgb, #38a169 8%, var(--card, #fff));
-}
-
 .info-banner {
   background: var(--accent-soft);
   border: 1px solid rgba(200, 16, 46, 0.2);
@@ -6120,6 +5888,43 @@ tr.row-low td {
 .settings-dl dd {
   margin: 0;
   font-weight: 600;
+}
+
+/* SMS opt-in (Settings) — clear for users + Twilio A2P screenshots */
+.sms-optin-card h2 {
+  margin-bottom: 0.35rem;
+}
+
+.sms-consent-box {
+  margin: 0.35rem 0 0.25rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, #c8102e) 28%, var(--line));
+  background: color-mix(in srgb, var(--accent, #c8102e) 6%, var(--surface, #fff));
+}
+
+.sms-consent-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sms-consent-label input[type="checkbox"] {
+  margin-top: 0.2rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+  accent-color: var(--accent, #c8102e);
+}
+
+.sms-consent-label a {
+  font-weight: 700;
+  text-decoration: underline;
 }
 
 .help-list {
@@ -7470,10 +7275,480 @@ tr.row-low td {
   flex: 1 1 12rem;
 }
 
+.offline-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
 .offline-banner-btn {
   flex: 0 0 auto;
   padding: 0.3rem 0.65rem !important;
   font-size: 0.8rem !important;
+}
+
+/* Tech shop appointment confirmation */
+.log-item-badge.confirm-badge.is-confirmed {
+  background: color-mix(in srgb, #22c55e 28%, transparent);
+  color: #86efac;
+}
+.log-item-badge.confirm-badge.is-declined {
+  background: color-mix(in srgb, #f59e0b 30%, transparent);
+  color: #fcd34d;
+}
+.log-item-badge.confirm-badge.is-pending {
+  background: color-mix(in srgb, #ef4444 22%, transparent);
+}
+.schedule-confirm-box {
+  margin-top: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #3b82f6 45%, var(--line, #334155));
+  background: color-mix(in srgb, #3b82f6 12%, var(--surface, #0f172a));
+}
+.schedule-confirm-prompt {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.schedule-confirm-ok {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #86efac;
+}
+.schedule-decline-form {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.schedule-decline-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.schedule-decline-form textarea {
+  font-weight: 400;
+  font-size: 0.9rem;
+}
+.confirm-text-ok {
+  color: #86efac;
+  font-weight: 600;
+}
+.confirm-text-bad {
+  color: #fbbf24;
+  font-weight: 600;
+}
+.confirm-text-pending {
+  color: #fca5a5;
+  font-weight: 600;
+}
+.home-pill.needs-confirm {
+  outline: 2px solid color-mix(in srgb, #f59e0b 70%, transparent);
+}
+
+.warehouse-cameras-page .warehouse-cam-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.warehouse-cameras-page button.linkish {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent, #60a5fa);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.warehouse-cameras-page .warehouse-cam-steps {
+  margin: 0.35rem 0 0.75rem;
+  padding-left: 1.2rem;
+  line-height: 1.45;
+  font-size: 0.92rem;
+}
+.warehouse-cameras-page .warehouse-cam-steps li {
+  margin-bottom: 0.4rem;
+}
+.warehouse-cam-head-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+/* Always 2 columns so overlapping coverage pairs stay side-by-side */
+.warehouse-cam-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+@media (max-width: 520px) {
+  .warehouse-cam-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.warehouse-cam-tile-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  appearance: none;
+}
+.warehouse-cam-tile-btn:hover {
+  outline: 2px solid color-mix(in srgb, var(--accent, #60a5fa) 55%, transparent);
+  outline-offset: 1px;
+}
+.warehouse-cam-tile-btn:focus-visible {
+  outline: 2px solid var(--accent, #60a5fa);
+  outline-offset: 2px;
+}
+.warehouse-cam-tile-hint {
+  float: right;
+  font-weight: 500;
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+.warehouse-cam-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(2, 6, 23, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  overflow: auto;
+}
+.warehouse-cam-modal {
+  width: min(720px, 100%);
+  max-height: min(92vh, 900px);
+  overflow: auto;
+  margin: 0;
+}
+.warehouse-cam-play-form {
+  display: grid;
+  grid-template-columns: 1fr 8rem;
+  gap: 0.65rem 0.75rem;
+  align-items: end;
+}
+@media (max-width: 560px) {
+  .warehouse-cam-play-form {
+    grid-template-columns: 1fr;
+  }
+}
+.warehouse-cam-play-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.88rem;
+}
+.warehouse-cam-play-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  grid-column: 1 / -1;
+}
+.warehouse-cam-video {
+  width: 100%;
+  max-height: min(50vh, 420px);
+  background: #000;
+  border-radius: 10px;
+  display: block;
+}
+.warehouse-cam-viewer {
+  width: min(920px, 100%);
+}
+.warehouse-cam-viewer-stage {
+  position: relative;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line, #334155);
+  min-height: 200px;
+  user-select: none;
+}
+.warehouse-cam-video-large {
+  max-height: min(58vh, 560px);
+  width: 100%;
+  object-fit: contain;
+  cursor: pointer;
+  display: block;
+  vertical-align: middle;
+}
+.warehouse-cam-video-still {
+  opacity: 0.85;
+}
+.warehouse-cam-viewer-placeholder {
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 0.95rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+.warehouse-cam-pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+.warehouse-cam-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  min-width: 9rem;
+  flex: 1 1 8rem;
+}
+.warehouse-cam-pick input[type="date"],
+.warehouse-cam-pick input[type="time"] {
+  font: inherit;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--line, #334155);
+  background: var(--surface, #1e293b);
+  color: inherit;
+}
+
+/* YouTube-style overlay controls */
+.warehouse-cam-yt-chrome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.warehouse-cam-yt-chrome.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.warehouse-cam-viewer-stage.show-chrome .warehouse-cam-yt-chrome {
+  opacity: 1;
+  pointer-events: auto;
+}
+.warehouse-cam-yt-gradient {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 42%;
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0.85) 0%,
+    rgba(0, 0, 0, 0.45) 45%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+.warehouse-cam-yt-bar {
+  position: relative;
+  z-index: 1;
+  padding: 0.35rem 0.75rem 0.65rem;
+}
+.warehouse-cam-yt-scrub {
+  width: 100%;
+  height: 4px;
+  margin: 0 0 0.55rem;
+  padding: 0;
+  cursor: pointer;
+  accent-color: #ef4444;
+  background: transparent;
+}
+.warehouse-cam-yt-scrub::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.35);
+}
+.warehouse-cam-yt-scrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #ef4444;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.warehouse-cam-yt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.warehouse-cam-yt-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+.warehouse-cam-yt-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #fff;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.95;
+  transition: background 0.15s ease, transform 0.12s ease, opacity 0.15s ease;
+}
+.warehouse-cam-yt-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  opacity: 1;
+}
+.warehouse-cam-yt-btn:active {
+  transform: scale(0.94);
+}
+.warehouse-cam-yt-btn.is-active {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.15);
+}
+.warehouse-cam-yt-btn-play {
+  width: 52px;
+  height: 52px;
+}
+.warehouse-cam-yt-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #fff;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.warehouse-cam-yt-speed {
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.warehouse-cam-yt-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: #e2e8f0;
+  font-size: 0.95rem;
+  z-index: 2;
+  pointer-events: none;
+}
+@media (max-width: 520px) {
+  .warehouse-cam-yt-btn {
+    width: 40px;
+    height: 40px;
+  }
+  .warehouse-cam-yt-btn-play {
+    width: 48px;
+    height: 48px;
+  }
+}
+.warehouse-cam-tile {
+  border: 1px solid var(--line, #334155);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b1220;
+}
+.warehouse-cam-tile-label {
+  padding: 0.4rem 0.55rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  background: color-mix(in srgb, var(--surface, #1e293b) 90%, #000);
+  border-bottom: 1px solid var(--line, #334155);
+}
+.warehouse-cam-tile-img-wrap {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: #020617;
+}
+.warehouse-cam-tile-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.warehouse-cam-tile-err {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: #fca5a5;
+  background: rgba(15, 23, 42, 0.85);
+}
+.warehouse-cam-code {
+  display: block;
+  margin: 0.4rem 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  background: #0b1220;
+  border: 1px solid var(--line, #334155);
+  font-size: 0.8rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.warehouse-diag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.warehouse-diag-list li {
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0.4rem;
+  border-radius: 8px;
+  border: 1px solid var(--line, #334155);
+  font-size: 0.9rem;
+}
+.warehouse-diag-list li.is-ok {
+  border-color: color-mix(in srgb, #22c55e 45%, var(--line, #334155));
+}
+.warehouse-diag-list li.is-bad {
+  border-color: color-mix(in srgb, #f59e0b 50%, var(--line, #334155));
+}
+.warehouse-cam-iframe-wrap {
+  position: relative;
+  width: 100%;
+  min-height: 420px;
+  height: min(70vh, 640px);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line, #334155);
+  background: #020617;
+}
+.warehouse-cam-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #000;
 }
 
 .warranty-photo-block {
@@ -9115,13 +9390,6 @@ tr.row-low td {
   padding: 2rem 0;
 }
 
-/* Home: no ntfy checklist — that lives under Settings only */
-.home .ntfy-setup-banner,
-.home .ntfy-setup-card,
-.office-home .ntfy-setup-banner {
-  display: none !important;
-}
-
 .home-clean {
   display: flex;
   flex-direction: column;
@@ -10660,6 +10928,7 @@ tr.row-low td {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.92rem;
+  table-layout: auto;
 }
 .tool-loan-ledger .data-table th,
 .tool-loan-ledger .data-table td {
@@ -10667,6 +10936,27 @@ tr.row-low td {
   padding: 0.45rem 0.55rem;
   border-bottom: 1px solid var(--border, #e2e8f0);
   vertical-align: top;
+}
+/* Keep money columns on one line (avoid $1,732. / 00 wrap) */
+.tool-loan-ledger .data-table th.num,
+.tool-loan-ledger .data-table td.num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  width: 1%;
+  min-width: 6.75rem;
+  padding-left: 0.85rem;
+}
+.tool-loan-ledger .data-table th.no-print,
+.tool-loan-ledger .data-table td.no-print {
+  white-space: nowrap;
+  width: 1%;
+  vertical-align: middle;
+}
+.charge-history-table col.amount-col,
+.charge-history-table th.num,
+.charge-history-table td.num {
+  min-width: 7.25rem;
 }
 .tool-loan-ledger .data-table tr.is-selected {
   background: rgba(37, 99, 235, 0.08);
@@ -13642,10 +13932,94 @@ svg {
   align-items: center;
 }
 
-/* Parts drop-off at shop */
+/* Parts drop-off at shop — grouped by vendor for warehouse box labeling */
 .parts-dropoff-list {
   display: grid;
-  gap: 0.3rem;
+  gap: 0.65rem;
+}
+
+.parts-dropoff-vendor-group {
+  margin: 0;
+  padding: 0.7rem 0.85rem 0.55rem;
+  border-radius: 12px;
+}
+
+.parts-dropoff-vendor-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem 0.75rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid color-mix(in srgb, var(--border, #334155) 85%, transparent);
+}
+
+.parts-dropoff-vendor-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.85rem;
+  letter-spacing: -0.01em;
+}
+
+.parts-dropoff-vendor-name {
+  color: var(--text, #f1f5f9);
+}
+
+.parts-dropoff-vendor-when {
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: var(--muted, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+
+.parts-dropoff-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.parts-dropoff-job-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border, #334155) 55%, transparent);
+}
+
+.parts-dropoff-job-row:last-child {
+  border-bottom: none;
+}
+
+.parts-dropoff-job-row.st-received,
+.parts-dropoff-job-row.st-cancelled {
+  opacity: 0.72;
+}
+
+.parts-dropoff-job-main {
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+
+.parts-dropoff-job-line {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--text, #f8fafc);
+  line-height: 1.35;
+}
+
+.parts-dropoff-job-meta {
+  display: block;
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+  line-height: 1.3;
 }
 
 .parts-dropoff-card {

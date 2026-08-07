@@ -1,14 +1,13 @@
 /**
- * Free-first alert channels for fleet incidents.
+ * Alert channels for fleet incidents.
  *
- * Priority order (cost):
+ * Priority order:
  *  1. In-app notifications (always free — already created by caller)
- *  2. ntfy.sh push (free phone app — https://ntfy.sh)
- *  3. Discord webhook (free office channel)
- *  4. Twilio SMS (optional paid — only if secrets configured)
+ *  2. Discord webhook (optional free office channel)
+ *  3. Twilio SMS (optional paid — only if secrets configured)
  */
 
-import { getSetting, setSetting } from "./audit";
+import { getSetting } from "./audit";
 import { getLivePositions, type LivePosition } from "./gps";
 import { logSms, normalizePhone, sendSms, smsConfigured } from "./sms";
 import { notifyUsers } from "./notifications";
@@ -22,7 +21,7 @@ export interface AlertPayload {
   /** short SMS-friendly body */
   sms?: string;
   priority?: AlertPriority;
-  /** tags for ntfy (emoji names) */
+  /** optional tags (unused; kept for payload shape compatibility) */
   tags?: string[];
   clickUrl?: string;
 }
@@ -47,222 +46,6 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number):
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-/** Easy default topic name — same word everyone remembers and types in the ntfy app. */
-export const DEFAULT_NTFY_TOPIC = "totalassurance";
-
-/**
- * Admin-only ntfy channel for Settings “Send test”.
- * Real emergencies stay on DEFAULT_NTFY_TOPIC so the mechanic is not buzzed by tests.
- * Admin must subscribe to this word in ntfy (in addition to the fleet channel).
- */
-export const NTFY_ADMIN_TEST_TOPIC = "totalassurance-admin";
-
-function asciiHeader(s: string, max = 120): string {
-  return (s || "Fleet alert")
-    .replace(/[^\x20-\x7E]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max) || "Fleet alert";
-}
-
-async function rememberNtfyStatus(db: D1Database, detail: string): Promise<void> {
-  try {
-    await setSetting(db, "last_ntfy_status", `${new Date().toISOString()} | ${detail.slice(0, 300)}`);
-  } catch {
-    /* ignore */
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function isTransientNtfyFailure(status: number, body: string): boolean {
-  // 522 = Cloudflare origin timeout (very common when Workers call ntfy.sh)
-  if ([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524].includes(status)) {
-    return true;
-  }
-  return /error code:\s*52[0-4]|timeout|temporar|rate.?limit|overloaded/i.test(body);
-}
-
-type NtfyAttempt = { ok: boolean; detail: string; retryable: boolean };
-
-function fetchTimeoutSignal(ms: number): AbortSignal | undefined {
-  try {
-    // Workers support AbortSignal.timeout; fall back if missing
-    return AbortSignal.timeout(ms);
-  } catch {
-    return undefined;
-  }
-}
-
-async function tryNtfyOnce(
-  server: string,
-  topic: string,
-  token: string,
-  title: string,
-  message: string,
-  priority: number,
-  tags: string[],
-  opts?: { timeoutMs?: number; classicOnly?: boolean }
-): Promise<NtfyAttempt> {
-  const errors: string[] = [];
-  const timeoutMs = opts?.timeoutMs ?? 8000;
-  const signal = fetchTimeoutSignal(timeoutMs);
-
-  // Classic publish to /topic (simplest, works when ntfy is healthy)
-  try {
-    const h: Record<string, string> = {
-      Title: asciiHeader(title),
-      Priority: String(priority),
-      Tags: tags.join(","),
-      "User-Agent": "TotalAssuranceFleet/1.0",
-    };
-    if (token) h.Authorization = `Bearer ${token}`;
-    // Skip Click — some ntfy/CF edges are flaky with extra headers on free tier
-    const res = await fetch(`${server}/${encodeURIComponent(topic)}`, {
-      method: "POST",
-      headers: h,
-      body: message,
-      signal,
-    });
-    const text = await res.text().catch(() => "");
-    if (res.ok) return { ok: true, detail: `ntfy ok → ${topic}`, retryable: false };
-    errors.push(`classic ${res.status}: ${text.slice(0, 80)}`);
-    if (isTransientNtfyFailure(res.status, text)) {
-      return { ok: false, detail: errors.join(" | "), retryable: true };
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    errors.push(`classic err: ${msg}`);
-    // Timeout / network — retryable
-    if (opts?.classicOnly) {
-      return { ok: false, detail: errors.join(" | "), retryable: true };
-    }
-  }
-
-  if (opts?.classicOnly) {
-    return { ok: false, detail: errors.join(" | ") || "classic only failed", retryable: true };
-  }
-
-  // JSON publish fallback
-  try {
-    const h: Record<string, string> = {
-      "Content-Type": "application/json",
-      "User-Agent": "TotalAssuranceFleet/1.0",
-    };
-    if (token) h.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${server}/`, {
-      method: "POST",
-      headers: h,
-      body: JSON.stringify({
-        topic,
-        title: asciiHeader(title, 200),
-        message,
-        priority,
-        tags,
-      }),
-      signal: fetchTimeoutSignal(timeoutMs),
-    });
-    const text = await res.text().catch(() => "");
-    if (res.ok) return { ok: true, detail: `ntfy ok json → ${topic}`, retryable: false };
-    errors.push(`json ${res.status}: ${text.slice(0, 80)}`);
-    return {
-      ok: false,
-      detail: errors.join(" | "),
-      retryable: isTransientNtfyFailure(res.status, text),
-    };
-  } catch (e) {
-    errors.push(`json err: ${e instanceof Error ? e.message : String(e)}`);
-    return { ok: false, detail: errors.join(" | "), retryable: true };
-  }
-}
-
-/** ntfy.sh — free push. Retries on Cloudflare 522/timeouts (common Worker→ntfy.sh issue). */
-export async function sendNtfy(
-  env: Env,
-  db: D1Database,
-  payload: AlertPayload,
-  opts?: {
-    maxAttempts?: number;
-    /** Per-attempt fetch timeout (ms). Default 8000. */
-    timeoutMs?: number;
-    /** Only classic /topic publish (faster for in-request first try). */
-    classicOnly?: boolean;
-    /** Override settings topic (e.g. admin test topic). */
-    topic?: string;
-  }
-): Promise<{ ok: boolean; detail?: string }> {
-  const topic =
-    (opts?.topic || (await getSetting(db, "ntfy_topic", DEFAULT_NTFY_TOPIC))).trim() ||
-    DEFAULT_NTFY_TOPIC;
-  if (!topic) {
-    await rememberNtfyStatus(db, "fail: ntfy_topic not set");
-    return { ok: false, detail: "ntfy_topic not set" };
-  }
-
-  let server = ((await getSetting(db, "ntfy_server", "https://ntfy.sh")) || "https://ntfy.sh")
-    .trim()
-    .replace(/\/$/, "");
-  if (!/^https?:\/\//i.test(server)) server = `https://${server}`;
-  const token = (await getSetting(db, "ntfy_token", "")).trim();
-
-  const priority =
-    payload.priority === "urgent" ? 5 : payload.priority === "high" ? 4 : 3;
-  const message = (payload.body || "Open the fleet app.").slice(0, 3900);
-  const title = (payload.title || "Fleet alert").slice(0, 200);
-  const tags = payload.tags?.length ? payload.tags : ["warning"];
-  const maxAttempts = opts?.maxAttempts ?? 4;
-  const timeoutMs = opts?.timeoutMs ?? 8000;
-
-  let lastDetail = "";
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await tryNtfyOnce(server, topic, token, title, message, priority, tags, {
-      timeoutMs,
-      classicOnly: opts?.classicOnly,
-    });
-    if (result.ok) {
-      const detail =
-        attempt > 1 ? `${result.detail} (attempt ${attempt})` : result.detail;
-      await rememberNtfyStatus(db, detail);
-      return { ok: true, detail };
-    }
-    lastDetail = result.detail;
-    if (!result.retryable || attempt === maxAttempts) break;
-    // Back off: 400ms, 900ms, 1800ms — beat intermittent 522s
-    await sleep(400 * attempt * attempt);
-  }
-
-  const detail = `ntfy failed (${server}/${topic}): ${lastDetail}`;
-  await rememberNtfyStatus(db, detail);
-  return { ok: false, detail };
-}
-
-/**
- * Keep trying ntfy in the background after a failed/slow first wave.
- * Use with executionCtx.waitUntil so the driver UI is not blocked.
- */
-export async function sendNtfyWithBackgroundRetries(
-  env: Env,
-  db: D1Database,
-  payload: AlertPayload
-): Promise<{ ok: boolean; detail?: string }> {
-  // First wave: up to ~3s of retries
-  const first = await sendNtfy(env, db, payload, { maxAttempts: 3 });
-  if (first.ok) return first;
-
-  // Second wave: more spaced attempts (522 often clears in a few seconds)
-  for (let i = 0; i < 3; i++) {
-    await sleep(2000 + i * 2500);
-    const r = await sendNtfy(env, db, payload, { maxAttempts: 2 });
-    if (r.ok) {
-      await rememberNtfyStatus(db, `${r.detail} (background retry ${i + 1})`);
-      return r;
-    }
-  }
-  return first;
 }
 
 /** Free Discord webhook for office / shop channel */
@@ -323,7 +106,7 @@ export async function sendSmsToPhones(
 }
 
 /**
- * Fan out free (+ optional paid) alerts.
+ * Fan out Discord + optional SMS.
  * In-app notifyUsers should already have been called by the route.
  */
 export async function fanOutAlert(
@@ -335,26 +118,20 @@ export async function fanOutAlert(
     context?: string;
     /** Also text these phones if Twilio is configured */
     smsPhones?: string[];
-    /** ntfy attempts in this call (default 4 — handles 522 timeouts) */
-    ntfyAttempts?: number;
-    /** Override ntfy topic (rare; tests use fleet topic by default) */
-    ntfyTopic?: string;
     /** Skip Discord (e.g. silent admin test) */
     skipDiscord?: boolean;
   }
-): Promise<{ ntfy: boolean; discord: boolean; sms: number; details: string[] }> {
+): Promise<{ discord: boolean; sms: number; details: string[] }> {
   const details: string[] = [];
-  const ntfy = await sendNtfy(env, db, payload, {
-    maxAttempts: opts?.ntfyAttempts ?? 4,
-    topic: opts?.ntfyTopic,
-  });
-  details.push(ntfy.detail || (ntfy.ok ? "ntfy ok" : "ntfy skip"));
 
-  let discord = { ok: false, detail: "discord skip" as string | undefined };
+  let discordOk = false;
+  let discordDetail = "discord skip";
   if (!opts?.skipDiscord) {
-    discord = await sendDiscord(db, payload);
+    const discord = await sendDiscord(db, payload);
+    discordOk = discord.ok;
+    discordDetail = discord.detail || (discord.ok ? "discord ok" : "discord skip");
   }
-  details.push(discord.detail || (discord.ok ? "discord ok" : "discord skip"));
+  details.push(discordDetail);
 
   let sms = 0;
   if (opts?.smsPhones?.length) {
@@ -369,7 +146,7 @@ export async function fanOutAlert(
     details.push(sms ? `sms ${sms}` : "sms none");
   }
 
-  return { ntfy: ntfy.ok, discord: discord.ok, sms, details };
+  return { discord: discordOk, sms, details };
 }
 
 /**
@@ -497,8 +274,7 @@ export async function shopPhones(db: D1Database): Promise<string[]> {
 
 /**
  * Full incident fan-out used when a driver reports a repair / emergency.
- * Main phone push is usually already sent by the /issues route — pass skipMainPush
- * to only handle nearby-driver alerts (avoids double ntfy + false "failed" races).
+ * Sends Discord + optional SMS to shop; nearby drivers get in-app (+ SMS if phones on file).
  */
 export async function alertFleetIncident(
   env: Env,
@@ -513,22 +289,13 @@ export async function alertFleetIncident(
     description?: string | null;
     isEmergency: boolean;
     appBaseUrl?: string;
-    /** When true, do not send the main shop ntfy again (route already did / client will). */
+    /** When true, skip Discord/SMS main shop fan-out (only nearby drivers). */
     skipMainPush?: boolean;
-    /** When true, never publish extra ntfy (same topic = duplicate phone buzzes). */
-    skipNtfy?: boolean;
   }
 ): Promise<{
   nearby: NearbyDriver[];
-  channels: { ntfy: boolean; discord: boolean; sms: number };
+  channels: { discord: boolean; sms: number };
 }> {
-  const base =
-    opts.appBaseUrl ||
-    env.APP_BASE_URL ||
-    "";
-  const click = base ? `${base.replace(/\/$/, "")}/issues` : undefined;
-  const noNtfy = Boolean(opts.skipNtfy);
-
   const shortDesc = (opts.description || "").trim().slice(0, 120);
   const title = opts.isEmergency
     ? `EMERGENCY Unit ${opts.unitNumber}: ${opts.title}`
@@ -539,13 +306,12 @@ export async function alertFleetIncident(
     opts.isEmergency ? "Open Repairs / contact the driver ASAP." : "Open Repairs & shop board.",
   ].join("\n");
 
-  let channels: { ntfy: boolean; discord: boolean; sms: number } = {
-    ntfy: false,
+  let channels: { discord: boolean; sms: number } = {
     discord: false,
     sms: 0,
   };
 
-  if (!opts.skipMainPush && !noNtfy) {
+  if (!opts.skipMainPush) {
     const phones = await shopPhones(db);
     channels = await fanOutAlert(
       env,
@@ -555,9 +321,7 @@ export async function alertFleetIncident(
         body,
         sms: `TA Fleet ${opts.isEmergency ? "EMERGENCY" : "repair"} unit ${opts.unitNumber}: ${opts.title}. ${shortDesc || "Open app."} — ${opts.fromName}`,
         priority: opts.isEmergency ? "urgent" : "high",
-        // Keep tags minimal — some ntfy edges reject unknown tag combos
         tags: opts.isEmergency ? ["rotating_light", "exclamation"] : ["wrench"],
-        clickUrl: click,
       },
       {
         fromUserId: opts.fromUserId,
@@ -577,7 +341,7 @@ export async function alertFleetIncident(
       const nearList = nearby
         .map((n) => `Unit ${n.unit_number} (${n.display_name}, ~${n.miles} mi)`)
         .join("; ");
-      // In-app only for nearby drivers — do NOT ntfy the shared shop topic again
+      // In-app only for nearby drivers
       await notifyUsers(
         db,
         nearIds,
@@ -600,7 +364,6 @@ export async function alertFleetIncident(
         );
       }
     }
-    // No second phone push when GPS has no match — main emergency ntfy already covers shop
   }
 
   return { nearby, channels };
