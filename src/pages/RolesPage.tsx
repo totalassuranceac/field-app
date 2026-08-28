@@ -26,7 +26,7 @@ const FEATURES: Array<{ path: string; label: string; need?: string; note?: strin
   { path: "/issues", label: "Repairs", need: "reportIssues" },
   { path: "/vehicles", label: "Vehicles", need: "manageVehicles" },
   { path: "/yard", label: "Yard walk", need: "manageVehicles" },
-  { path: "/live", label: "Live map", note: "Most non-field" },
+  { path: "/live", label: "Live map", need: "viewLiveMap" },
   { path: "/alerts", label: "Mileage flags", need: "viewAlerts" },
   { path: "/reports", label: "Reports", need: "viewReports" },
   { path: "/handbook", label: "Employee handbook", note: "Everyone" },

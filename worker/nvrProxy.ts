@@ -11,6 +11,238 @@ import { getSetting } from "./audit";
 
 export type NvrChannel = { id: number; label: string; enabled?: boolean };
 
+/** Unified tile for Security cameras (NVR channel or Wyze). */
+export type CamTile = {
+  key: string;
+  source: "nvr" | "wyze";
+  id: string;
+  label: string;
+  enabled: boolean;
+  /** Wyze RTSP stream name on the bridge (when source=wyze) */
+  rtsp_path?: string;
+};
+
+export type WyzeCamConfig = {
+  id: string;
+  label: string;
+  rtsp_path: string;
+  enabled?: boolean;
+};
+
+/**
+ * Wyze tiles stay off by default until Bridge is installed on the shop PC.
+ * Enabling them with no Bridge used to spawn hung ffmpeg and freeze NVR too.
+ * Turn on via PUT /warehouse-cameras/config { wyze_cameras: [...] enabled:true }
+ * after install-wyze-bridge.ps1 succeeds.
+ */
+const DEFAULT_WYZE_CAMERAS: WyzeCamConfig[] = [
+  { id: "warehouse", label: "Warehouse", rtsp_path: "warehouse", enabled: false },
+  { id: "autoshop", label: "Autoshop", rtsp_path: "autoshop", enabled: false },
+  { id: "autoshop-2", label: "Autoshop 2", rtsp_path: "autoshop-2", enabled: false },
+];
+
+export async function resolveWyzeCameras(db: D1Database): Promise<WyzeCamConfig[]> {
+  try {
+    const raw = await getSetting(db, "warehouse_wyze_cameras", "");
+    if (raw) {
+      const parsed = JSON.parse(raw) as WyzeCamConfig[];
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed
+          .filter((c) => c && c.id)
+          .map((c) => ({
+            id: String(c.id).trim(),
+            label: String(c.label || c.id).trim(),
+            rtsp_path: String(c.rtsp_path || c.id).trim(),
+            enabled: c.enabled !== false,
+          }));
+      }
+    }
+  } catch {
+    /* defaults */
+  }
+  return DEFAULT_WYZE_CAMERAS.map((c) => ({ ...c }));
+}
+
+export async function buildCameraTiles(
+  env: Env,
+  db: D1Database
+): Promise<{ nvr: Awaited<ReturnType<typeof resolveNvrConfig>>; cameras: CamTile[] }> {
+  const nvr = await resolveNvrConfig(env, db);
+  const cameras: CamTile[] = [];
+  for (const ch of nvr.channels) {
+    if (ch.enabled === false) continue;
+    cameras.push({
+      key: `nvr:${ch.id}`,
+      source: "nvr",
+      id: String(ch.id),
+      label: ch.label || `Camera ${ch.id}`,
+      enabled: true,
+    });
+  }
+  const wyze = await resolveWyzeCameras(db);
+  for (const w of wyze) {
+    if (w.enabled === false) continue;
+    cameras.push({
+      key: `wyze:${w.id}`,
+      source: "wyze",
+      id: w.id,
+      label: w.label,
+      enabled: true,
+      rtsp_path: w.rtsp_path,
+    });
+  }
+  return { nvr, cameras };
+}
+
+export function parseCameraKey(
+  raw: string
+): { source: "nvr" | "wyze"; id: string } | null {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  if (s.startsWith("wyze:")) {
+    const id = s.slice(5).trim();
+    return id ? { source: "wyze", id } : null;
+  }
+  if (s.startsWith("nvr:")) {
+    const id = s.slice(4).trim();
+    return id ? { source: "nvr", id } : null;
+  }
+  // Legacy numeric channel
+  if (/^\d+$/.test(s)) return { source: "nvr", id: s };
+  // Bare wyze id
+  return { source: "wyze", id: s };
+}
+
+/** JPEG from shop proxy: /fieldapp/wyze/snapshot?cam= */
+export async function fetchWyzeSnapshot(
+  baseUrl: string,
+  camId: string
+): Promise<
+  | { ok: true; bytes: ArrayBuffer; contentType: string }
+  | { ok: false; error: string; status?: number }
+> {
+  if (!baseUrl) return { ok: false, error: "Camera tunnel not configured" };
+  const base = baseUrl.replace(/\/+$/, "");
+  const url = `${base}/fieldapp/wyze/snapshot?cam=${encodeURIComponent(camId)}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "image/jpeg,*/*", "User-Agent": "FieldApp-Wyze/1.0" },
+      redirect: "follow",
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      let msg = t.replace(/\s+/g, " ").slice(0, 220);
+      try {
+        const j = JSON.parse(t) as { error?: string };
+        if (j.error) msg = j.error;
+      } catch {
+        /* keep */
+      }
+      // Old media proxy / bare NVR returns HTML 404 for /fieldapp/wyze/*
+      if (
+        res.status === 404 ||
+        /Document Error|Access Error|Not Found|Can't open URL/i.test(msg) ||
+        /<!DOCTYPE|<html/i.test(t)
+      ) {
+        msg =
+          "Wyze path not on shop PC yet. Update nvr-media-proxy.mjs and start Wyze Bridge (install-wyze-bridge.ps1), then restart the media proxy.";
+      }
+      return {
+        ok: false,
+        status: res.status,
+        error: msg || `Wyze snapshot failed (${res.status})`,
+      };
+    }
+    const bytes = await res.arrayBuffer();
+    if (bytes.byteLength < 200) return { ok: false, error: "Empty Wyze snapshot" };
+    const u8 = new Uint8Array(bytes);
+    // JPEG magic FF D8 — reject HTML/JSON mistaken for images
+    if (!(u8[0] === 0xff && u8[1] === 0xd8)) {
+      const head = new TextDecoder().decode(u8.slice(0, 80));
+      if (/<!DOCTYPE|<html|Document Error|Not Found/i.test(head)) {
+        return {
+          ok: false,
+          status: 502,
+          error:
+            "Wyze path not on shop PC yet. Update nvr-media-proxy.mjs and start Wyze Bridge, then restart the media proxy.",
+        };
+      }
+      return {
+        ok: false,
+        error:
+          "Wyze snapshot was not JPEG — shop media proxy may be outdated or Wyze Bridge is offline.",
+      };
+    }
+    return {
+      ok: true,
+      bytes,
+      contentType: res.headers.get("Content-Type") || "image/jpeg",
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        e instanceof Error
+          ? e.message
+          : "Wyze proxy unreachable — is the tunnel + Wyze Bridge running?",
+    };
+  }
+}
+
+/** MP4 clip from shop proxy ring-buffer or near-live capture */
+export async function fetchWyzeClipMp4(
+  baseUrl: string,
+  camId: string,
+  start: Date,
+  end: Date
+): Promise<
+  | { ok: true; bytes: ArrayBuffer; contentType: string }
+  | { ok: false; error: string; status?: number }
+> {
+  if (!baseUrl) return { ok: false, error: "Camera tunnel not configured" };
+  const base = baseUrl.replace(/\/+$/, "");
+  const qs = new URLSearchParams({
+    cam: camId,
+    start: start.toISOString(),
+    end: end.toISOString(),
+  });
+  const url = `${base}/fieldapp/wyze/clip?${qs.toString()}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "video/mp4,*/*", "User-Agent": "FieldApp-Wyze/1.0" },
+      redirect: "follow",
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      let msg = t.replace(/\s+/g, " ").slice(0, 260);
+      try {
+        const j = JSON.parse(t) as { error?: string };
+        if (j.error) msg = j.error;
+      } catch {
+        /* keep */
+      }
+      return {
+        ok: false,
+        status: res.status,
+        error: msg || `Wyze clip failed (${res.status})`,
+      };
+    }
+    const bytes = await res.arrayBuffer();
+    if (bytes.byteLength < 500) return { ok: false, error: "Empty Wyze clip" };
+    return { ok: true, bytes, contentType: "video/mp4" };
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        e instanceof Error
+          ? e.message
+          : "Wyze clip proxy unreachable — is the tunnel + media proxy running?",
+    };
+  }
+}
+
 /** MD5 for HTTP Digest (nodejs_compat on Workers). */
 function md5(str: string): string {
   return createHash("md5").update(str, "utf8").digest("hex");
@@ -661,9 +893,18 @@ export async function fetchNvrClipMp4(
   baseUrl: string,
   channelId: number,
   start: Date,
-  end: Date
+  end: Date,
+  mode: "at" | "prev" | "next" = "at"
 ): Promise<
-  | { ok: true; bytes: ArrayBuffer; contentType: string }
+  | {
+      ok: true;
+      bytes: ArrayBuffer;
+      contentType: string;
+      clipStart?: string | null;
+      clipEnd?: string | null;
+      gapSec?: number;
+      mode?: string;
+    }
   | { ok: false; error: string; status?: number }
 > {
   if (!baseUrl) return { ok: false, error: "NVR not configured" };
@@ -684,6 +925,7 @@ export async function fetchNvrClipMp4(
     channel: String(channelId),
     start: utcIsoZ(start),
     end: utcIsoZ(end),
+    mode: mode === "prev" || mode === "next" ? mode : "at",
   });
   const url = `${base}/fieldapp/clip?${qs.toString()}`;
 
@@ -737,7 +979,16 @@ export async function fetchNvrClipMp4(
         return { ok: false, error: "Proxy did not return MP4 video" };
       }
     }
-    return { ok: true, bytes, contentType: "video/mp4" };
+    const gapRaw = res.headers.get("X-Clip-Gap-Sec");
+    return {
+      ok: true,
+      bytes,
+      contentType: "video/mp4",
+      clipStart: res.headers.get("X-Clip-Start"),
+      clipEnd: res.headers.get("X-Clip-End"),
+      gapSec: gapRaw != null && gapRaw !== "" ? Number(gapRaw) : 0,
+      mode: res.headers.get("X-Clip-Mode") || mode,
+    };
   } catch (e) {
     return {
       ok: false,
@@ -745,6 +996,191 @@ export async function fetchNvrClipMp4(
         e instanceof Error
           ? e.message
           : "Clip proxy unreachable — is the NVR tunnel/media proxy running?",
+    };
+  }
+}
+
+export type NvrSegmentListItem = {
+  start: string;
+  end: string;
+  durationSec: number;
+};
+
+/**
+ * List motion clips near a time via shop media proxy (/fieldapp/segments).
+ * Same search path as clip download (local-as-Z), so times match playback.
+ */
+export async function fetchNvrSegmentsList(
+  baseUrl: string,
+  channelId: number,
+  around: Date,
+  padMin = 60
+): Promise<
+  | {
+      ok: true;
+      around: string;
+      padMin: number;
+      nearestIndex: number;
+      nearestGapSec: number | null;
+      segments: NvrSegmentListItem[];
+    }
+  | { ok: false; error: string; status?: number }
+> {
+  if (!baseUrl) return { ok: false, error: "NVR not configured" };
+  if (!Number.isFinite(channelId) || channelId < 1 || channelId > 64) {
+    return { ok: false, error: "Invalid channel" };
+  }
+  if (Number.isNaN(around.getTime())) {
+    return { ok: false, error: "Invalid around time" };
+  }
+  const pad = Math.min(360, Math.max(5, Number(padMin) || 60));
+  const base = baseUrl.replace(/\/+$/, "");
+  const qs = new URLSearchParams({
+    channel: String(channelId),
+    around: utcIsoZ(around),
+    padMin: String(pad),
+  });
+  const url = `${base}/fieldapp/segments?${qs.toString()}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "FieldApp-Segments/1.0",
+      },
+      redirect: "follow",
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let err = text.replace(/\s+/g, " ").slice(0, 200);
+      try {
+        const j = JSON.parse(text) as { error?: string };
+        if (j.error) err = j.error;
+      } catch {
+        /* keep */
+      }
+      if (res.status === 404 && /Document Error|Can't open URL|<!DOCTYPE/i.test(text)) {
+        return {
+          ok: false,
+          status: 404,
+          error:
+            "Shop camera proxy is outdated (no /fieldapp/segments). Update nvr-media-proxy on the NUC and restart it.",
+        };
+      }
+      return { ok: false, status: res.status, error: err || `Segments failed (${res.status})` };
+    }
+    const data = JSON.parse(text) as {
+      around?: string;
+      padMin?: number;
+      nearestIndex?: number;
+      nearestGapSec?: number | null;
+      segments?: NvrSegmentListItem[];
+    };
+    return {
+      ok: true,
+      around: data.around || around.toISOString(),
+      padMin: data.padMin ?? pad,
+      nearestIndex: typeof data.nearestIndex === "number" ? data.nearestIndex : -1,
+      nearestGapSec:
+        data.nearestGapSec == null || Number.isNaN(Number(data.nearestGapSec))
+          ? null
+          : Number(data.nearestGapSec),
+      segments: Array.isArray(data.segments) ? data.segments : [],
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        e instanceof Error
+          ? e.message
+          : "Segments proxy unreachable — is the NVR tunnel/media proxy running?",
+    };
+  }
+}
+
+/** List Wyze ring-buffer segments near a time via shop media proxy. */
+export async function fetchWyzeSegmentsList(
+  baseUrl: string,
+  camId: string,
+  around: Date,
+  padMin = 60
+): Promise<
+  | {
+      ok: true;
+      around: string;
+      padMin: number;
+      nearestIndex: number;
+      nearestGapSec: number | null;
+      segments: NvrSegmentListItem[];
+    }
+  | { ok: false; error: string; status?: number }
+> {
+  if (!baseUrl) return { ok: false, error: "NVR not configured" };
+  if (!camId) return { ok: false, error: "Missing cam id" };
+  if (Number.isNaN(around.getTime())) {
+    return { ok: false, error: "Invalid around time" };
+  }
+  const pad = Math.min(360, Math.max(5, Number(padMin) || 60));
+  const base = baseUrl.replace(/\/+$/, "");
+  const qs = new URLSearchParams({
+    cam: camId,
+    around: utcIsoZ(around),
+    padMin: String(pad),
+  });
+  const url = `${base}/fieldapp/wyze/segments?${qs.toString()}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "FieldApp-Segments/1.0",
+      },
+      redirect: "follow",
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let err = text.replace(/\s+/g, " ").slice(0, 200);
+      try {
+        const j = JSON.parse(text) as { error?: string };
+        if (j.error) err = j.error;
+      } catch {
+        /* keep */
+      }
+      if (res.status === 404 && /Document Error|Can't open URL|<!DOCTYPE/i.test(text)) {
+        return {
+          ok: false,
+          status: 404,
+          error:
+            "Shop camera proxy is outdated. Update nvr-media-proxy on the NUC and restart it.",
+        };
+      }
+      return { ok: false, status: res.status, error: err || `Wyze segments failed (${res.status})` };
+    }
+    const data = JSON.parse(text) as {
+      around?: string;
+      padMin?: number;
+      nearestIndex?: number;
+      nearestGapSec?: number | null;
+      segments?: NvrSegmentListItem[];
+    };
+    return {
+      ok: true,
+      around: data.around || around.toISOString(),
+      padMin: data.padMin ?? pad,
+      nearestIndex: typeof data.nearestIndex === "number" ? data.nearestIndex : -1,
+      nearestGapSec:
+        data.nearestGapSec == null || Number.isNaN(Number(data.nearestGapSec))
+          ? null
+          : Number(data.nearestGapSec),
+      segments: Array.isArray(data.segments) ? data.segments : [],
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        e instanceof Error
+          ? e.message
+          : "Wyze segments unreachable — is the media proxy running?",
     };
   }
 }

@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, OfflineQueuedError } from "../api";
+import { api, ApiError, OfflineQueuedError } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
@@ -11,13 +11,17 @@ import {
   type NameplateParseResult,
   type OcrHints,
 } from "../nameplateOcr";
+import {
+  isCompressorPartName,
+  suggestWarrantyParts,
+} from "../warrantyPartSuggestions";
 
 /**
  * Flow:
  * Dropped off → Claim submitted → (optional) Return to vendor [→ Delivered]
  * → Approved | Rejected (credit decision only — closes the log)
  * OR → Not a warranty — sent to job (closes when it was never a warranty claim)
- * Return to vendor is an OPEN status, never the same as rejected.
+ * Submitted claims stay quiet for 3 working days, then need approve/reject follow-up.
  */
 type WStatus =
   | "dropped_off"
@@ -53,8 +57,12 @@ interface Warranty {
   credit_amount?: number | null;
   tracking_number?: string | null;
   days_open: number;
+  working_days_since_submit?: number;
+  needs_attention?: boolean;
   overdue?: boolean;
   urgent?: boolean;
+  claim_submitted_by_user_id?: number | null;
+  claim_submitted_by_name?: string | null;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -152,6 +160,7 @@ export function WarrantiesPage() {
     user?.role === "mechanic";
 
   const [list, setList] = useState<Warranty[]>([]);
+  const [attentionCount, setAttentionCount] = useState(0);
   const [filter, setFilter] = useState<"open" | "all" | "vendor" | "decided">("open");
   const [searchQ, setSearchQ] = useState("");
   const [error, setError] = useState("");
@@ -159,7 +168,10 @@ export function WarrantiesPage() {
   const [busy, setBusy] = useState(false);
   /** Per-claim vendor credit form draft */
   const [vendorDraft, setVendorDraft] = useState<
-    Record<number, { rma: string; tracking: string; credit: string }>
+    Record<
+      number,
+      { rma: string; tracking: string; credit: string; vendor: string; address: string }
+    >
   >({});
   /** Per-claim status note draft (append) */
   const [noteDraft, setNoteDraft] = useState<Record<number, string>>({});
@@ -179,6 +191,24 @@ export function WarrantiesPage() {
   const [nameplateScanning, setNameplateScanning] = useState(false);
   const [nameplateNote, setNameplateNote] = useState("");
   const [lastNameplateOcr, setLastNameplateOcr] = useState<NameplateParseResult | null>(null);
+  const [partSuggestOpen, setPartSuggestOpen] = useState(false);
+  const [compressorSealsOk, setCompressorSealsOk] = useState(false);
+  const [oldCompSerial, setOldCompSerial] = useState("");
+  const [newCompSerial, setNewCompSerial] = useState("");
+  const [oldCompFile, setOldCompFile] = useState<File | null>(null);
+  const [oldCompPreview, setOldCompPreview] = useState<string | null>(null);
+  const [newCompFile, setNewCompFile] = useState<File | null>(null);
+  const [newCompPreview, setNewCompPreview] = useState<string | null>(null);
+
+  const isCompressor = isCompressorPartName(partName);
+  const learnedPartNames = useMemo(() => {
+    const names = list.map((w) => w.part_name).filter(Boolean);
+    return [...new Set(names)];
+  }, [list]);
+  const partSuggestions = useMemo(
+    () => suggestWarrantyParts(partName, learnedPartNames, 6),
+    [partName, learnedPartNames]
+  );
   const [ocrHints, setOcrHints] = useState<OcrHints | null>(null);
   /** After drop-off: show log # to write on the box */
   const [writeOnBox, setWriteOnBox] = useState<string | null>(null);
@@ -190,9 +220,33 @@ export function WarrantiesPage() {
     else if (filter === "vendor") params.set("status", "vendor");
     if (searchQ.trim()) params.set("q", searchQ.trim());
     const qs = params.toString();
-    const d = await api<{ warranties: Warranty[] }>(`/warranties${qs ? `?${qs}` : ""}`);
+    const d = await api<{
+      warranties: Warranty[];
+      attention_count?: number;
+      open_count?: number;
+    }>(`/warranties${qs ? `?${qs}` : ""}`);
     setList(d.warranties || []);
+    if (typeof d.attention_count === "number") setAttentionCount(d.attention_count);
   }
+
+  const sections = useMemo(() => {
+    const dropped: Warranty[] = [];
+    const submitted: Warranty[] = [];
+    const vendor: Warranty[] = [];
+    const approved: Warranty[] = [];
+    const rejected: Warranty[] = [];
+    const other: Warranty[] = [];
+    for (const w of list) {
+      const st = normalizeStatus(String(w.status));
+      if (st === "dropped_off") dropped.push(w);
+      else if (st === "claim_submitted") submitted.push(w);
+      else if (st === "return_to_vendor" || st === "delivered") vendor.push(w);
+      else if (st === "approved") approved.push(w);
+      else if (st === "rejected") rejected.push(w);
+      else other.push(w);
+    }
+    return { dropped, submitted, vendor, approved, rejected, other };
+  }, [list]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -218,6 +272,18 @@ export function WarrantiesPage() {
     };
   }, [nameplatePreview]);
 
+  useEffect(() => {
+    return () => {
+      if (oldCompPreview) URL.revokeObjectURL(oldCompPreview);
+    };
+  }, [oldCompPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (newCompPreview) URL.revokeObjectURL(newCompPreview);
+    };
+  }, [newCompPreview]);
+
   function onPhotoPick(file: File | null) {
     if (photoPreview) URL.revokeObjectURL(photoPreview);
     setPhotoFile(file);
@@ -231,6 +297,18 @@ export function WarrantiesPage() {
     setNameplateNote("");
     setLastNameplateOcr(null);
     if (file) void runNameplateOcr(file);
+  }
+
+  function onOldCompPick(file: File | null) {
+    if (oldCompPreview) URL.revokeObjectURL(oldCompPreview);
+    setOldCompFile(file);
+    setOldCompPreview(file ? URL.createObjectURL(file) : null);
+  }
+
+  function onNewCompPick(file: File | null) {
+    if (newCompPreview) URL.revokeObjectURL(newCompPreview);
+    setNewCompFile(file);
+    setNewCompPreview(file ? URL.createObjectURL(file) : null);
   }
 
   async function runNameplateOcr(file: File) {
@@ -251,11 +329,14 @@ export function WarrantiesPage() {
         parsed.serial_number && `S/N ${parsed.serial_number}`,
       ].filter(Boolean);
       if (parts.length) {
+        const brand = parsed.manufacturer ? ` · ${parsed.manufacturer}` : "";
         setNameplateNote(
-          `Filled from nameplate (${parsed.confidence}): ${parts.join(" · ")}. Check & fix if needed.`
+          `Filled from nameplate (${parsed.confidence}${brand}): ${parts.join(" · ")}. Fix anything wrong — corrections teach the app.`
         );
       } else {
-        setNameplateNote("Couldn’t read clearly — type model & serial from the nameplate.");
+        setNameplateNote(
+          "Couldn’t read clearly — type model & serial from the nameplate (that still helps the app learn)."
+        );
       }
     } catch {
       setNameplateNote("Scan unavailable — type model & serial from the nameplate.");
@@ -277,6 +358,12 @@ export function WarrantiesPage() {
     onNameplatePick(null);
     setLastNameplateOcr(null);
     setNameplateNote("");
+    setPartSuggestOpen(false);
+    setCompressorSealsOk(false);
+    setOldCompSerial("");
+    setNewCompSerial("");
+    onOldCompPick(null);
+    onNewCompPick(null);
   }
 
   async function submitDropoff(e: FormEvent) {
@@ -299,69 +386,77 @@ export function WarrantiesPage() {
       );
       return;
     }
+    if (isCompressorPartName(partName)) {
+      if (!compressorSealsOk) {
+        setError(
+          "Compressors must have seals intact — vendors reject leaking / unsealed compressors. Check the box to confirm."
+        );
+        return;
+      }
+      if (!oldCompFile) {
+        setError("Compressor warranty needs a photo of the OLD compressor serial number.");
+        return;
+      }
+      if (!newCompFile) {
+        setError("Compressor warranty needs a photo of the NEW compressor serial number.");
+        return;
+      }
+    }
     setBusy(true);
     setError("");
     setOk("");
     try {
-      // Single multipart request = photos + form stay together if queued offline
-      const compressed = await compressPhoto(photoFile);
-      const fd = new FormData();
-      fd.append("part_name", partName);
-      if (partCode) fd.append("part_code", partCode);
-      fd.append("model_number", model.trim());
-      fd.append("serial_number", serial.trim());
-      if (address) fd.append("service_address", address);
-      if (customer) fd.append("customer_name", customer);
-      if (vendor) fd.append("vendor_name", vendor);
-      if (notes) fd.append("notes", notes);
-      fd.append("photo", compressed, compressed.name || "dropoff.jpg");
-      if (nameplateFile) {
-        const np = await compressPhoto(nameplateFile);
-        fd.append("nameplate", np, np.name || "nameplate.jpg");
-      }
-      if (lastNameplateOcr) {
-        // Brand-specific learning key (e.g. nameplate_lennox for M/N + S/N layout)
-        const plateKey = lastNameplateOcr.manufacturer
-          ? `nameplate_${lastNameplateOcr.manufacturer}`
-          : "nameplate";
-        fd.append(
-          "ocr_feedback",
-          JSON.stringify({
-            raw_text: lastNameplateOcr.raw_text,
-            ocr: {
-              model_number: lastNameplateOcr.model_number,
-              serial_number: lastNameplateOcr.serial_number,
-              store_number: plateKey,
-            },
-            final: {
-              model_number: model.trim(),
-              serial_number: serial.trim(),
-              store_number: plateKey,
-            },
-          })
-        );
-      }
-
-      const r = await api<{
-        warranty: { log_number: string };
-        write_on_box?: string;
-        instruction?: string;
-      }>("/warranties", {
-        method: "POST",
-        body: fd,
-      });
-      const logNo = r.write_on_box || r.warranty.log_number;
-      setWriteOnBox(logNo);
-      setOk(
-        `Logged ${logNo}. Write this number on the box now, then leave the part where you photographed.`
-      );
-      resetForm();
-      loadOcrHints((path) => api(path)).then(setOcrHints).catch(() => null);
-      await load();
+      await postDropoff({ confirmDuplicate: false });
     } catch (err) {
       if (err instanceof OfflineQueuedError) {
         setOk(err.message);
         resetForm();
+      } else if (err instanceof ApiError && err.status === 409) {
+        const data = err.data as {
+          error?: string;
+          message?: string;
+          matches?: Array<{
+            log_number: string;
+            part_name: string;
+            status: string;
+            dropped_off_at: string;
+            serial_number?: string | null;
+          }>;
+        } | null;
+        if (data?.error === "duplicate_serial" && data.matches?.length) {
+          const lines = data.matches
+            .slice(0, 5)
+            .map((m) => {
+              const when = String(m.dropped_off_at || "").replace("T", " ").slice(0, 16);
+              return `• ${m.log_number} — ${m.part_name} (${m.status.replace(/_/g, " ")}${when ? ` · ${when}` : ""})`;
+            })
+            .join("\n");
+          const okDup = window.confirm(
+            `Possible duplicate warranty\n\n` +
+              `Equipment serial “${serial.trim()}” already has ${data.matches.length} claim(s) in the last 30 days:\n\n` +
+              `${lines}\n\n` +
+              `Only continue if this is a NEW claim (not the same drop-off logged twice).\n\n` +
+              `Create another warranty log anyway?`
+          );
+          if (okDup) {
+            try {
+              await postDropoff({ confirmDuplicate: true });
+            } catch (err2) {
+              if (err2 instanceof OfflineQueuedError) {
+                setOk(err2.message);
+                resetForm();
+              } else {
+                setError(err2 instanceof Error ? err2.message : "Could not log drop-off");
+              }
+            }
+          } else {
+            setError(
+              "Not saved — same serial already logged recently. Fix the existing claim or confirm if this is truly new."
+            );
+          }
+        } else {
+          setError(data?.message || err.message || "Could not log drop-off");
+        }
       } else {
         setError(err instanceof Error ? err.message : "Could not log drop-off");
       }
@@ -370,36 +465,116 @@ export function WarrantiesPage() {
     }
   }
 
+  async function postDropoff(opts: { confirmDuplicate: boolean }) {
+    if (!photoFile) throw new Error("Photo required");
+    // Single multipart request = photos + form stay together if queued offline
+    const compressed = await compressPhoto(photoFile);
+    const fd = new FormData();
+    fd.append("part_name", partName);
+    if (partCode) fd.append("part_code", partCode);
+    fd.append("model_number", model.trim());
+    fd.append("serial_number", serial.trim());
+    if (address) fd.append("service_address", address);
+    if (customer) fd.append("customer_name", customer);
+    if (vendor) fd.append("vendor_name", vendor);
+    if (notes) fd.append("notes", notes);
+    if (opts.confirmDuplicate) fd.append("confirm_duplicate", "1");
+    const compressor = isCompressorPartName(partName);
+    if (compressor) {
+      fd.append("compressor_seals_ok", "1");
+      if (oldCompSerial.trim()) fd.append("old_compressor_serial", oldCompSerial.trim());
+      if (newCompSerial.trim()) fd.append("new_compressor_serial", newCompSerial.trim());
+    }
+    fd.append("photo", compressed, compressed.name || "dropoff.jpg");
+    if (nameplateFile) {
+      const np = await compressPhoto(nameplateFile);
+      fd.append("nameplate", np, np.name || "nameplate.jpg");
+    }
+    if (compressor && oldCompFile) {
+      const oc = await compressPhoto(oldCompFile);
+      fd.append("old_compressor_photo", oc, oc.name || "old-compressor.jpg");
+    }
+    if (compressor && newCompFile) {
+      const nc = await compressPhoto(newCompFile);
+      fd.append("new_compressor_photo", nc, nc.name || "new-compressor.jpg");
+    }
+    // Always send OCR feedback when we scanned — corrections teach brand layouts
+    if (lastNameplateOcr) {
+      const plateKey = lastNameplateOcr.manufacturer
+        ? `nameplate_${lastNameplateOcr.manufacturer}`
+        : "nameplate";
+      fd.append(
+        "ocr_feedback",
+        JSON.stringify({
+          raw_text: lastNameplateOcr.raw_text,
+          ocr: {
+            model_number: lastNameplateOcr.model_number,
+            serial_number: lastNameplateOcr.serial_number,
+            store_number: plateKey,
+          },
+          final: {
+            model_number: model.trim(),
+            serial_number: serial.trim(),
+            store_number: plateKey,
+          },
+        })
+      );
+    }
+
+    const r = await api<{
+      warranty: { log_number: string };
+      write_on_box?: string;
+      instruction?: string;
+    }>("/warranties", {
+      method: "POST",
+      body: fd,
+    });
+    const logNo = r.write_on_box || r.warranty.log_number;
+    setWriteOnBox(logNo);
+    setOk(
+      `Logged ${logNo}. Write this number on the box now, then leave the part where you photographed.`
+    );
+    resetForm();
+    loadOcrHints((path) => api(path)).then(setOcrHints).catch(() => null);
+    await load();
+  }
+
   function draftFor(w: Warranty) {
     return (
       vendorDraft[w.id] || {
         rma: w.rma_number || "",
         tracking: w.tracking_number || "",
         credit: w.credit_amount != null ? String(w.credit_amount) : "",
+        vendor: w.vendor_name || "",
+        address: w.service_address || "",
       }
     );
+  }
+
+  function patchDraft(
+    id: number,
+    w: Warranty,
+    patch: Partial<{ rma: string; tracking: string; credit: string; vendor: string; address: string }>
+  ) {
+    setVendorDraft((p) => ({
+      ...p,
+      [id]: { ...draftFor(w), ...patch },
+    }));
   }
 
   async function setStatus(id: number, status: WStatus, extra?: Record<string, unknown>) {
     setBusy(true);
     setError("");
     try {
-      const draft = vendorDraft[id];
+      const w = list.find((x) => x.id === id);
+      const d = w ? draftFor(w) : vendorDraft[id];
       const body: Record<string, unknown> = { status, ...extra };
-      if (draft) {
-        if (draft.rma.trim()) body.rma_number = draft.rma.trim();
-        if (draft.tracking.trim()) body.tracking_number = draft.tracking.trim();
-        if (draft.credit.trim() !== "") body.credit_amount = Number(draft.credit);
-      }
-      // On return_to_vendor always send current draft tracking/rma if any
-      if (status === "return_to_vendor" || status === "delivered" || status === "approved") {
-        const w = list.find((x) => x.id === id);
-        const d = w ? draftFor(w) : draft;
-        if (d?.rma.trim()) body.rma_number = d.rma.trim();
-        if (d?.tracking.trim()) body.tracking_number = d.tracking.trim();
-        if (d?.credit.trim() !== "" && d?.credit != null) {
-          body.credit_amount = Number(d.credit);
-        }
+      if (d) {
+        if (d.rma.trim()) body.rma_number = d.rma.trim();
+        if (d.tracking.trim()) body.tracking_number = d.tracking.trim();
+        if (d.credit.trim() !== "") body.credit_amount = Number(d.credit);
+        if (d.vendor.trim()) body.vendor_name = d.vendor.trim();
+        if (d.address.trim()) body.service_address = d.address.trim();
       }
       await api(`/warranties/${id}`, {
         method: "PATCH",
@@ -441,15 +616,17 @@ export function WarrantiesPage() {
       await api(`/warranties/${w.id}`, {
         method: "PATCH",
         body: JSON.stringify({
+          vendor_name: d.vendor.trim() || null,
+          service_address: d.address.trim() || null,
           rma_number: d.rma.trim() || null,
           tracking_number: d.tracking.trim() || null,
           credit_amount: d.credit.trim() === "" ? null : Number(d.credit),
         }),
       });
-      setOk(`Saved vendor details for ${w.log_number}`);
+      setOk(`Saved claim details for ${w.log_number}`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save vendor details");
+      setError(err instanceof Error ? err.message : "Could not save claim details");
     } finally {
       setBusy(false);
     }
@@ -510,10 +687,11 @@ export function WarrantiesPage() {
         <div>
           <h1>Warranties</h1>
           <p>
-            Drop off warranty parts with a photo of where you left them · you get a log number to{" "}
-            <strong>write on the box</strong> · track claims · return to vendor when needed · use{" "}
-            <strong>Remove from open list</strong> when it is not a warranty claim (no reason
-            needed).
+            Stages: <strong>Dropped off</strong> → <strong>Claim submitted</strong> →{" "}
+            <strong>Approved / Rejected</strong>. Submitted claims stay quiet for{" "}
+            <strong>3 working days</strong>, then need approve/reject. Dashboard focus only counts
+            dropped-off parts plus aging submitted claims
+            {attentionCount > 0 ? ` · ${attentionCount} need attention now` : ""}.
           </p>
         </div>
       </div>
@@ -565,7 +743,9 @@ export function WarrantiesPage() {
               </span>
               <div>
                 <h3 className="warranty-section-title">Equipment this part came off</h3>
-                <p className="warranty-section-sub">Furnace, condenser, air handler nameplate</p>
+                <p className="warranty-section-sub">
+                  Furnace, condenser, or air handler nameplate — photo helps the app learn each brand
+                </p>
               </div>
             </header>
             <div className="warranty-ms-row">
@@ -597,7 +777,11 @@ export function WarrantiesPage() {
                 <PhotoCapture
                   compact
                   label="Nameplate"
-                  hint={nameplateScanning ? "Reading…" : "Optional — auto-fills above"}
+                  hint={
+                    nameplateScanning
+                      ? "Reading…"
+                      : "Recommended — auto-fills M/N & S/N; fixes teach the app"
+                  }
                   tip={PHOTO_TIPS.nameplate}
                   previewUrl={nameplatePreview}
                   onPick={(f) => onNameplatePick(f)}
@@ -625,14 +809,39 @@ export function WarrantiesPage() {
               </div>
             </header>
             <div className="warranty-part-fields">
-              <label>
+              <label className="warranty-part-suggest-wrap">
                 Part name *
                 <input
                   value={partName}
-                  onChange={(e) => setPartName(e.target.value)}
+                  onChange={(e) => {
+                    setPartName(e.target.value);
+                    setPartSuggestOpen(true);
+                  }}
+                  onFocus={() => setPartSuggestOpen(true)}
+                  onBlur={() => window.setTimeout(() => setPartSuggestOpen(false), 180)}
                   required
-                  placeholder="e.g. Contactor 40A"
+                  placeholder="Start typing — e.g. comp → Compressor"
+                  autoComplete="off"
                 />
+                {partSuggestOpen && partSuggestions.length > 0 ? (
+                  <ul className="warranty-part-suggest" role="listbox">
+                    {partSuggestions.map((s) => (
+                      <li key={s}>
+                        <button
+                          type="button"
+                          className="warranty-part-suggest-item"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setPartName(s);
+                            setPartSuggestOpen(false);
+                          }}
+                        >
+                          {s}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </label>
               <label>
                 Part code
@@ -643,6 +852,73 @@ export function WarrantiesPage() {
                 />
               </label>
             </div>
+
+            {isCompressor ? (
+              <div className="warranty-compressor-box">
+                <h4 className="warranty-compressor-title">Compressor requirements</h4>
+                <p className="muted warranty-compressor-lead">
+                  Vendors reject compressors that are not sealed (leakage). Also photograph{" "}
+                  <strong>both</strong> serial numbers — old (failed) and new (replacement).
+                </p>
+                <label className="warranty-compressor-check">
+                  <input
+                    type="checkbox"
+                    checked={compressorSealsOk}
+                    onChange={(e) => setCompressorSealsOk(e.target.checked)}
+                  />
+                  <span>
+                    I confirm the compressor <strong>seals are sealed / intact</strong> (not open to
+                    atmosphere)
+                  </span>
+                </label>
+                <div className="warranty-compressor-photos">
+                  <div>
+                    <label>
+                      Old compressor S/N (optional type)
+                      <input
+                        value={oldCompSerial}
+                        onChange={(e) => setOldCompSerial(e.target.value)}
+                        placeholder="Failed compressor serial"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <PhotoCapture
+                      compact
+                      required
+                      label="Old compressor S/N"
+                      hint={!oldCompFile ? "Required" : "Attached"}
+                      tip="Clear photo of the serial on the failed compressor"
+                      previewUrl={oldCompPreview}
+                      onPick={(f) => onOldCompPick(f)}
+                      onClear={() => onOldCompPick(null)}
+                      disabled={busy}
+                    />
+                  </div>
+                  <div>
+                    <label>
+                      New compressor S/N (optional type)
+                      <input
+                        value={newCompSerial}
+                        onChange={(e) => setNewCompSerial(e.target.value)}
+                        placeholder="Replacement compressor serial"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <PhotoCapture
+                      compact
+                      required
+                      label="New compressor S/N"
+                      hint={!newCompFile ? "Required" : "Attached"}
+                      tip="Clear photo of the serial on the new compressor"
+                      previewUrl={newCompPreview}
+                      onPick={(f) => onNewCompPick(f)}
+                      onClear={() => onNewCompPick(null)}
+                      disabled={busy}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </section>
 
           {/* 3 — Job context */}
@@ -722,23 +998,30 @@ export function WarrantiesPage() {
         <button
           className="btn warranty-submit-btn"
           type="submit"
-          disabled={busy || nameplateScanning || !photoFile}
+          disabled={
+            busy ||
+            nameplateScanning ||
+            !photoFile ||
+            (isCompressor && (!compressorSealsOk || !oldCompFile || !newCompFile))
+          }
         >
           {busy
             ? "Saving…"
             : nameplateScanning
               ? "Still reading nameplate…"
-              : "Drop off & notify warehouse"}
+              : isCompressor && (!compressorSealsOk || !oldCompFile || !newCompFile)
+                ? "Finish compressor checklist…"
+                : "Drop off & notify warehouse"}
         </button>
       </form>
 
       <div className="warranty-filters no-print">
         {(
           [
-            ["open", "Open"],
+            ["open", "Open (by stage)"],
             ["vendor", "Waiting on vendor"],
             ["all", "All"],
-            ["decided", "Closed"],
+            ["decided", "Approved / Rejected"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -755,8 +1038,8 @@ export function WarrantiesPage() {
           value={searchQ}
           onChange={(e) => setSearchQ(e.target.value)}
           placeholder="Search…"
-          title="Search log #, address, part, vendor, RMA"
-          aria-label="Search warranties"
+          title="Search log #, job address, part, vendor, RMA"
+          aria-label="Search warranties by address, vendor, log #, part"
         />
       </div>
       {searchQ.trim() ? (
@@ -765,8 +1048,8 @@ export function WarrantiesPage() {
         </p>
       ) : null}
 
-      <LogList className="warranty-list" empty="No warranties in this filter.">
-        {list.map((w) => {
+      {(() => {
+        function renderWarrantyItem(w: Warranty) {
           const st = normalizeStatus(String(w.status));
           const tone =
             st === "approved"
@@ -780,6 +1063,16 @@ export function WarrantiesPage() {
                     : w.overdue
                       ? "overdue"
                       : undefined;
+          const ageLabel = (() => {
+            if (!isOpenStatus(st)) return "";
+            if (st === "dropped_off") {
+              return ` · ${w.days_open}d${w.urgent ? "!" : w.overdue ? " aging" : ""}`;
+            }
+            const wd = w.working_days_since_submit ?? 0;
+            if (wd >= 3) return ` · ${wd} working days since submit — needs approval`;
+            if (wd > 0) return ` · submitted ${wd} working day${wd === 1 ? "" : "s"} ago`;
+            return " · submitted (quiet until 3 working days)";
+          })();
           return (
             <LogItem
               key={w.id}
@@ -788,32 +1081,51 @@ export function WarrantiesPage() {
               summary={
                 <>
                   <strong className="warranty-log">{w.log_number}</strong>
-                  <span
-                    className={`log-item-badge warranty-status-${st}`}
-                  >
+                  <span className={`log-item-badge warranty-status-${st}`}>
                     {STATUS_LABEL[st] || st}
                   </span>
                   <span className="log-item-meta">
                     {w.part_name}
-                    {w.days_open != null && isOpenStatus(st)
-                      ? ` · ${w.days_open}d${w.urgent ? "!" : w.overdue ? " aging" : ""}`
-                      : ""}
-                    {latestNotePreview(w.notes)
-                      ? ` · ${latestNotePreview(w.notes)}`
-                      : ""}
+                    {ageLabel}
+                  </span>
+                  <span className="warranty-summary-facts">
+                    <span className="warranty-fact">
+                      <span className="warranty-fact-label">Address</span>{" "}
+                      {w.service_address?.trim() || (
+                        <em className="warranty-fact-missing">not set</em>
+                      )}
+                    </span>
+                    <span className="warranty-fact">
+                      <span className="warranty-fact-label">Vendor</span>{" "}
+                      {w.vendor_name?.trim() || (
+                        <em className="warranty-fact-missing">not set</em>
+                      )}
+                    </span>
                   </span>
                 </>
               }
             >
+              <div className="warranty-key-facts">
+                <div className="warranty-key-fact">
+                  <span className="warranty-fact-label">Job address</span>
+                  <strong>{w.service_address?.trim() || "—"}</strong>
+                </div>
+                <div className="warranty-key-fact">
+                  <span className="warranty-fact-label">Vendor claim submitted to</span>
+                  <strong>{w.vendor_name?.trim() || "—"}</strong>
+                </div>
+                {w.customer_name?.trim() ? (
+                  <div className="warranty-key-fact">
+                    <span className="warranty-fact-label">Customer</span>
+                    <strong>{w.customer_name.trim()}</strong>
+                  </div>
+                ) : null}
+              </div>
               <div className="warranty-meta muted">
                 {w.part_code ? `Part ${w.part_code} · ` : ""}
                 {w.model_number ? `Unit model ${w.model_number}` : ""}
                 {w.serial_number ? ` · Unit S/N ${w.serial_number}` : ""}
               </div>
-              {w.service_address ? <div className="warranty-meta">{w.service_address}</div> : null}
-              {w.customer_name ? (
-                <div className="muted">Customer: {w.customer_name}</div>
-              ) : null}
 
               <div className="warranty-status-notes">
                 <div className="warranty-status-notes-label">Status notes</div>
@@ -904,58 +1216,66 @@ export function WarrantiesPage() {
                   : ""}
                 {w.processed_by_name ? ` by ${w.processed_by_name}` : ""}
               </div>
-              {canProcess &&
-                (st === "return_to_vendor" || st === "delivered" || st === "claim_submitted") && (
+              {canProcess && isOpenStatus(st) && (
                   <div className="warranty-vendor-fields">
-                    <label>
-                      RMA #
+                    <label className="span-2">
+                      Job address
                       <input
-                        value={draftFor(w).rma}
-                        onChange={(e) =>
-                          setVendorDraft((p) => ({
-                            ...p,
-                            [w.id]: { ...draftFor(w), rma: e.target.value },
-                          }))
-                        }
-                        placeholder="Vendor RMA"
+                        value={draftFor(w).address}
+                        onChange={(e) => patchDraft(w.id, w, { address: e.target.value })}
+                        placeholder="e.g. 5804 S Oso Parkway"
+                        autoComplete="street-address"
                       />
                     </label>
-                    <label>
-                      Tracking #
+                    <label className="span-2">
+                      Vendor (claim submitted to)
                       <input
-                        value={draftFor(w).tracking}
-                        onChange={(e) =>
-                          setVendorDraft((p) => ({
-                            ...p,
-                            [w.id]: { ...draftFor(w), tracking: e.target.value },
-                          }))
-                        }
-                        placeholder="Shipment tracking"
+                        value={draftFor(w).vendor}
+                        onChange={(e) => patchDraft(w.id, w, { vendor: e.target.value })}
+                        placeholder="e.g. Lennox, Carrier, Johnstone"
+                        autoComplete="organization"
                       />
                     </label>
-                    <label>
-                      Credit $
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={draftFor(w).credit}
-                        onChange={(e) =>
-                          setVendorDraft((p) => ({
-                            ...p,
-                            [w.id]: { ...draftFor(w), credit: e.target.value },
-                          }))
-                        }
-                        placeholder="0.00"
-                      />
-                    </label>
+                    {(st === "return_to_vendor" ||
+                      st === "delivered" ||
+                      st === "claim_submitted") && (
+                      <>
+                        <label>
+                          RMA #
+                          <input
+                            value={draftFor(w).rma}
+                            onChange={(e) => patchDraft(w.id, w, { rma: e.target.value })}
+                            placeholder="Vendor RMA"
+                          />
+                        </label>
+                        <label>
+                          Tracking #
+                          <input
+                            value={draftFor(w).tracking}
+                            onChange={(e) => patchDraft(w.id, w, { tracking: e.target.value })}
+                            placeholder="Shipment tracking"
+                          />
+                        </label>
+                        <label>
+                          Credit $
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={draftFor(w).credit}
+                            onChange={(e) => patchDraft(w.id, w, { credit: e.target.value })}
+                            placeholder="0.00"
+                          />
+                        </label>
+                      </>
+                    )}
                     <button
                       type="button"
-                      className="btn ghost btn-sm"
+                      className="btn secondary btn-sm"
                       disabled={busy}
                       onClick={() => void saveVendorDetails(w)}
                     >
-                      Save details
+                      Save address &amp; vendor
                     </button>
                   </div>
                 )}
@@ -1035,8 +1355,109 @@ export function WarrantiesPage() {
               )}
             </LogItem>
           );
-        })}
-      </LogList>
+        }
+
+        function section(
+          title: string,
+          hint: string,
+          rows: Warranty[],
+          opts?: { emptyOk?: boolean }
+        ): ReactNode {
+          if (!rows.length && !opts?.emptyOk) return null;
+          return (
+            <section className="warranty-stage" key={title}>
+              <div className="warranty-stage-head">
+                <h2 className="warranty-stage-title">
+                  {title}
+                  <span className="warranty-stage-count">{rows.length}</span>
+                </h2>
+                <p className="muted warranty-stage-hint">{hint}</p>
+              </div>
+              {rows.length ? (
+                <LogList className="warranty-list">{rows.map(renderWarrantyItem)}</LogList>
+              ) : (
+                <p className="muted warranty-stage-empty">None</p>
+              )}
+            </section>
+          );
+        }
+
+        if (!list.length) {
+          return (
+            <LogList className="warranty-list" empty="No warranties in this filter.">
+              {[]}
+            </LogList>
+          );
+        }
+
+        if (filter === "open" && !searchQ.trim()) {
+          return (
+            <div className="warranty-stages">
+              {section(
+                "1 · Dropped off",
+                "Parts at the shop — file the vendor claim, then mark Claim submitted.",
+                sections.dropped,
+                { emptyOk: true }
+              )}
+              {section(
+                "2 · Claim submitted",
+                "Your part is done until 3 working days pass — then approve or reject the credit.",
+                sections.submitted,
+                { emptyOk: true }
+              )}
+              {section(
+                "3 · Waiting on vendor",
+                "Returned / delivered to vendor — still open until approved or rejected.",
+                sections.vendor,
+                { emptyOk: true }
+              )}
+            </div>
+          );
+        }
+
+        if (filter === "decided" && !searchQ.trim()) {
+          return (
+            <div className="warranty-stages">
+              {section("Approved", "Credit approved — closed.", sections.approved, {
+                emptyOk: true,
+              })}
+              {section("Rejected", "Claim rejected — closed.", sections.rejected, {
+                emptyOk: true,
+              })}
+              {section(
+                "Removed · not a claim",
+                "Taken off the open list (shelves / another job).",
+                sections.other,
+                { emptyOk: true }
+              )}
+            </div>
+          );
+        }
+
+        if (filter === "all" && !searchQ.trim()) {
+          return (
+            <div className="warranty-stages">
+              {section("Dropped off", "Needs claim filed.", sections.dropped)}
+              {section(
+                "Claim submitted",
+                "Quiet until 3 working days, then approval.",
+                sections.submitted
+              )}
+              {section("Waiting on vendor", "Return / delivered.", sections.vendor)}
+              {section("Approved", "Closed.", sections.approved)}
+              {section("Rejected", "Closed.", sections.rejected)}
+              {section("Other closed", "Not a warranty claim.", sections.other)}
+            </div>
+          );
+        }
+
+        // Vendor tab or search — flat list
+        return (
+          <LogList className="warranty-list" empty="No warranties in this filter.">
+            {list.map(renderWarrantyItem)}
+          </LogList>
+        );
+      })()}
     </div>
   );
 }

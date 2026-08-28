@@ -177,6 +177,47 @@ export async function usersByRoles(db: D1Database, roles: string[]): Promise<num
   return [...ids];
 }
 
+/**
+ * Individuals who should hear fleet / shop vehicle alerts (not role broadcasts):
+ * Chuck Dickerson (fleet manager) + Chris Marroquin (owner, stay in the know).
+ * Resolves by username / display name so it survives role tweaks.
+ */
+export async function coreFleetNotifyIds(db: D1Database): Promise<number[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id, username, display_name FROM users
+       WHERE active = 1
+         AND (
+           lower(IFNULL(username, '')) IN ('chuckdickerson', 'admin', 'chrismarroquin')
+           OR lower(IFNULL(display_name, '')) LIKE 'chuck dickerson%'
+           OR lower(IFNULL(display_name, '')) LIKE 'chris marroquin%'
+         )`
+    )
+    .all<{ id: number; username: string | null; display_name: string }>();
+  const ids = [...new Set((rows.results || []).map((r) => r.id))];
+  if (ids.length) return ids;
+  // Fallback: sole mechanic + admins if names don't match yet
+  const fallback = await usersByRoles(db, ["mechanic", "admin"]);
+  return fallback;
+}
+
+/** User ids linked to employee ids (active logins only). */
+export async function userIdsForEmployees(
+  db: D1Database,
+  employeeIds: number[]
+): Promise<number[]> {
+  const ids = [...new Set(employeeIds.filter((id) => id > 0))];
+  if (!ids.length) return [];
+  const ph = ids.map(() => "?").join(",");
+  const rows = await db
+    .prepare(
+      `SELECT id FROM users WHERE active = 1 AND employee_id IN (${ph})`
+    )
+    .bind(...ids)
+    .all<{ id: number }>();
+  return [...new Set((rows.results || []).map((r) => r.id))];
+}
+
 function normPersonName(s: string): string {
   return s
     .toLowerCase()

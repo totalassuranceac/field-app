@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, ApiError, can, isViewer, Role, roleLabel } from "../api";
 import { useAuth } from "../auth";
 
@@ -27,8 +28,31 @@ interface Employee {
   active: number;
   phone: string | null;
   notes: string | null;
+  hire_date?: string | null;
+  birthday_md?: string | null;
+  separation_date?: string | null;
+  original_hire_date?: string | null;
   rides_with_employee_id?: number | null;
 }
+
+/** Local YYYY-MM-DD for date inputs */
+function todayIsoLocal(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Days between two YYYY-MM-DD values (to − from). */
+function daysBetweenLocal(fromIso: string, toIso: string): number {
+  const a = Date.parse(fromIso + "T12:00:00");
+  const b = Date.parse(toIso + "T12:00:00");
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.round((b - a) / 86400000);
+}
+
+const PTO_REHIRE_BREAK_DAYS = 90;
 
 interface AdminUser {
   id: number;
@@ -159,6 +183,8 @@ export function AdminPage() {
 
   const [empName, setEmpName] = useState("");
   const [empPhone, setEmpPhone] = useState("");
+  const [empHireDate, setEmpHireDate] = useState("");
+  const [empBirthday, setEmpBirthday] = useState("");
   /** Pending “is this the same person?” when name/phone matches an existing login */
   const [empMatch, setEmpMatch] = useState<MatchPayload | null>(null);
   const [uName, setUName] = useState("");
@@ -177,7 +203,13 @@ export function AdminPage() {
   const [editEmp, setEditEmp] = useState<Employee | null>(null);
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
+  const [editHireDate, setEditHireDate] = useState("");
+  const [editBirthday, setEditBirthday] = useState("");
   const [editActive, setEditActive] = useState(true);
+  const [editSeparationDate, setEditSeparationDate] = useState("");
+  const [editRehireDate, setEditRehireDate] = useState("");
+  const [editForceKeepPto, setEditForceKeepPto] = useState(false);
+  const [editForceRestartPto, setEditForceRestartPto] = useState(false);
   const [editRidesWith, setEditRidesWith] = useState("");
   const [editLinkedUserId, setEditLinkedUserId] = useState("");
   const [editRole, setEditRole] = useState<Role>("driver");
@@ -328,7 +360,13 @@ export function AdminPage() {
     setEditEmp(emp);
     setEditName(emp.name);
     setEditPhone(emp.phone ? formatPhone(emp.phone) : "");
+    setEditHireDate(emp.hire_date || "");
+    setEditBirthday(emp.birthday_md || "");
     setEditActive(emp.active !== 0);
+    setEditSeparationDate(emp.separation_date || todayIsoLocal());
+    setEditRehireDate(todayIsoLocal());
+    setEditForceKeepPto(false);
+    setEditForceRestartPto(false);
     setEditRidesWith(
       emp.rides_with_employee_id ? String(emp.rides_with_employee_id) : ""
     );
@@ -369,18 +407,45 @@ export function AdminPage() {
     setError("");
     setOk("");
     try {
-      // 1) Employee record
-      await api(`/employees/${editEmp.id}`, {
+      const wasActive = editEmp.active !== 0;
+      const willBeActive = editActive;
+      const isLeaving = wasActive && !willBeActive;
+      const isRehire = !wasActive && willBeActive;
+
+      // 1) Employee record (+ leave / rehire PTO policy)
+      const patchRes = await api<{
+        employee?: Employee;
+        pto_transition?: {
+          restart: boolean;
+          gap_days: number | null;
+          message: string;
+        } | null;
+      }>(`/employees/${editEmp.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: editName.trim(),
           phone: formatPhone(editPhone) || null,
+          hire_date: editHireDate.trim() || null,
+          birthday_md: editBirthday.trim() || null,
           active: editActive,
           rides_with_employee_id: editRidesWith ? Number(editRidesWith) : null,
+          ...(isLeaving
+            ? { separation_date: editSeparationDate.trim() || todayIsoLocal() }
+            : {}),
+          ...(isRehire
+            ? {
+                rehire_date: editRehireDate.trim() || todayIsoLocal(),
+                force_keep_pto: editForceKeepPto || undefined,
+                force_restart_pto: editForceRestartPto || undefined,
+              }
+            : {}),
         }),
       });
 
       let note = `Saved ${editName.trim()}`;
+      if (patchRes.pto_transition?.message) {
+        note += ` · ${patchRes.pto_transition.message}`;
+      }
       if (editRidesWith) {
         const partner = employees.find((e) => e.id === Number(editRidesWith));
         if (partner) note += ` · rides with ${partner.name}`;
@@ -565,6 +630,8 @@ export function AdminPage() {
         body: JSON.stringify({
           name,
           phone: formatPhone(empPhone.trim()) || null,
+          hire_date: empHireDate.trim() || null,
+          birthday_md: empBirthday.trim() || null,
           force: opts.force === true,
           link_user_id: opts.link_user_id ?? undefined,
         }),
@@ -572,6 +639,8 @@ export function AdminPage() {
       setEmpMatch(null);
       setEmpName("");
       setEmpPhone("");
+      setEmpHireDate("");
+      setEmpBirthday("");
       await load();
       if (res.linked_user) {
         showFeedback(
@@ -954,6 +1023,16 @@ export function AdminPage() {
               : "Employee list and unit assignments"}
           </p>
         </div>
+        {canEditPeople ? (
+          <div className="admin-header-actions">
+            <Link className="btn secondary" to="/termination">
+              Separation notice
+            </Link>
+            <Link className="btn" to="/onboarding">
+              New hire packet
+            </Link>
+          </div>
+        ) : null}
       </div>
       <div ref={feedbackRef}>
         {error && (
@@ -1099,6 +1178,22 @@ export function AdminPage() {
                   }}
                   placeholder="(361) 555-0100"
                   inputMode="tel"
+                />
+              </label>
+              <label>
+                Hire date
+                <input
+                  type="date"
+                  value={empHireDate}
+                  onChange={(e) => setEmpHireDate(e.target.value)}
+                />
+              </label>
+              <label>
+                Birthday (MM-DD)
+                <input
+                  value={empBirthday}
+                  onChange={(e) => setEmpBirthday(e.target.value)}
+                  placeholder="01-27"
                 />
               </label>
               <button className="btn" type="submit" disabled={busyEmp}>
@@ -1254,6 +1349,14 @@ export function AdminPage() {
                     Close
                   </button>
                 </div>
+                <p style={{ margin: "0 0 0.65rem" }}>
+                  <Link
+                    className="btn secondary btn-sm"
+                    to={`/termination?emp=${editEmp.id}`}
+                  >
+                    Print separation notice
+                  </Link>
+                </p>
                 <form className="form admin-compact-form" onSubmit={(ev) => void saveEmployeeEdit(ev)}>
                   <label>
                     Name
@@ -1276,14 +1379,144 @@ export function AdminPage() {
                       inputMode="tel"
                     />
                   </label>
+                  <label>
+                    Hire date{" "}
+                    <span className="muted" style={{ fontWeight: 400 }}>
+                      (PTO / years of service start)
+                    </span>
+                    <input
+                      type="date"
+                      value={editHireDate}
+                      onChange={(e) => setEditHireDate(e.target.value)}
+                      disabled={editEmp.active === 0}
+                      title={
+                        editEmp.active === 0
+                          ? "Set the rehire date below when reactivating — hire date updates from the 90-day rule"
+                          : undefined
+                      }
+                    />
+                  </label>
+                  {editEmp.original_hire_date &&
+                  editEmp.original_hire_date !== editEmp.hire_date ? (
+                    <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                      Original hire (before rehire restart): {editEmp.original_hire_date}
+                    </p>
+                  ) : null}
+                  {editEmp.active === 0 && editEmp.separation_date ? (
+                    <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                      Separated: {editEmp.separation_date}
+                      {editRehireDate
+                        ? ` · ${daysBetweenLocal(editEmp.separation_date, editRehireDate)} day(s) away as of rehire date`
+                        : ""}
+                    </p>
+                  ) : null}
+                  <label>
+                    Birthday (MM-DD)
+                    <input
+                      value={editBirthday}
+                      onChange={(e) => setEditBirthday(e.target.value)}
+                      placeholder="01-27"
+                    />
+                  </label>
                   <label className="emp-edit-check">
                     <input
                       type="checkbox"
                       checked={editActive}
-                      onChange={(e) => setEditActive(e.target.checked)}
+                      onChange={(e) => {
+                        const next = e.target.checked;
+                        setEditActive(next);
+                        if (!next && editEmp.active !== 0) {
+                          setEditSeparationDate(
+                            editEmp.separation_date || todayIsoLocal()
+                          );
+                        }
+                        if (next && editEmp.active === 0) {
+                          setEditRehireDate(todayIsoLocal());
+                          setEditForceKeepPto(false);
+                          setEditForceRestartPto(false);
+                        }
+                      }}
                     />
                     Active on employee list
                   </label>
+                  {/* Leaving: capture last day */}
+                  {editEmp.active !== 0 && !editActive ? (
+                    <label>
+                      Last day / separation date
+                      <input
+                        type="date"
+                        value={editSeparationDate}
+                        onChange={(e) => setEditSeparationDate(e.target.value)}
+                        required
+                      />
+                      <span className="muted" style={{ fontSize: "0.8rem" }}>
+                        If they return after {PTO_REHIRE_BREAK_DAYS}+ days, PTO restarts from the
+                        new hire date. Under {PTO_REHIRE_BREAK_DAYS} days keeps prior seniority.
+                      </span>
+                    </label>
+                  ) : null}
+                  {/* Returning: rehire date + policy preview */}
+                  {editEmp.active === 0 && editActive ? (
+                    <div className="emp-rehire-box">
+                      <label>
+                        Rehire / return date
+                        <input
+                          type="date"
+                          value={editRehireDate}
+                          onChange={(e) => setEditRehireDate(e.target.value)}
+                          required
+                        />
+                      </label>
+                      {(() => {
+                        const sep = editEmp.separation_date || "";
+                        const gap = sep
+                          ? daysBetweenLocal(sep, editRehireDate || todayIsoLocal())
+                          : null;
+                        const willRestart = editForceRestartPto
+                          ? true
+                          : editForceKeepPto
+                            ? false
+                            : gap == null || gap >= PTO_REHIRE_BREAK_DAYS;
+                        return (
+                          <p
+                            className="muted"
+                            style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}
+                          >
+                            {sep
+                              ? `Away ${gap} day(s) (need ${PTO_REHIRE_BREAK_DAYS}+ to auto-restart). `
+                              : `No separation date on file — default is restart PTO. `}
+                            <strong>
+                              {willRestart
+                                ? `PTO will restart from ${editRehireDate || todayIsoLocal()} (banks → 0 until first anniversary).`
+                                : "PTO seniority and banks will be kept."}
+                            </strong>
+                          </p>
+                        );
+                      })()}
+                      <label className="emp-edit-check">
+                        <input
+                          type="checkbox"
+                          checked={editForceKeepPto}
+                          onChange={(e) => {
+                            setEditForceKeepPto(e.target.checked);
+                            if (e.target.checked) setEditForceRestartPto(false);
+                          }}
+                        />
+                        Keep prior hire date &amp; PTO (override)
+                      </label>
+                      <label className="emp-edit-check">
+                        <input
+                          type="checkbox"
+                          checked={editForceRestartPto}
+                          onChange={(e) => {
+                            setEditForceRestartPto(e.target.checked);
+                            if (e.target.checked) setEditForceKeepPto(false);
+                          }}
+                        />
+                        Force restart PTO from rehire date (override)
+                      </label>
+                    </div>
+                  ) : null}
                   <label>
                     Rides with (helper / tech pair)
                     <select

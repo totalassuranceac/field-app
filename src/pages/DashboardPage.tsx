@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, can, roleLabel } from "../api";
 import { useAuth } from "../auth";
+import { MyShortcuts } from "../components/MyShortcuts";
 import { OfficeHome } from "./OfficeHome";
 
 interface Dash {
@@ -527,8 +528,8 @@ export function DashboardPage() {
         {
           key: "warranties",
           value: s.warranties,
-          label: "Open warranties",
-          hint: "Parts dropped off to process",
+          label: "Warranties need action",
+          hint: "Dropped off to claim, or submitted 3+ working days (approve/reject)",
           to: "/warranties",
           tone: toneForCount(s.warranties, 1, 5),
           weight: 9,
@@ -660,8 +661,8 @@ export function DashboardPage() {
       {
         key: "warranties",
         value: s.warranties,
-        label: "Open warranties",
-        hint: "Drop-offs waiting to process",
+        label: "Warranties need action",
+        hint: "Dropped off to claim, or submitted 3+ working days (approve/reject)",
         to: "/warranties",
         tone: toneForCount(s.warranties, 1, 5),
         weight: 13,
@@ -761,7 +762,6 @@ export function DashboardPage() {
         { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo shelf · write log # on box" },
         { to: "/issues", icon: "🔧", title: "Report a problem", hint: "Something’s wrong on the truck" },
         { to: "/assets", icon: "🧰", title: "My truck gear", hint: "Bottles & tools" },
-        { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations" },
       ];
     }
     if (isWarehouse) {
@@ -901,6 +901,8 @@ export function DashboardPage() {
       )}
 
       {handbookBanner}
+
+      <MyShortcuts />
 
       {/* Role-specific at-a-glance board */}
       <FocusGrid

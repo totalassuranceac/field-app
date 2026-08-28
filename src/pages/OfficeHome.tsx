@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import { MyShortcuts } from "../components/MyShortcuts";
 
 
 interface SchedIssue {
@@ -93,6 +94,8 @@ export function OfficeHome() {
           </Link>
         </div>
       )}
+
+      <MyShortcuts />
 
       <div className="office-actions">
         <Link to="/live" className="office-action primary">

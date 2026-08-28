@@ -43,6 +43,8 @@ export function storeKeyFrom(store: string | null | undefined, rawText?: string 
     if (/\bRHEEM\b|\bRUUD\b/.test(raw)) return "nameplate_rheem";
     return "nameplate";
   }
+  // Dump / landfill tickets
+  if (s === "dump" || s.startsWith("dump_")) return s.slice(0, 48) || "dump";
   // Explicit parts-purchase vendor keys (parts_johnstone, etc.)
   if (s.startsWith("parts_")) return s.slice(0, 48);
   if (/stripe/.test(s) || /\b2221\b/.test(s) || /\b2213\b/.test(s) || /\b2215\b/.test(s)) {
@@ -167,6 +169,19 @@ function findLineWithValue(raw: string, value: string): string | null {
 
 function lineLabelHint(line: string, field?: string): string | null {
   const labels = [
+    // Dump / scale tickets (check before generic TOTAL)
+    "NET WEIGHT",
+    "NET WT",
+    "NET WGT",
+    "NET LBS",
+    "NET POUNDS",
+    "GROSS WT",
+    "GROSS WEIGHT",
+    "TARE WT",
+    "TARE WEIGHT",
+    "AMOUNT DUE",
+    "TOTAL AMOUNT",
+    "TICKET TOTAL",
     "UNLD CR",
     "UNLD",
     "DSL",
@@ -204,18 +219,30 @@ function lineLabelHint(line: string, field?: string): string | null {
     "MURPHY EXPRESS",
     "MURPHY USA",
     "MURPHY",
+    "NET",
+    "GROSS",
+    "TARE",
   ];
   const u = line.toUpperCase();
   for (const l of labels) {
     if (u.includes(l.toUpperCase())) {
-      // For gallons, prefer product labels over TOTAL / price
-      if (field === "gallons" && /TOTAL|SUBTOTAL|CREDIT|USD|VISA|ENTRY|CONTACT|PRICE|SITE|MURPHY|CARD AMT/i.test(l)) {
+      // For gallons (also dump net weight), prefer product / NET labels over TOTAL / price
+      if (
+        field === "gallons" &&
+        /TOTAL|SUBTOTAL|CREDIT|USD|VISA|ENTRY|CONTACT|PRICE|SITE|MURPHY|CARD AMT|AMOUNT DUE|TICKET TOTAL/i.test(
+          l
+        ) &&
+        !/^NET/i.test(l)
+      ) {
         continue;
       }
-      if (field === "card_last4" && /UNLD|DSL|SELF|GALLON|QTY|AMOUNT|ST#|SITE|MURPHY|PRICE|FUEL TOTAL|NET TOTAL/i.test(l)) {
+      if (field === "card_last4" && /UNLD|DSL|SELF|GALLON|QTY|AMOUNT|ST#|SITE|MURPHY|PRICE|FUEL TOTAL|NET TOTAL|NET WT|GROSS|TARE/i.test(l)) {
         continue;
       }
-      if (field === "store_number" && /VISA|GALLON|QTY|CARD AMT|ENTRY/i.test(l)) {
+      if (field === "store_number" && /VISA|GALLON|QTY|CARD AMT|ENTRY|NET WT|GROSS|TARE/i.test(l)) {
+        continue;
+      }
+      if (field === "total_cost" && /NET WT|NET WEIGHT|GROSS|TARE|GALLON|QTY|UNLD|SELF/i.test(l)) {
         continue;
       }
       return l;
@@ -224,9 +251,15 @@ function lineLabelHint(line: string, field?: string): string | null {
   // Gallons often on lines with "xx.xxxG" or Murphy QTY(GAL)
   if (field === "gallons" && /\d+\.\d{2,4}\s*G\b/i.test(line)) return "QTY_G";
   if (field === "gallons" && /QTY\s*\(\s*GAL/i.test(line)) return "QTY(GAL)";
+  // Dump net weight lines
+  if (field === "gallons" && /NET/i.test(line) && /([\d,]+\.?\d*)/.test(line)) return "NET WT";
   // Card mask lines
   if (field === "card_last4" && /[*xX#•·]{4,}\s*\d{4}/.test(line)) return "PAN_MASK";
   return null;
+}
+
+function isDumpStoreKey(storeKey: string): boolean {
+  return storeKey === "dump" || storeKey.startsWith("dump_");
 }
 
 function neighborLabels(
@@ -319,10 +352,13 @@ export async function recordOcrFeedback(
     // Substitution memory (same wrong OCR → same fix)
     if (ocrS) {
       await bumpMemory(db, storeKey, field, "sub", ocrS, correct);
-      await bumpMemory(db, "global", field, "sub", ocrS, correct);
+      // Do not pollute global fuel learning with dump weight/total misreads
+      if (!isDumpStoreKey(storeKey)) {
+        await bumpMemory(db, "global", field, "sub", ocrS, correct);
+      }
 
-      // Gallons: OCR took $/gal — teach reject_ppg + prefer G token
-      if (field === "gallons") {
+      // Gallons: OCR took $/gal — teach reject_ppg + prefer G token (fuel only)
+      if (field === "gallons" && !isDumpStoreKey(storeKey)) {
         const wrongN = parseFloat(ocrS);
         const rightN = parseFloat(correct);
         if (!Number.isNaN(wrongN) && looksLikePpg(wrongN) && rightN > 8) {
@@ -335,6 +371,21 @@ export async function recordOcrFeedback(
           await bumpMemory(db, storeKey, field, "pattern", "prefer_qty_gal", "1");
           await bumpMemory(db, "global", field, "pattern", "prefer_qty_gal", "1");
           await bumpMemory(db, storeKey, field, "line_label", "QTY(GAL)", "1");
+        }
+      }
+      // Dump tickets: teach WHERE weight/total live (labels), not the specific numbers
+      if (isDumpStoreKey(storeKey) && (field === "gallons" || field === "total_cost")) {
+        if (field === "gallons") {
+          for (const lab of ["NET WT", "NET WEIGHT", "NET WGT", "NET LBS", "NET"]) {
+            await bumpMemory(db, "dump", field, "line_label", lab, "1");
+          }
+          await bumpMemory(db, "dump", field, "pattern", "layout:dump_net", "1");
+        }
+        if (field === "total_cost") {
+          for (const lab of ["TOTAL AMOUNT", "AMOUNT DUE", "TICKET TOTAL", "TOTAL", "AMOUNT"]) {
+            await bumpMemory(db, "dump", field, "line_label", lab, "1");
+          }
+          await bumpMemory(db, "dump", field, "pattern", "layout:dump_total", "1");
         }
       }
       // Card: SITE/store number misread as last4 (Murphy 7738 → 0058)
@@ -405,7 +456,12 @@ export async function recordOcrFeedback(
         await bumpMemory(db, storeKey, field, "pattern", "after:VISA", "1");
         await bumpMemory(db, storeKey, field, "pattern", "before:ENTRY METHOD", "1");
       }
-      if (field === "gallons") {
+      if (field === "gallons" && isDumpStoreKey(storeKey)) {
+        for (const lab of ["NET WT", "NET WEIGHT", "NET WGT", "NET LBS", "NET"]) {
+          await bumpMemory(db, "dump", field, "line_label", lab, "1");
+        }
+        await bumpMemory(db, "dump", field, "pattern", "layout:dump_net", "1");
+      } else if (field === "gallons") {
         await bumpMemory(db, storeKey, field, "pattern", "prefer_G_token", "1");
         await bumpMemory(db, "global", field, "pattern", "prefer_G_token", "1");
         if (storeKey.startsWith("murphy") || /murphy|qty\s*\(\s*gal/i.test(rawText || "")) {
@@ -413,6 +469,12 @@ export async function recordOcrFeedback(
           await bumpMemory(db, "global", field, "pattern", "prefer_qty_gal", "1");
           await bumpMemory(db, storeKey, field, "line_label", "QTY(GAL)", "1");
         }
+      }
+      if (field === "total_cost" && isDumpStoreKey(storeKey)) {
+        for (const lab of ["TOTAL AMOUNT", "AMOUNT DUE", "TICKET TOTAL", "TOTAL", "AMOUNT"]) {
+          await bumpMemory(db, "dump", field, "line_label", lab, "1");
+        }
+        await bumpMemory(db, "dump", field, "pattern", "layout:dump_total", "1");
       }
       if (field === "store_number") {
         await bumpMemory(db, storeKey, field, "pattern", "prefer_st_hash", "1");
@@ -439,11 +501,15 @@ export async function recordOcrFeedback(
         }
         // Only store known value for card/store when it appears under a mask/pattern
         // (avoid auto-filling wrong fleet cards on every receipt)
+        // Dump tickets: weight/total change every trip — never memorize the number itself
         if (field === "card_last4") {
           if (/[*xX#•·]{3,}/.test(line) || /\d{4}/.test(line)) {
             await bumpMemory(db, storeKey, field, "value_in_text", correct, correct);
           }
-        } else if (field === "gallons" || field === "total_cost") {
+        } else if (
+          (field === "gallons" || field === "total_cost") &&
+          !isDumpStoreKey(storeKey)
+        ) {
           await bumpMemory(db, storeKey, field, "value_in_text", correct, correct);
         } else if (field === "store_number") {
           await bumpMemory(db, storeKey, field, "value_in_text", correct, correct);
@@ -452,11 +518,15 @@ export async function recordOcrFeedback(
         const neigh = neighborLabels(rawText, correct);
         for (const lab of neigh.after.slice(0, 4)) {
           await bumpMemory(db, storeKey, field, "pattern", `after:${lab}`, "1");
-          await bumpMemory(db, "global", field, "pattern", `after:${lab}`, "1");
+          if (!isDumpStoreKey(storeKey)) {
+            await bumpMemory(db, "global", field, "pattern", `after:${lab}`, "1");
+          }
         }
         for (const lab of neigh.before.slice(0, 4)) {
           await bumpMemory(db, storeKey, field, "pattern", `before:${lab}`, "1");
-          await bumpMemory(db, "global", field, "pattern", `before:${lab}`, "1");
+          if (!isDumpStoreKey(storeKey)) {
+            await bumpMemory(db, "global", field, "pattern", `before:${lab}`, "1");
+          }
         }
       } else if (field === "card_last4" && /^\d{4}$/.test(correct)) {
         // Value might be in OCR with spaces/noise — still reinforce pan patterns

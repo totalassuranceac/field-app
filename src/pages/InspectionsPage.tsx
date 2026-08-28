@@ -59,6 +59,20 @@ function formatCheckWhen(dateStr: string | null | undefined): string {
 
 type StatusTone = "good" | "repair" | "down";
 
+/**
+ * Still belongs on the “need a check” list?
+ * A clean “All good” (pass within 7 days) clears the unit — open shop tickets
+ * no longer keep it stuck on this weekly list.
+ */
+function stillNeedsWeeklyCheck(w: WeeklyRow): boolean {
+  if (w.status === "out_of_service") return true;
+  // Failed this week’s check — keep visible until they re-check / clear it
+  if (w.last_status === "fail") return true;
+  // Due or never checked
+  if (w.due || !w.last_check_date) return true;
+  return false;
+}
+
 /** Green = working, yellow = needs attention / due, red = down */
 function unitStatus(w: WeeklyRow): { tone: StatusTone; label: string; detail: string } {
   if (w.status === "out_of_service") {
@@ -67,15 +81,15 @@ function unitStatus(w: WeeklyRow): { tone: StatusTone; label: string; detail: st
   if (w.last_status === "fail") {
     return { tone: "down", label: "Down", detail: "Failed last check" };
   }
-  if ((w.open_repairs && w.open_repairs > 0) || w.last_status === "pass_with_notes") {
-    return { tone: "repair", label: "Repair", detail: "Has open issues" };
-  }
   if (w.due || !w.last_check_date) {
     return {
       tone: "repair",
       label: "Due",
       detail: w.last_check_date ? "Weekly check due" : "Never checked — do it now",
     };
+  }
+  if (w.last_status === "pass_with_notes") {
+    return { tone: "repair", label: "Repair", detail: "Checked — repair noted" };
   }
   if (w.last_status === "pass" || !w.last_status) {
     return { tone: "good", label: "Good", detail: "Working order" };
@@ -207,27 +221,25 @@ export function InspectionsPage() {
     const needsCheck: WeeklyRow[] = [];
     const done: WeeklyRow[] = [];
     for (const w of weekly) {
-      if (isMyUnit(w, user)) {
-        mine.push(w);
+      if (!stillNeedsWeeklyCheck(w)) {
+        done.push(w);
         continue;
       }
-      const st = unitStatus(w);
-      if (st.tone !== "good" || w.due || !w.last_check_date) {
-        needsCheck.push(w);
-      } else {
-        done.push(w);
-      }
+      if (isMyUnit(w, user)) mine.push(w);
+      else needsCheck.push(w);
     }
-    // Mine that also need a check rise first within mine
-    mine.sort((a, b) => {
-      const ad = unitStatus(a).tone === "good" && !a.due ? 1 : 0;
-      const bd = unitStatus(b).tone === "good" && !b.due ? 1 : 0;
-      return ad - bd || a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
-    });
-    const sortUnits = (a: WeeklyRow, b: WeeklyRow) =>
-      a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
+    const sortUnits = (a: WeeklyRow, b: WeeklyRow) => {
+      const rank = (x: WeeklyRow) => {
+        const st = unitStatus(x);
+        if (st.tone === "down") return 0;
+        if (st.label === "Due") return 1;
+        return 2;
+      };
+      return rank(a) - rank(b) || a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true });
+    };
+    mine.sort(sortUnits);
     needsCheck.sort(sortUnits);
-    done.sort(sortUnits);
+    done.sort((a, b) => a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true }));
     return { mine, needsCheck, done };
   }, [weekly, user]);
 

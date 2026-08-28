@@ -441,7 +441,9 @@ export function TvBoardPage() {
           <span className="tv-kpi-l">Parts pickup</span>
         </div>
         <div className={`tv-kpi tone-${toneCount(c?.open_warranties ?? 0)}`}>
-          <span className="tv-kpi-n">{c?.open_warranties ?? "—"}</span>
+          <span className="tv-kpi-n" title="Dropped off + submitted claims aging 3+ working days">
+            {c?.open_warranties ?? "—"}
+          </span>
           <span className="tv-kpi-l">Open warranties</span>
         </div>
         <div className={`tv-kpi tone-${toneCount(c?.parts_dropoffs ?? 0)}`}>

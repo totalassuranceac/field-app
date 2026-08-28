@@ -279,6 +279,85 @@ export async function apiBinary(
   return blob;
 }
 
+/** Binary fetch that also returns response headers (clip segment times, etc.). */
+export async function apiBinaryWithHeaders(
+  path: string,
+  options: ApiOptions = {}
+): Promise<{ blob: Blob; headers: Headers }> {
+  const { timeoutMs: timeoutOpt, ...fetchInit } = options;
+  const timeoutMs = timeoutOpt !== undefined ? timeoutOpt : DEFAULT_TIMEOUT_MS;
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    throw new ApiError(0, "You appear to be offline. Check your connection and try again.");
+  }
+
+  const headers = new Headers(fetchInit.headers || {});
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (controller && timeoutMs > 0) {
+    if (fetchInit.signal) {
+      if (fetchInit.signal.aborted) controller.abort();
+      else {
+        fetchInit.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      ...fetchInit,
+      headers,
+      credentials: "include",
+      signal: controller?.signal ?? fetchInit.signal,
+    });
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      throw new ApiError(0, "Server took too long to respond. Check signal and try again.");
+    }
+    throw new ApiError(
+      0,
+      "Network error — could not reach the server. Check connection and try again."
+    );
+  }
+  if (timer) clearTimeout(timer);
+
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new ApiError(401, "Session expired. Please sign in again.");
+  }
+
+  if (!res.ok) {
+    let msg = res.statusText || `Request failed (${res.status})`;
+    try {
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+      if (data && typeof data === "object" && data !== null) {
+        const obj = data as { error?: string; message?: string };
+        if (obj.error) msg = String(obj.error);
+        else if (obj.message) msg = String(obj.message);
+      } else if (text && text.length < 200 && !text.includes("<")) {
+        msg = text;
+      }
+    } catch {
+      /* keep status text */
+    }
+    throw new ApiError(res.status, msg.replace(/\s+/g, " ").trim().slice(0, 220));
+  }
+
+  const blob = await res.blob();
+  if (!blob.size) {
+    throw new ApiError(502, "Empty image from camera proxy");
+  }
+  return { blob, headers: res.headers };
+}
+
 export type Role =
   | "admin"
   | "office"
@@ -323,6 +402,8 @@ export const ALL_PERMISSIONS = [
   "editFuel",
   "logPartsPurchase",
   "viewPartsPurchase",
+  "logDumpRuns",
+  "viewDumpRuns",
   "viewAlerts",
   "manageAlerts",
   "reportIssues",
@@ -335,6 +416,7 @@ export const ALL_PERMISSIONS = [
   "manageInventoryLevels",
   "viewCompanyAssets",
   "manageCompanyAssets",
+  "viewLiveMap",
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -348,6 +430,7 @@ const WRITE_PERMISSIONS = new Set<string>([
   "logFuel",
   "editFuel",
   "logPartsPurchase",
+  "logDumpRuns",
   "manageAlerts",
   "reportIssues",
   "manageIssues",
@@ -419,6 +502,8 @@ export function can(user: User | null, action: string): boolean {
       "viewer",
       "supervisor",
     ],
+    logDumpRuns: ["admin", "warehouse", "mechanic"],
+    viewDumpRuns: ["admin", "warehouse", "mechanic", "viewer", "supervisor"],
     viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"],
     manageAlerts: ["admin", "office", "mechanic", "supervisor"],
     reportIssues: ["admin", "office", "driver", "mechanic", "supervisor"],
@@ -446,6 +531,8 @@ export function can(user: User | null, action: string): boolean {
       "supervisor",
     ],
     manageCompanyAssets: ["admin", "warehouse"],
+    /** Fleet GPS map — not for field techs (privacy / focus) */
+    viewLiveMap: ["admin", "office", "mechanic", "warehouse", "supervisor", "viewer"],
   };
   return (map[action] || []).includes(r);
 }

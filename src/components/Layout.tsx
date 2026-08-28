@@ -3,10 +3,16 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
 import { useAuth } from "../auth";
 import {
+  canFavoritePath,
+  favoriteMeta,
+  normalizeFavoritePath,
+} from "../favoriteRoutes";
+import {
   clearNavReturn,
   readNavReturn,
   returnBarLabel,
 } from "../navReturn";
+import { useFavorites } from "../useFavorites";
 import { NotificationBell } from "./NotificationBell";
 import { OfflineBanner } from "./OfflineBanner";
 
@@ -183,8 +189,13 @@ export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const { isFavorite, toggleFavorite, busy: favBusy } = useFavorites();
   /** Full-screen TV wallboard — no sidebar / top chrome */
   const isTvBoard = location.pathname === "/tv" || location.pathname.startsWith("/tv/");
+  const favPath = normalizeFavoritePath(location.pathname);
+  const favAllowed = canFavoritePath(user, favPath);
+  const favLabel = favoriteMeta(favPath)?.label || "this page";
+  const favOn = isFavorite(favPath);
 
   const navReturn = readNavReturn(location.state);
   const returnPath = navReturn?.returnTo?.split("?")[0] || "";
@@ -226,8 +237,15 @@ export function Layout({ children }: { children: ReactNode }) {
   const isTrueAdmin = realUser?.role === "admin";
   const adminShell = usesAdminShell(user) && !viewAsRole;
   const readOnly = isViewer(user);
+  // Warehouse + fleet manager (mechanic) need the waiting pickup badge like Speedy
   const showVendorCounter =
-    isWarehouse || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
+    isWarehouse ||
+    isOffice ||
+    isMechanic ||
+    adminShell ||
+    user?.role === "admin" ||
+    user?.role === "viewer" ||
+    user?.role === "supervisor";
   const showRepairBadge =
     isMechanic || isOffice || adminShell || user?.role === "admin" || user?.role === "viewer";
   const showFuelOcrBadge = can(user, "editFuel") || adminShell;
@@ -439,8 +457,8 @@ export function Layout({ children }: { children: ReactNode }) {
     {
       to: "/live",
       label: "Live map",
-      // Warehouse needs map to find techs for parts delivery / pickup
-      show: adminShell || isOffice || isDriver || isMechanic || isWarehouse,
+      // Supervisors, warehouse, shop, office — not field techs
+      show: can(user, "viewLiveMap"),
     },
     {
       to: "/yard",
@@ -533,6 +551,11 @@ export function Layout({ children }: { children: ReactNode }) {
       // Field-friendly: photo the receipt after buying with the company card
       label: "Bought parts",
       show: can(user, "logPartsPurchase") || can(user, "viewPartsPurchase"),
+    },
+    {
+      to: "/dump-runs",
+      label: "Dump runs",
+      show: can(user, "viewDumpRuns") || can(user, "logDumpRuns") || isWarehouse,
     },
     {
       to: "/assets",
@@ -845,6 +868,19 @@ export function Layout({ children }: { children: ReactNode }) {
                   </span>
                 </NavLink>
               )}
+              {favAllowed ? (
+                <button
+                  type="button"
+                  className={`topbar-fav-btn${favOn ? " is-on" : ""}`}
+                  disabled={favBusy}
+                  title={favOn ? `Unstar ${favLabel}` : `Star ${favLabel} — shows on Home`}
+                  aria-label={favOn ? `Unstar ${favLabel}` : `Star ${favLabel}`}
+                  aria-pressed={favOn}
+                  onClick={() => void toggleFavorite(favPath)}
+                >
+                  {favOn ? "★" : "☆"}
+                </button>
+              ) : null}
               <NotificationBell />
             </div>
           </div>

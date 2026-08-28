@@ -9,7 +9,12 @@ type LoanStatus =
   | "declined"
   | "cancelled";
 
-type PartStatus = "pending_order" | "ordered" | "arrived" | null;
+type PartStatus =
+  | "pending_order"
+  | "ordered"
+  | "arrived"
+  | "paperwork_signed"
+  | null;
 
 interface ToolLoanRequest {
   id: number;
@@ -26,6 +31,9 @@ interface ToolLoanRequest {
   ordered_at?: string | null;
   arrived_at?: string | null;
   part_note?: string | null;
+  paperwork_signed_at?: string | null;
+  paperwork_note?: string | null;
+  paperwork_key?: string | null;
   created_at: string;
   employee_name?: string | null;
   manager_name?: string | null;
@@ -35,6 +43,63 @@ interface ToolLoanRequest {
 
 const MIN_WEEKLY_PAYMENT = 50;
 const REPAYMENT_PERCENT = 10;
+
+/**
+ * Open the payroll acknowledgment form and trigger print.
+ * Pass a window opened synchronously on click so browsers don't block after await.
+ */
+function openChargeAgreementPrint(
+  chargeId: number,
+  preexisting?: Window | null
+): Window | null {
+  const url = `/api/tool-loan-ledger/charges/${chargeId}/print-agreement`;
+  const w =
+    preexisting && !preexisting.closed
+      ? preexisting
+      : window.open("about:blank", "_blank");
+  if (w == null) return null;
+  try {
+    w.opener = null;
+  } catch {
+    /* ignore */
+  }
+  try {
+    w.document.open();
+    w.document.write(
+      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:1.5rem">Preparing acknowledgment…</body></html>`
+    );
+    w.document.close();
+  } catch {
+    w.location.href = url;
+    return w;
+  }
+  void (async () => {
+    try {
+      const res = await fetch(url, { credentials: "include" });
+      const html = await res.text();
+      if (!res.ok) {
+        w.document.open();
+        w.document.write(html || `<p>Could not load form (${res.status}).</p>`);
+        w.document.close();
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+      window.setTimeout(() => {
+        try {
+          w.focus();
+          w.print();
+        } catch {
+          /* ignore */
+        }
+      }, 600);
+    } catch {
+      w.location.href = url;
+    }
+  })();
+  return w;
+}
 
 const DISCLAIMER = `Tool loan terms (Total Assurance):
 
@@ -82,7 +147,111 @@ function partStatusLabel(ps: PartStatus): string {
   if (ps === "pending_order") return "Waiting to order";
   if (ps === "ordered") return "Ordered";
   if (ps === "arrived") return "Arrived";
+  if (ps === "paperwork_signed") return "Paperwork signed";
   return "";
+}
+
+function partRank(ps: PartStatus): number {
+  if (ps === "pending_order") return 0;
+  if (ps === "ordered") return 1;
+  if (ps === "arrived") return 2;
+  if (ps === "paperwork_signed") return 3;
+  return -1;
+}
+
+function paperworkHref(key: string | null | undefined): string | null {
+  if (!key || !key.trim()) return null;
+  return `/api/uploads/${key
+    .split("/")
+    .map((s) => encodeURIComponent(s))
+    .join("/")}`;
+}
+
+/** Default sales tax used to check whether payroll loan includes tax. */
+const DEFAULT_TAX_CHECK_RATE = 8.25;
+
+type AmountCheckLevel = "ok" | "warn" | "bad" | "neutral";
+
+type AmountCheck = {
+  level: AmountCheckLevel;
+  title: string;
+  detail: string;
+};
+
+/**
+ * Payroll loan should usually be pretax + tax. Flag missing tax or odd totals.
+ */
+function assessChargeVsPurchases(
+  chargeAmount: number,
+  pretaxSum: number,
+  taxRate = DEFAULT_TAX_CHECK_RATE
+): AmountCheck {
+  const charge = Math.round(Number(chargeAmount) * 100) / 100;
+  const pretax = Math.round(Number(pretaxSum) * 100) / 100;
+  if (!(charge > 0) || !(pretax > 0)) {
+    return {
+      level: "neutral",
+      title: "Select a loan to check totals",
+      detail: "",
+    };
+  }
+  const rate = Number.isFinite(taxRate) && taxRate >= 0 ? taxRate : DEFAULT_TAX_CHECK_RATE;
+  const taxAmt = Math.round(pretax * (rate / 100) * 100) / 100;
+  const expectedTaxed = Math.round((pretax + taxAmt) * 100) / 100;
+  const tol = Math.max(0.05, Math.round(pretax * 0.015 * 100) / 100);
+
+  if (Math.abs(charge - expectedTaxed) <= tol) {
+    return {
+      level: "ok",
+      title: "Totals look correct (tax included)",
+      detail: `Payroll ${moneyFmt(charge)} ≈ pretax ${moneyFmt(pretax)} + ${rate}% tax (${moneyFmt(taxAmt)}).`,
+    };
+  }
+
+  // Exact pretax match → almost certainly missing tax on the paperwork/payroll loan
+  if (Math.abs(charge - pretax) <= tol) {
+    return {
+      level: "warn",
+      title: "Tax may be missing on payroll loan",
+      detail: `Payroll ${moneyFmt(charge)} matches pretax only. With ${rate}% tax it should be about ${moneyFmt(expectedTaxed)} (add ~${moneyFmt(taxAmt)} tax). Use Edit on the ledger charge or create a new loan with tax.`,
+    };
+  }
+
+  // Charge between pretax and expected tax — partial tax or wrong rate
+  if (charge > pretax + tol && charge < expectedTaxed - tol) {
+    const implied = ((charge / pretax) - 1) * 100;
+    return {
+      level: "warn",
+      title: "Tax may be incomplete",
+      detail: `Payroll ${moneyFmt(charge)} is only ~${implied.toFixed(1)}% over pretax ${moneyFmt(pretax)}. At ${rate}% expect ${moneyFmt(expectedTaxed)}.`,
+    };
+  }
+
+  // Implied tax rate in a reasonable band (5–12%) → green
+  if (charge > pretax + tol) {
+    const implied = ((charge / pretax) - 1) * 100;
+    if (implied >= 5 && implied <= 12) {
+      return {
+        level: "ok",
+        title: "Totals look correct (tax-like markup)",
+        detail: `Payroll ${moneyFmt(charge)} is about ${implied.toFixed(2)}% above pretax ${moneyFmt(pretax)} — consistent with sales tax.`,
+      };
+    }
+  }
+
+  if (charge + tol < pretax) {
+    return {
+      level: "bad",
+      title: "Payroll is less than purchase total",
+      detail: `Payroll ${moneyFmt(charge)} is below pretax purchases ${moneyFmt(pretax)}. Check which items are included or fix the charge amount.`,
+    };
+  }
+
+  return {
+    level: "warn",
+    title: "Amounts don't line up",
+    detail: `Payroll ${moneyFmt(charge)} vs pretax purchases ${moneyFmt(pretax)} (with ${rate}% tax expect ~${moneyFmt(expectedTaxed)}). Confirm before signing.`,
+  };
 }
 
 function formatWhen(iso: string | null | undefined): string {
@@ -134,7 +303,7 @@ function ProductLinkNote({ value }: { value: string }) {
   );
 }
 
-/** Visual step tracker: Requested → Approved → Ordered → Arrived */
+/** Visual step tracker: Requested → Approved → Ordered → Arrived → Paperwork */
 function LoanProgress({ r }: { r: ToolLoanRequest }) {
   const declined = r.status === "declined";
   const cancelled = r.status === "cancelled";
@@ -152,6 +321,8 @@ function LoanProgress({ r }: { r: ToolLoanRequest }) {
   }
 
   const part = effectivePartStatus(r);
+  const rank = partRank(part);
+  const paperHref = paperworkHref(r.paperwork_key);
   const steps: { key: string; label: string; done: boolean; active: boolean; when?: string }[] = [
     {
       key: "requested",
@@ -169,22 +340,29 @@ function LoanProgress({ r }: { r: ToolLoanRequest }) {
     {
       key: "ordered",
       label: "Ordered",
-      done: part === "ordered" || part === "arrived",
+      done: rank >= 1,
       active: part === "ordered",
       when: formatWhen(r.ordered_at),
     },
     {
       key: "arrived",
       label: "Arrived",
-      done: part === "arrived",
+      done: rank >= 2,
       active: part === "arrived",
       when: formatWhen(r.arrived_at),
+    },
+    {
+      key: "paperwork",
+      label: "Paperwork",
+      done: part === "paperwork_signed",
+      active: part === "arrived",
+      when: formatWhen(r.paperwork_signed_at),
     },
   ];
 
   return (
     <div className="tool-loan-progress" aria-label="Loan and part progress">
-      <ol className="tool-loan-steps">
+      <ol className="tool-loan-steps tool-loan-steps-5">
         {steps.map((s, i) => (
           <li
             key={s.key}
@@ -206,14 +384,41 @@ function LoanProgress({ r }: { r: ToolLoanRequest }) {
         </p>
       )}
       {part === "arrived" && (
+        <p className="tool-loan-progress-note">
+          Part arrived{r.arrived_at ? ` on ${formatWhen(r.arrived_at)}` : ""} — waiting on signed
+          loan paperwork.
+        </p>
+      )}
+      {part === "paperwork_signed" && (
         <p className="tool-loan-progress-note is-ready">
-          Part arrived{r.arrived_at ? ` on ${formatWhen(r.arrived_at)}` : ""} — ready for you.
+          Paperwork signed{r.paperwork_signed_at ? ` on ${formatWhen(r.paperwork_signed_at)}` : ""} —
+          loan complete.
         </p>
       )}
       {r.part_note && (
         <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
           Note: {r.part_note}
         </p>
+      )}
+      {(r.paperwork_note || paperHref) && (
+        <div className="tool-loan-paperwork-block">
+          {r.paperwork_note ? (
+            <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
+              Paperwork note: {r.paperwork_note}
+            </p>
+          ) : null}
+          {paperHref ? (
+            <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
+              <a href={paperHref} target="_blank" rel="noreferrer" className="tool-loan-paperwork-link">
+                View signed loan paperwork
+              </a>
+            </p>
+          ) : part === "paperwork_signed" ? (
+            <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
+              Signed on file (no scan attached)
+            </p>
+          ) : null}
+        </div>
       )}
     </div>
   );
@@ -247,8 +452,54 @@ export function ToolLoanPage() {
   const [remarks, setRemarks] = useState("");
 
   const [partNoteId, setPartNoteId] = useState<number | null>(null);
-  const [partNoteAction, setPartNoteAction] = useState<"ordered" | "arrived">("ordered");
+  const [partNoteAction, setPartNoteAction] = useState<
+    "ordered" | "arrived" | "paperwork_signed"
+  >("ordered");
   const [partNote, setPartNote] = useState("");
+  const [paperworkFile, setPaperworkFile] = useState<File | null>(null);
+  /** null = none selected; number = link existing; "new" = create with tax */
+  const [paperworkMode, setPaperworkMode] = useState<"link" | "new" | null>(null);
+  const [selectedChargeId, setSelectedChargeId] = useState<number | null>(null);
+  /** Other open requests for same employee to bundle onto one charge */
+  const [bundleRequestIds, setBundleRequestIds] = useState<number[]>([]);
+  const [createPretax, setCreatePretax] = useState("");
+  const [createTaxRate, setCreateTaxRate] = useState(String(8.25));
+  const [ledgerMatch, setLedgerMatch] = useState<{
+    loading: boolean;
+    error?: string;
+    employee_name?: string;
+    request_amount?: number;
+    request_item?: string;
+    recent_days?: number;
+    ledger?: {
+      person_id: number | null;
+      display_name: string | null;
+      balance: number;
+      matched: boolean;
+    };
+    charges?: {
+      id: number;
+      description: string;
+      charge_date: string;
+      amount: number;
+      amount_match: boolean;
+      already_linked?: boolean;
+      linked_items?: { id: number; item_name: string; amount: number }[];
+    }[];
+    bundle_candidates?: {
+      id: number;
+      item_name: string;
+      item_url?: string;
+      amount: number;
+      part_status: string | null;
+    }[];
+    tax_defaults?: {
+      pretax_amount: number;
+      tax_rate: number;
+      tax_amount: number;
+      total_with_tax: number;
+    };
+  } | null>(null);
   /** What they already owe on the ledger (before this new request). */
   const [currentBalance, setCurrentBalance] = useState(0);
   const [ledgerPersonName, setLedgerPersonName] = useState<string | null>(null);
@@ -402,38 +653,363 @@ export function ToolLoanPage() {
     }
   }
 
-  function openPartStatus(r: ToolLoanRequest, action: "ordered" | "arrived") {
+  function openPartStatus(
+    r: ToolLoanRequest,
+    action: "ordered" | "arrived" | "paperwork_signed"
+  ) {
     setPartNoteId(r.id);
     setPartNoteAction(action);
-    setPartNote(r.part_note || "");
+    setPartNote(
+      action === "paperwork_signed" ? r.paperwork_note || "" : r.part_note || ""
+    );
+    setPaperworkFile(null);
+    setSelectedChargeId(null);
+    setBundleRequestIds([]);
+    setPaperworkMode(null);
+    setLedgerMatch(null);
+    if (action === "paperwork_signed") {
+      setLedgerMatch({ loading: true });
+      void (async () => {
+        try {
+          const data = await api<{
+            request: { employee_name: string; amount: number; item_name: string };
+            recent_days?: number;
+            ledger: {
+              person_id: number | null;
+              display_name: string | null;
+              balance: number;
+              matched: boolean;
+            };
+            charges: {
+              id: number;
+              description: string;
+              charge_date: string;
+              amount: number;
+              amount_match: boolean;
+              already_linked?: boolean;
+              linked_items?: { id: number; item_name: string; amount: number }[];
+            }[];
+            bundle_candidates?: {
+              id: number;
+              item_name: string;
+              item_url?: string;
+              amount: number;
+              part_status: string | null;
+            }[];
+            tax_defaults?: {
+              pretax_amount: number;
+              tax_rate: number;
+              tax_amount: number;
+              total_with_tax: number;
+            };
+          }>(`/tool-loans/${r.id}/ledger-match`);
+          const td = data.tax_defaults;
+          setCreatePretax(
+            String(td?.pretax_amount ?? (Number(r.amount) || 0))
+          );
+          setCreateTaxRate(String(td?.tax_rate ?? 8.25));
+          // Prefer charge that already mentions this item, or amount match
+          const itemKey = (r.item_name || "").toLowerCase().slice(0, 12);
+          const match =
+            (data.charges || []).find(
+              (c) =>
+                itemKey &&
+                (c.description || "").toLowerCase().includes(itemKey) &&
+                !c.already_linked
+            ) ||
+            (data.charges || []).find((c) => c.amount_match && !c.already_linked) ||
+            (data.charges || []).find((c) => !c.already_linked) ||
+            null;
+          if (match) {
+            setPaperworkMode("link");
+            setSelectedChargeId(match.id);
+            if (!r.paperwork_note) {
+              setPartNote(
+                `Linked: ${match.description} · ${moneyFmt(match.amount)} · ${formatWhen(match.charge_date)}`
+              );
+            }
+          } else if (!(data.charges || []).length) {
+            setPaperworkMode("new");
+          }
+          // Pre-check siblings whose names appear in the selected charge description
+          const candidates = data.bundle_candidates || [];
+          if (match && candidates.length) {
+            const desc = (match.description || "").toLowerCase();
+            const pre = candidates
+              .filter((b) => {
+                const words = (b.item_name || "")
+                  .toLowerCase()
+                  .split(/\s+/)
+                  .filter((w) => w.length >= 4);
+                return words.some((w) => desc.includes(w));
+              })
+              .map((b) => b.id);
+            setBundleRequestIds(pre);
+          }
+          setLedgerMatch({
+            loading: false,
+            employee_name: data.request.employee_name,
+            request_amount: data.request.amount,
+            request_item: data.request.item_name,
+            recent_days: data.recent_days ?? 45,
+            ledger: data.ledger,
+            charges: data.charges || [],
+            bundle_candidates: candidates,
+            tax_defaults: data.tax_defaults,
+          });
+        } catch (err) {
+          setLedgerMatch({
+            loading: false,
+            error: err instanceof Error ? err.message : "Could not load employee loans",
+          });
+        }
+      })();
+    }
   }
+
+  function pickLedgerCharge(c: {
+    id: number;
+    description: string;
+    charge_date: string;
+    amount: number;
+  }) {
+    setPaperworkMode("link");
+    setSelectedChargeId(c.id);
+    setPartNote(
+      `Linked: ${c.description} · ${moneyFmt(c.amount)} · ${formatWhen(c.charge_date)}`
+    );
+  }
+
+  const createTaxPreview = useMemo(() => {
+    const pretax = Number(createPretax);
+    const rate = Number(createTaxRate);
+    if (!(pretax > 0) || !(rate >= 0)) {
+      return { pretax: 0, rate: 0, tax: 0, total: 0 };
+    }
+    const tax = Math.round(pretax * (rate / 100) * 100) / 100;
+    const total = Math.round((pretax + tax) * 100) / 100;
+    return { pretax, rate, tax, total };
+  }, [createPretax, createTaxRate]);
+
+  /** Live amount check for selected charge + bundled items (or new loan + tax). */
+  const linkAmountCheck = useMemo((): AmountCheck | null => {
+    if (partNoteAction !== "paperwork_signed" || !ledgerMatch || ledgerMatch.loading) {
+      return null;
+    }
+    const taxRate =
+      Number(ledgerMatch.tax_defaults?.tax_rate) ||
+      Number(createTaxRate) ||
+      DEFAULT_TAX_CHECK_RATE;
+
+    if (paperworkMode === "new") {
+      if (!(createTaxPreview.total > 0)) {
+        return {
+          level: "neutral",
+          title: "Enter pre-tax and tax %",
+          detail: "New payroll loans should include sales tax so the employee pays tax through deductions.",
+        };
+      }
+      if (createTaxPreview.rate <= 0) {
+        return {
+          level: "warn",
+          title: "Tax rate is 0%",
+          detail: "Loan paperwork should usually include sales tax. Set tax % (e.g. 8.25) unless this purchase is tax-exempt.",
+        };
+      }
+      return {
+        level: "ok",
+        title: "New loan includes tax",
+        detail: `Will charge ${moneyFmt(createTaxPreview.total)} (pretax ${moneyFmt(createTaxPreview.pretax)} + ${createTaxPreview.rate}% tax).`,
+      };
+    }
+
+    if (paperworkMode !== "link" || !selectedChargeId) {
+      return {
+        level: "neutral",
+        title: "Select a payroll loan to verify totals",
+        detail: "Green = tax looks included · Yellow = check tax / item mix before signing.",
+      };
+    }
+
+    const charge = (ledgerMatch.charges || []).find((c) => c.id === selectedChargeId);
+    if (!charge) return null;
+
+    const base = Number(ledgerMatch.request_amount) || 0;
+    const bundled = (ledgerMatch.bundle_candidates || [])
+      .filter((b) => bundleRequestIds.includes(b.id))
+      .reduce((s, b) => s + (Number(b.amount) || 0), 0);
+    const pretaxSum = Math.round((base + bundled) * 100) / 100;
+
+    return assessChargeVsPurchases(Number(charge.amount), pretaxSum, taxRate);
+  }, [
+    partNoteAction,
+    ledgerMatch,
+    paperworkMode,
+    selectedChargeId,
+    bundleRequestIds,
+    createTaxPreview,
+    createTaxRate,
+  ]);
 
   async function submitPartStatus(e: FormEvent) {
     e.preventDefault();
     if (partNoteId == null) return;
     setActingId(partNoteId);
     setError("");
+
+    let printWin: Window | null = null;
+    const willPrintPaperwork =
+      partNoteAction === "paperwork_signed" &&
+      (paperworkMode === "new" || paperworkMode === "link");
+
     try {
-      await api(`/tool-loans/${partNoteId}/part-status`, {
+      if (partNoteAction === "paperwork_signed") {
+        if (paperworkMode === "link" && !selectedChargeId) {
+          throw new Error("Select a recent ledger loan to link, or choose Create new loan.");
+        }
+        if (paperworkMode === "new") {
+          if (!(createTaxPreview.total > 0)) {
+            throw new Error("Enter a pre-tax amount (tax is added automatically).");
+          }
+        }
+        if (paperworkMode !== "link" && paperworkMode !== "new") {
+          throw new Error(
+            "Link an existing recent loan, or create a new payroll charge with tax."
+          );
+        }
+        // Failsafe: confirm when totals look wrong (missing tax / mismatch)
+        if (
+          linkAmountCheck &&
+          (linkAmountCheck.level === "warn" || linkAmountCheck.level === "bad")
+        ) {
+          const okContinue = window.confirm(
+            `${linkAmountCheck.title}\n\n${linkAmountCheck.detail}\n\nContinue linking anyway?`
+          );
+          if (!okContinue) {
+            setActingId(null);
+            return;
+          }
+        }
+      }
+
+      // Open print window NOW (same click, after validation) — browsers block after await
+      if (willPrintPaperwork) {
+        printWin = window.open("about:blank", "_blank");
+        if (printWin == null) {
+          setError(
+            "Allow pop-ups for this site so the acknowledgment form can print automatically."
+          );
+        } else {
+          try {
+            printWin.document.write(
+              `<!DOCTYPE html><html><body style="font-family:system-ui;padding:1.5rem">Saving… acknowledgment will print next.</body></html>`
+            );
+            printWin.document.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      let paperworkKey: string | null = null;
+      if (partNoteAction === "paperwork_signed" && paperworkFile) {
+        const fd = new FormData();
+        fd.append("file", paperworkFile);
+        fd.append("folder", "tool-loan-paperwork");
+        const up = await api<{ key: string }>("/uploads/receipt", {
+          method: "POST",
+          body: fd,
+          timeoutMs: 60_000,
+        });
+        paperworkKey = up.key || null;
+      }
+
+      const body: Record<string, unknown> = {
+        part_status: partNoteAction,
+        note: partNote.trim() || null,
+        paperwork_key: paperworkKey,
+      };
+      if (partNoteAction === "paperwork_signed") {
+        if (bundleRequestIds.length) {
+          body.also_request_ids = bundleRequestIds;
+        }
+        if (paperworkMode === "link" && selectedChargeId) {
+          body.linked_charge_id = selectedChargeId;
+        } else if (paperworkMode === "new") {
+          const names = [
+            ledgerMatch?.request_item || "Tool purchase",
+            ...(ledgerMatch?.bundle_candidates || [])
+              .filter((b) => bundleRequestIds.includes(b.id))
+              .map((b) => b.item_name),
+          ].filter(Boolean);
+          body.create_charge = {
+            pretax_amount: createTaxPreview.pretax,
+            tax_rate: createTaxPreview.rate,
+            total_amount: createTaxPreview.total,
+            description: names.join(", "),
+          };
+        }
+      }
+
+      const res = await api<{
+        ok?: boolean;
+        linked_charge_id?: number | null;
+      }>(`/tool-loans/${partNoteId}/part-status`, {
         method: "POST",
-        body: JSON.stringify({
-          part_status: partNoteAction,
-          note: partNote.trim() || null,
-        }),
+        body: JSON.stringify(body),
       });
-      setOk(
+
+      let msg =
         partNoteAction === "ordered"
           ? "Marked ordered — employee was notified."
-          : "Marked arrived — employee was notified."
-      );
+          : partNoteAction === "arrived"
+            ? "Marked arrived — next: get loan paperwork signed."
+            : "Paperwork marked signed — loan complete.";
+      if (partNoteAction === "paperwork_signed") {
+        const printChargeId =
+          paperworkMode === "new"
+            ? res.linked_charge_id || null
+            : selectedChargeId;
+        if (paperworkMode === "new" && res.linked_charge_id) {
+          msg = `Paperwork signed · new payroll charge #${res.linked_charge_id} for ${moneyFmt(
+            createTaxPreview.total
+          )} (includes tax).`;
+        } else if (paperworkMode === "link" && selectedChargeId) {
+          msg = `Paperwork signed · linked to ledger charge #${selectedChargeId}.`;
+        }
+        if (paperworkKey) msg += " Scan attached.";
+        if (printChargeId) {
+          const opened = openChargeAgreementPrint(printChargeId, printWin);
+          if (opened) {
+            msg += " Print dialog opened.";
+          } else if (!printWin) {
+            msg += " Allow pop-ups to auto-print the form (or use Form on the charge).";
+          }
+        } else {
+          printWin?.close();
+        }
+      }
+      setOk(msg);
       setPartNoteId(null);
       setPartNote("");
+      setPaperworkFile(null);
+      setSelectedChargeId(null);
+      setBundleRequestIds([]);
+      setPaperworkMode(null);
+      setLedgerMatch(null);
       await load();
     } catch (err) {
+      printWin?.close();
       setError(err instanceof Error ? err.message : "Could not update part status");
     } finally {
       setActingId(null);
     }
+  }
+
+  function toggleBundleRequest(rid: number) {
+    setBundleRequestIds((prev) =>
+      prev.includes(rid) ? prev.filter((x) => x !== rid) : [...prev, rid]
+    );
   }
 
   const actionable = useMemo(() => {
@@ -446,7 +1022,7 @@ export function ToolLoanPage() {
     return approvals.filter((r) => {
       if (r.status !== "approved") return false;
       const ps = effectivePartStatus(r);
-      return ps === "pending_order" || ps === "ordered";
+      return ps === "pending_order" || ps === "ordered" || ps === "arrived";
     });
   }, [approvals, isOffice]);
 
@@ -454,7 +1030,9 @@ export function ToolLoanPage() {
     () =>
       approvals.filter((r) => {
         if (r.status === "declined" || r.status === "cancelled") return true;
-        if (r.status === "approved" && effectivePartStatus(r) === "arrived") return true;
+        if (r.status === "approved" && effectivePartStatus(r) === "paperwork_signed") {
+          return true;
+        }
         return false;
       }),
     [approvals]
@@ -466,8 +1044,8 @@ export function ToolLoanPage() {
         <div>
           <h1>Tool loan request</h1>
           <p>
-            Request a company tool loan for field work. Office approves, then you can track when
-            the part is ordered and when it arrives.
+            Request a company tool loan for field work. Office approves, orders the part, marks
+            arrival, then confirms signed loan paperwork so nothing slips through.
           </p>
         </div>
         <button
@@ -533,7 +1111,9 @@ export function ToolLoanPage() {
           >
             Approvals
             {pendingForMe || needsFulfillment.length
-              ? ` (${pendingForMe}${needsFulfillment.length ? ` · ${needsFulfillment.length} parts` : ""})`
+              ? ` (${pendingForMe}${
+                  needsFulfillment.length ? ` · ${needsFulfillment.length} open` : ""
+                })`
               : ""}
           </button>
         )}
@@ -820,11 +1400,13 @@ export function ToolLoanPage() {
             Parts to track{needsFulfillment.length ? ` (${needsFulfillment.length})` : ""}
           </h2>
           <p className="muted" style={{ margin: "-0.25rem 0 0.55rem", fontSize: "0.85rem" }}>
-            After you approve a loan, mark Ordered when you place the order, then Arrived when it
-            shows up — the employee sees the same status.
+            After approval: Ordered → Arrived → Paperwork signed. Attach the signed loan form on
+            the last step so you always have proof under the request.
           </p>
           {!needsFulfillment.length ? (
-            <div className="card muted">No approved parts waiting to be ordered or delivered.</div>
+            <div className="card muted">
+              No approved loans waiting on order, delivery, or signed paperwork.
+            </div>
           ) : (
             needsFulfillment.map((r) => {
               const ps = effectivePartStatus(r);
@@ -856,30 +1438,373 @@ export function ToolLoanPage() {
 
                   {partNoteId === r.id ? (
                     <form
-                      className="form"
+                      className={`form tool-loan-part-form${
+                        partNoteAction === "paperwork_signed" ? " is-paperwork" : ""
+                      }`}
                       onSubmit={submitPartStatus}
-                      style={{ marginTop: "0.65rem" }}
                     >
-                      <p style={{ margin: 0, fontWeight: 700 }}>
-                        Mark as {partNoteAction === "ordered" ? "Ordered" : "Arrived"}
+                      <p className="tool-loan-part-form-title">
+                        {partNoteAction === "ordered"
+                          ? "Mark ordered"
+                          : partNoteAction === "arrived"
+                            ? "Mark arrived"
+                            : "Paperwork signed"}
                       </p>
-                      <label>
-                        Note for employee{" "}
-                        <span className="muted">(optional — tracking #, vendor, pickup spot)</span>
-                        <input
-                          value={partNote}
-                          onChange={(e) => setPartNote(e.target.value)}
-                          placeholder="e.g. Amazon order #… / at shop front desk"
-                        />
-                      </label>
-                      <div className="toolbar">
+
+                      {partNoteAction === "paperwork_signed" && (
+                        <div className="tool-loan-ledger-match" aria-label="Link or create payroll loan">
+                          {ledgerMatch?.loading && (
+                            <p className="tool-loan-match-status muted">Loading recent loans…</p>
+                          )}
+                          {ledgerMatch?.error && (
+                            <p className="tool-loan-match-status error">{ledgerMatch.error}</p>
+                          )}
+                          {ledgerMatch && !ledgerMatch.loading && !ledgerMatch.error && (
+                            <>
+                              <div className="tool-loan-match-bar">
+                                <span className="tool-loan-match-who">
+                                  <strong>
+                                    {ledgerMatch.employee_name || r.employee_name || "Employee"}
+                                  </strong>
+                                  <span className="muted">
+                                    {" "}
+                                    · {ledgerMatch.request_item || r.item_name}{" "}
+                                    {moneyFmt(Number(ledgerMatch.request_amount ?? r.amount))}
+                                  </span>
+                                </span>
+                                {ledgerMatch.ledger?.matched ? (
+                                  <span className="tool-loan-match-bal muted">
+                                    Bal {moneyFmt(ledgerMatch.ledger.balance || 0)}
+                                    {ledgerMatch.ledger.person_id ? (
+                                      <>
+                                        {" · "}
+                                        <a
+                                          href={`/tool-loan-ledger?person=${ledgerMatch.ledger.person_id}`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          Ledger
+                                        </a>
+                                      </>
+                                    ) : null}
+                                  </span>
+                                ) : (
+                                  <span className="muted">New payroll person if created</span>
+                                )}
+                              </div>
+
+                              {linkAmountCheck && linkAmountCheck.level !== "neutral" && (
+                                <div
+                                  className={`tool-loan-amount-check is-${linkAmountCheck.level}`}
+                                  role="status"
+                                >
+                                  <strong>{linkAmountCheck.title}</strong>
+                                  {linkAmountCheck.detail ? (
+                                    <span>{linkAmountCheck.detail}</span>
+                                  ) : null}
+                                </div>
+                              )}
+
+                              <div className="tool-loan-pick-list" role="radiogroup" aria-label="Link loan">
+                                {(ledgerMatch.charges || []).map((c) => {
+                                  const title = (c.description || "Loan")
+                                    .replace(/^Tool purchase \/ loan:\s*/i, "")
+                                    .trim();
+                                  const pretaxForRow =
+                                    Math.round(
+                                      ((Number(ledgerMatch.request_amount) || 0) +
+                                        (ledgerMatch.bundle_candidates || [])
+                                          .filter((b) => bundleRequestIds.includes(b.id))
+                                          .reduce((s, b) => s + (Number(b.amount) || 0), 0)) *
+                                        100
+                                    ) / 100;
+                                  const rowCheck = assessChargeVsPurchases(
+                                    Number(c.amount),
+                                    pretaxForRow,
+                                    Number(ledgerMatch.tax_defaults?.tax_rate) ||
+                                      DEFAULT_TAX_CHECK_RATE
+                                  );
+                                  const tone =
+                                    rowCheck.level === "ok"
+                                      ? "is-match-ok"
+                                      : rowCheck.level === "warn" || rowCheck.level === "bad"
+                                        ? "is-match-warn"
+                                        : "";
+                                  return (
+                                    <label
+                                      key={c.id}
+                                      className={`tool-loan-pick${
+                                        paperworkMode === "link" && selectedChargeId === c.id
+                                          ? " is-selected"
+                                          : ""
+                                      } ${tone}`.trim()}
+                                    >
+                                      <input
+                                        type="radio"
+                                        className="tool-loan-pick-radio"
+                                        name={`ledger-charge-${r.id}`}
+                                        checked={
+                                          paperworkMode === "link" && selectedChargeId === c.id
+                                        }
+                                        onChange={() => pickLedgerCharge(c)}
+                                      />
+                                      <span className="tool-loan-pick-body">
+                                        <span className="tool-loan-pick-title" title={title}>
+                                          {title || "Loan charge"}
+                                        </span>
+                                        <span className="tool-loan-pick-meta">
+                                          {moneyFmt(c.amount)}
+                                          <span aria-hidden>·</span>
+                                          {formatWhen(c.charge_date)}
+                                          {rowCheck.level === "ok" ? (
+                                            <span className="tool-loan-pick-tag">tax ok</span>
+                                          ) : null}
+                                          {rowCheck.level === "warn" ? (
+                                            <span className="tool-loan-pick-tag is-warn">
+                                              check tax
+                                            </span>
+                                          ) : null}
+                                          {rowCheck.level === "bad" ? (
+                                            <span className="tool-loan-pick-tag is-bad">
+                                              mismatch
+                                            </span>
+                                          ) : null}
+                                          {c.already_linked ? (
+                                            <span className="tool-loan-pick-tag is-muted">
+                                              this item
+                                            </span>
+                                          ) : null}
+                                          {(c.linked_items?.length || 0) > 0 ? (
+                                            <span className="tool-loan-pick-tag is-muted">
+                                              {c.linked_items!.length} item
+                                              {c.linked_items!.length === 1 ? "" : "s"} linked
+                                            </span>
+                                          ) : null}
+                                        </span>
+                                      </span>
+                                      <a
+                                        className="tool-loan-pick-action"
+                                        href={`/api/tool-loan-ledger/charges/${c.id}/print-agreement`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        Form
+                                      </a>
+                                    </label>
+                                  );
+                                })}
+
+                                <label
+                                  className={`tool-loan-pick tool-loan-pick-create${
+                                    paperworkMode === "new" ? " is-selected" : ""
+                                  }`}
+                                >
+                                  <input
+                                    type="radio"
+                                    className="tool-loan-pick-radio"
+                                    name={`ledger-charge-${r.id}`}
+                                    checked={paperworkMode === "new"}
+                                    onChange={() => {
+                                      setPaperworkMode("new");
+                                      setSelectedChargeId(null);
+                                      const item = ledgerMatch.request_item || r.item_name;
+                                      const total =
+                                        createTaxPreview.total ||
+                                        Number(ledgerMatch.tax_defaults?.total_with_tax) ||
+                                        0;
+                                      setPartNote(
+                                        `New payroll loan + tax: ${item} · ${moneyFmt(total)}`
+                                      );
+                                    }}
+                                  />
+                                  <span className="tool-loan-pick-body">
+                                    <span className="tool-loan-pick-title">
+                                      {(ledgerMatch.charges?.length || 0) > 0
+                                        ? "Create new loan + tax"
+                                        : "Create loan + tax"}
+                                    </span>
+                                    <span className="tool-loan-pick-meta muted">
+                                      Pre-tax + sales tax on payroll
+                                    </span>
+                                  </span>
+                                </label>
+                              </div>
+
+                              {(ledgerMatch.bundle_candidates?.length || 0) > 0 && (
+                                <div className="tool-loan-bundle">
+                                  <p className="tool-loan-bundle-title">
+                                    Also include these purchases on the same payroll loan
+                                  </p>
+                                  <p className="muted tool-loan-bundle-hint">
+                                    Use when one charge covers multiple low-amount items (different
+                                    product links).
+                                  </p>
+                                  <ul className="tool-loan-bundle-list">
+                                    {ledgerMatch.bundle_candidates!.map((b) => (
+                                      <li key={b.id}>
+                                        <label className="tool-loan-bundle-item">
+                                          <input
+                                            type="checkbox"
+                                            checked={bundleRequestIds.includes(b.id)}
+                                            onChange={() => toggleBundleRequest(b.id)}
+                                          />
+                                          <span>
+                                            <strong>{b.item_name}</strong>
+                                            <span className="muted">
+                                              {" "}
+                                              · {moneyFmt(b.amount)}
+                                              {b.part_status ? ` · ${b.part_status}` : ""}
+                                            </span>
+                                            {b.item_url && isHttpLink(b.item_url) ? (
+                                              <>
+                                                {" · "}
+                                                <a
+                                                  href={b.item_url}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                  onClick={(e) => e.stopPropagation()}
+                                                >
+                                                  link
+                                                </a>
+                                              </>
+                                            ) : null}
+                                          </span>
+                                        </label>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                  {bundleRequestIds.length > 0 ? (
+                                    <p className="tool-loan-bundle-sum muted">
+                                      This item + {bundleRequestIds.length} more ={" "}
+                                      <strong>
+                                        {moneyFmt(
+                                          Number(r.amount) +
+                                            ledgerMatch.bundle_candidates!
+                                              .filter((b) => bundleRequestIds.includes(b.id))
+                                              .reduce((s, b) => s + Number(b.amount || 0), 0)
+                                        )}
+                                      </strong>{" "}
+                                      request total (payroll charge may already include tax)
+                                    </p>
+                                  ) : null}
+                                </div>
+                              )}
+
+                              {paperworkMode === "new" && (
+                                <div className="tool-loan-tax-row">
+                                  <label>
+                                    Pre-tax
+                                    <input
+                                      type="number"
+                                      min="0.01"
+                                      step="0.01"
+                                      value={createPretax}
+                                      onChange={(e) => {
+                                        setCreatePretax(e.target.value);
+                                        const p = Number(e.target.value);
+                                        const rate = Number(createTaxRate) || 0;
+                                        if (p > 0) {
+                                          const tax = Math.round(p * (rate / 100) * 100) / 100;
+                                          const total = Math.round((p + tax) * 100) / 100;
+                                          setPartNote(
+                                            `New payroll loan + tax: ${
+                                              ledgerMatch.request_item || r.item_name
+                                            } · ${moneyFmt(total)}`
+                                          );
+                                        }
+                                      }}
+                                    />
+                                  </label>
+                                  <label>
+                                    Tax %
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      value={createTaxRate}
+                                      onChange={(e) => {
+                                        setCreateTaxRate(e.target.value);
+                                        const p = Number(createPretax);
+                                        const rate = Number(e.target.value) || 0;
+                                        if (p > 0) {
+                                          const tax = Math.round(p * (rate / 100) * 100) / 100;
+                                          const total = Math.round((p + tax) * 100) / 100;
+                                          setPartNote(
+                                            `New payroll loan + tax: ${
+                                              ledgerMatch.request_item || r.item_name
+                                            } · ${moneyFmt(total)}`
+                                          );
+                                        }
+                                      }}
+                                    />
+                                  </label>
+                                  <div className="tool-loan-tax-total">
+                                    <span className="muted">Tax {moneyFmt(createTaxPreview.tax)}</span>
+                                    <strong>Total {moneyFmt(createTaxPreview.total)}</strong>
+                                  </div>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {partNoteAction !== "paperwork_signed" ? (
+                        <label>
+                          Note for employee{" "}
+                          <span className="muted">(optional)</span>
+                          <input
+                            value={partNote}
+                            onChange={(e) => setPartNote(e.target.value)}
+                            placeholder="e.g. Amazon order #… / front desk"
+                          />
+                        </label>
+                      ) : (
+                        <div className="tool-loan-paperwork-extras">
+                          <label className="tool-loan-file-label">
+                            <span>Signed form</span>
+                            <input
+                              type="file"
+                              accept="image/*,application/pdf"
+                              onChange={(e) =>
+                                setPaperworkFile(e.target.files?.[0] || null)
+                              }
+                            />
+                            <span className="tool-loan-file-name muted">
+                              {paperworkFile ? paperworkFile.name : "Optional photo/PDF"}
+                            </span>
+                          </label>
+                          <details className="tool-loan-note-details">
+                            <summary>Note</summary>
+                            <input
+                              value={partNote}
+                              onChange={(e) => setPartNote(e.target.value)}
+                              placeholder="Optional note"
+                            />
+                          </details>
+                        </div>
+                      )}
+                      <div className="toolbar tool-loan-part-actions">
                         <button className="btn btn-sm" type="submit" disabled={actingId === r.id}>
-                          {actingId === r.id ? "Saving…" : "Confirm"}
+                          {actingId === r.id
+                            ? "Saving…"
+                            : partNoteAction === "paperwork_signed"
+                              ? paperworkMode === "new"
+                                ? "Create + print form"
+                                : "Link + print form"
+                              : "Confirm"}
                         </button>
                         <button
                           type="button"
                           className="btn secondary btn-sm"
-                          onClick={() => setPartNoteId(null)}
+                          onClick={() => {
+                            setPartNoteId(null);
+                            setPaperworkFile(null);
+                            setLedgerMatch(null);
+                            setSelectedChargeId(null);
+                            setPaperworkMode(null);
+                          }}
                         >
                           Back
                         </button>
@@ -903,6 +1828,15 @@ export function ToolLoanPage() {
                           onClick={() => openPartStatus(r, "arrived")}
                         >
                           Mark arrived
+                        </button>
+                      )}
+                      {ps === "arrived" && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => openPartStatus(r, "paperwork_signed")}
+                        >
+                          Paperwork signed
                         </button>
                       )}
                     </div>

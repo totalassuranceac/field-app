@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { Link } from "react-router-dom";
+import { api, can } from "../api";
+import { useAuth } from "../auth";
 
 export interface LivePosition {
   id: string;
@@ -19,6 +21,8 @@ export interface LivePosition {
   unit_number: string | null;
   plate: string | null;
   online: boolean | null;
+  vehicle_status?: string | null;
+  out_of_service?: boolean;
 }
 
 interface TrackingIssue {
@@ -31,6 +35,17 @@ interface TrackingIssue {
   detail?: string | null;
 }
 
+interface CoverageRow {
+  vehicle_id: number;
+  unit_number: string;
+  assigned_driver: string | null;
+  status: string;
+  gps_tracker: string | null;
+  coverage: "on_map" | "missing" | "no_gps_assigned";
+  reason: string;
+  provider?: string | null;
+}
+
 interface TrackingHealth {
   stale_hours: number;
   counts: {
@@ -40,18 +55,41 @@ interface TrackingHealth {
     equipment_manual: number;
     unmatched_devices: number;
     total: number;
+    missing_from_map?: number;
+    on_map?: number;
+    no_gps_assigned?: number;
   };
   issues: TrackingIssue[];
   expected_trackers: number;
   live_matched: number;
+  coverage?: CoverageRow[];
+}
+
+interface ProviderDeviceSummary {
+  id: string;
+  name: string;
+  online: boolean | null;
+  has_position: boolean;
+  unit_number: string | null;
+  vehicle_id: number | null;
+}
+
+interface ProviderStatus {
+  ok: boolean;
+  count: number;
+  error?: string;
+  configured: boolean;
+  total_devices?: number;
+  without_position?: number;
+  devices?: ProviderDeviceSummary[];
 }
 
 interface LiveResponse {
   fetched_at: string;
   positions: LivePosition[];
   providers: {
-    onestep: { ok: boolean; count: number; error?: string; configured: boolean };
-    verizon: { ok: boolean; count: number; error?: string; configured: boolean };
+    onestep: ProviderStatus;
+    verizon: ProviderStatus;
   };
   tracking?: TrackingHealth | null;
   error?: string;
@@ -164,6 +202,8 @@ function ensureLeaflet(): Promise<LType> {
 }
 
 export function LiveMapPage() {
+  const { user } = useAuth();
+  const allowed = can(user, "viewLiveMap");
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LType | null>(null);
   const layerRef = useRef<LType | null>(null);
@@ -218,29 +258,35 @@ export function LiveMapPage() {
 
       for (const p of positions) {
         if (!isValidCoord(p.lat, p.lng)) continue;
-        const color = p.provider === "onestep" ? "#1a6b4f" : "#175cd3";
-        const moving = typeof p.speed_mph === "number" && p.speed_mph > 3;
+        const oos = Boolean(p.out_of_service);
+        // Red = out of service (still accounted for); green/blue = active by provider
+        const color = oos ? "#c53030" : p.provider === "onestep" ? "#1a6b4f" : "#175cd3";
+        const moving = !oos && typeof p.speed_mph === "number" && p.speed_mph > 3;
         const label = String(p.unit_number || p.name || "?").slice(0, 4);
         const icon = L.divIcon({
-          className: "fleet-marker",
+          className: `fleet-marker${oos ? " is-oos" : ""}`,
           html: `<div class="fleet-pin" style="background:${color};${
             moving ? "box-shadow:0 0 0 3px #c9a227;" : ""
-          }">${escapeHtml(label)}</div>`,
+          }${oos ? "border:2px solid #fff;outline:1px solid #9b2c2c;" : ""}">${escapeHtml(label)}</div>`,
           iconSize: [32, 32],
           iconAnchor: [16, 16],
         });
 
         const marker = L.marker([p.lat, p.lng], { icon });
-        const title = p.unit_number
-          ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
-          : p.driver_name || p.name || "Vehicle";
         const phone = (p.phone || "").trim();
         const phoneDigits = phone.replace(/[^\d+]/g, "");
         marker.bindPopup(
           `<div class="fleet-popup">
-            <strong>${escapeHtml(p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle")}</strong><br/>
+            <strong>${escapeHtml(p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle")}</strong>
+            ${oos ? ` <span style="color:#c53030;font-weight:700">(OUT OF SERVICE)</span>` : ""}<br/>
             <span>${providerLabel(p.provider)}</span><br/>
-            ${p.driver_name ? `Tech: ${escapeHtml(p.driver_name)}<br/>` : ""}
+            ${
+              p.driver_name
+                ? /^(unassigned|warehouse|shop|pool|yard|spare)/i.test(p.driver_name.trim())
+                  ? `${escapeHtml(p.driver_name)}<br/>`
+                  : `Tech: ${escapeHtml(p.driver_name)}<br/>`
+                : `Unassigned<br/>`
+            }
             ${p.address ? `${escapeHtml(p.address)}<br/>` : ""}
             Speed: ${p.speed_mph != null ? `${Math.round(Number(p.speed_mph))} mph` : "—"} ·
             ${escapeHtml(p.status || "—")}<br/>
@@ -313,8 +359,12 @@ export function LiveMapPage() {
     [syncMarkers]
   );
 
-  // Create map once
+  // Create map once (only when role is allowed)
   useEffect(() => {
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     let mapInstance: LType | null = null;
 
@@ -372,23 +422,23 @@ export function LiveMapPage() {
       layerRef.current = null;
       LRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- init once
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- init once when allowed
+  }, [allowed]);
 
   // Re-draw markers when filter / tech search / data changes
   useEffect(() => {
-    if (!mapReady || !data) return;
+    if (!allowed || !mapReady || !data) return;
     syncMarkers(filtered);
-  }, [filter, techSearch, mapReady, data, filtered, syncMarkers]);
+  }, [allowed, filter, techSearch, mapReady, data, filtered, syncMarkers]);
 
   // Always auto-refresh every 30s
   useEffect(() => {
-    if (!mapReady) return;
+    if (!allowed || !mapReady) return;
     const id = window.setInterval(() => {
       loadPositions(false);
     }, 30_000);
     return () => window.clearInterval(id);
-  }, [mapReady, loadPositions]);
+  }, [allowed, mapReady, loadPositions]);
 
   function focusPosition(p: LivePosition) {
     if (!isValidCoord(p.lat, p.lng)) return;
@@ -402,6 +452,19 @@ export function LiveMapPage() {
 
   const os = data?.providers?.onestep;
   const vz = data?.providers?.verizon;
+  const coverage = data?.tracking?.coverage || [];
+  const missingUnits = useMemo(
+    () => coverage.filter((c) => c.coverage === "missing"),
+    [coverage]
+  );
+  const noGpsUnits = useMemo(
+    () => coverage.filter((c) => c.coverage === "no_gps_assigned"),
+    [coverage]
+  );
+  const onMapUnits = useMemo(
+    () => coverage.filter((c) => c.coverage === "on_map"),
+    [coverage]
+  );
   const sorted = useMemo(
     () =>
       [...filtered].sort((a, b) =>
@@ -421,6 +484,21 @@ export function LiveMapPage() {
     if (techSearch.trim() && sorted.length === 1) return sorted[0];
     return null;
   }, [selectedId, sorted, techSearch]);
+
+  if (!allowed) {
+    return (
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Live map</h2>
+        <p className="error" style={{ marginBottom: "0.75rem" }}>
+          Live map is for supervisors, warehouse, shop, and office — field techs do not see
+          where others are.
+        </p>
+        <Link to="/" className="btn secondary">
+          Back to home
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="live-page">
@@ -453,10 +531,15 @@ export function LiveMapPage() {
             <span className="badge warning">not configured</span>
           ) : os.ok ? (
             <span className={`badge ${filter === "onestep" || filter === "all" ? "ok" : ""}`}>
-              {os.count} units
+              {os.count} on map
+              {typeof os.without_position === "number" && os.without_position > 0
+                ? ` · ${os.without_position} no GPS yet`
+                : ""}
             </span>
           ) : (
-            <span className="badge danger">error</span>
+            <span className="badge danger" title={os.error || "OneStep error"}>
+              error
+            </span>
           )}
         </button>
         <button
@@ -485,6 +568,105 @@ export function LiveMapPage() {
             <span className="badge danger">error</span>
           )}
         </button>
+        {os?.ok && typeof os.without_position === "number" && os.without_position > 0 && (
+          <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}>
+            New OneStep trackers appear here automatically once they report a GPS fix.{" "}
+            {os.without_position} device{os.without_position === 1 ? "" : "s"} visible in OneStep but
+            not on the map yet (no location / not powered on).
+          </p>
+        )}
+        {os && !os.ok && os.error && (
+          <p className="error" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}>
+            OneStep: {os.error}
+          </p>
+        )}
+        {os?.ok && Array.isArray(os.devices) && os.devices.length > 0 && (
+          <details className="live-onestep-devices" style={{ width: "100%", marginTop: "0.45rem" }}>
+            <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: "0.88rem" }}>
+              All OneStep devices ({os.devices.length}) — new trackers auto-show when they have GPS
+            </summary>
+            <ul
+              className="muted"
+              style={{
+                margin: "0.4rem 0 0",
+                paddingLeft: "1.1rem",
+                fontSize: "0.82rem",
+                lineHeight: 1.45,
+                maxHeight: "9rem",
+                overflow: "auto",
+              }}
+            >
+              {os.devices.map((d) => (
+                <li key={d.id}>
+                  <strong>{d.name}</strong>
+                  {d.unit_number ? ` · Unit ${d.unit_number}` : " · not linked to a unit"}
+                  {d.has_position ? " · on map" : " · no GPS fix yet"}
+                  {d.online === false ? " · offline" : ""}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+        {coverage.length > 0 && (
+          <div
+            className="live-coverage-panel"
+            style={{ width: "100%", marginTop: "0.55rem", fontSize: "0.88rem" }}
+          >
+            <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>
+              Fleet coverage:{" "}
+              <span className="badge ok">{onMapUnits.length} on map</span>{" "}
+              <span className={`badge ${missingUnits.length ? "danger" : ""}`}>
+                {missingUnits.length} missing
+              </span>{" "}
+              <span className={`badge ${noGpsUnits.length ? "warning" : ""}`}>
+                {noGpsUnits.length} no GPS system
+              </span>
+            </p>
+            {missingUnits.length > 0 && (
+              <details open style={{ marginBottom: "0.35rem" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--danger, #c53030)" }}>
+                  Missing from live map ({missingUnits.length}) — expected to track
+                </summary>
+                <ul style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem", lineHeight: 1.45 }}>
+                  {missingUnits.map((c) => (
+                    <li key={c.vehicle_id}>
+                      <strong>Unit {c.unit_number}</strong>
+                      {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
+                      {c.gps_tracker ? ` · ${c.gps_tracker}` : ""}
+                      <div className="muted" style={{ fontSize: "0.8rem" }}>
+                        {c.reason}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {noGpsUnits.length > 0 && (
+              <details>
+                <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                  No GPS system assigned ({noGpsUnits.length}) — not expected on map yet
+                </summary>
+                <ul
+                  className="muted"
+                  style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem", lineHeight: 1.45 }}
+                >
+                  {noGpsUnits.map((c) => (
+                    <li key={c.vehicle_id}>
+                      <strong>Unit {c.unit_number}</strong>
+                      {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
+                      {c.status !== "active" ? ` · ${c.status}` : ""}
+                    </li>
+                  ))}
+                </ul>
+                <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.8rem" }}>
+                  Set GPS system to One Step or Verizon on Trucks, and name the tracker so it
+                  matches the unit or driver.
+                </p>
+              </details>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Search + Map/Call sit ABOVE the map so no scroll is needed */}
@@ -615,7 +797,8 @@ export function LiveMapPage() {
           </h2>
           <p className="muted live-list-nav-hint no-print">
             Search or tap a tech, then choose <strong>Map</strong> or <strong>Call</strong> — no need
-            to know their number.
+            to know their number. <span style={{ color: "#c53030", fontWeight: 600 }}>Red</span> =
+            out of service (still tracked).
           </p>
           {!sorted.length && !loading && (
             <div className="empty">
@@ -630,7 +813,9 @@ export function LiveMapPage() {
             {sorted.map((p) => (
               <li key={p.id}>
                 <div
-                  className={`live-vehicle-row ${selected?.id === p.id ? "selected" : ""}`}
+                  className={`live-vehicle-row ${selected?.id === p.id ? "selected" : ""}${
+                    p.out_of_service ? " is-oos" : ""
+                  }`}
                 >
                   <button
                     type="button"
@@ -638,12 +823,18 @@ export function LiveMapPage() {
                     onClick={() => focusPosition(p)}
                   >
                     <div className="live-vehicle-top">
-                      <strong>
+                      <strong style={p.out_of_service ? { color: "#c53030" } : undefined}>
                         {p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle"}
                       </strong>
-                      <span className={`badge ${p.provider === "onestep" ? "ok" : "info"}`}>
-                        {providerLabel(p.provider)}
-                      </span>
+                      {p.out_of_service ? (
+                        <span className="badge danger" title="Out of service — still on map for accountability">
+                          Out of service
+                        </span>
+                      ) : (
+                        <span className={`badge ${p.provider === "onestep" ? "ok" : "info"}`}>
+                          {providerLabel(p.provider)}
+                        </span>
+                      )}
                     </div>
                     <div className="live-vehicle-driver">
                       {p.driver_name || "Unassigned"}

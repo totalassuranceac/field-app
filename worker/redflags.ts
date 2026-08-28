@@ -1,4 +1,5 @@
 import { getSetting } from "./audit";
+import { resolveTankCapacity } from "./tankCapacity";
 import type { FuelEntryRow } from "./types";
 
 export interface AlertDraft {
@@ -34,6 +35,41 @@ export async function evaluateMileageAlerts(
   // Many gallons with almost no miles since last fill
   const maxGalLowMiles = Number(await getSetting(db, "max_gallons_low_miles", "12"));
   const lowMilesThreshold = Number(await getSetting(db, "low_miles_for_gallons", "15"));
+  const overfillTolPct = Number(await getSetting(db, "tank_overfill_tolerance_pct", "3"));
+
+  // Tank overfill: gallons exceed known / suggested tank capacity
+  const gallonsNow = entry.gallons ?? null;
+  if (gallonsNow != null && gallonsNow > 0) {
+    const vehicle = await db
+      .prepare(
+        `SELECT make, model, tank_capacity_gallons FROM vehicles WHERE id = ?`
+      )
+      .bind(entry.vehicle_id)
+      .first<{
+        make: string | null;
+        model: string | null;
+        tank_capacity_gallons: number | null;
+      }>();
+    if (vehicle) {
+      const capacity = resolveTankCapacity(
+        vehicle.tank_capacity_gallons,
+        vehicle.make,
+        vehicle.model
+      );
+      if (capacity != null && capacity > 0) {
+        const limit = capacity * (1 + (Number.isFinite(overfillTolPct) ? overfillTolPct : 3) / 100);
+        if (gallonsNow > limit) {
+          const label = [vehicle.make, vehicle.model].filter(Boolean).join(" ") || "this unit";
+          const ratio = gallonsNow / capacity;
+          alerts.push({
+            alert_type: "large_jump",
+            message: `Tank overfill: ${gallonsNow.toFixed(1)} gal vs ~${capacity} gal capacity (${label}). Check unit, receipt gallons, or update tank size on Vehicles.`,
+            severity: ratio > 1.15 ? "critical" : "warning",
+          });
+        }
+      }
+    }
+  }
 
   const prev = await db
     .prepare(

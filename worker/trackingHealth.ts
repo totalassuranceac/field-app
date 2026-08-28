@@ -41,6 +41,19 @@ export interface VehicleTrackRow {
   gps_status: string | null;
   dash_cam_status: string;
   cam_type: string | null;
+  assigned_driver?: string | null;
+}
+
+export interface CoverageRow {
+  vehicle_id: number;
+  unit_number: string;
+  assigned_driver: string | null;
+  status: string;
+  gps_tracker: string | null;
+  /** on_map | missing | no_gps_assigned */
+  coverage: "on_map" | "missing" | "no_gps_assigned";
+  reason: string;
+  provider?: string | null;
 }
 
 export interface TrackingHealthSummary {
@@ -52,11 +65,20 @@ export interface TrackingHealthSummary {
     equipment_manual: number;
     unmatched_devices: number;
     total: number;
+    /** Fleet units (non-retired) with no live pin */
+    missing_from_map: number;
+    on_map: number;
+    no_gps_assigned: number;
   };
   issues: TrackingIssue[];
   /** Active units with a GPS system that should appear live */
   expected_trackers: number;
   live_matched: number;
+  /**
+   * Per-vehicle coverage vs live map (non-retired fleet).
+   * Use this to see which app vehicles are missing from Live map.
+   */
+  coverage: CoverageRow[];
 }
 
 export function normalizeGpsProvider(
@@ -114,6 +136,7 @@ export function computeTrackingHealth(
 
   let expected = 0;
   let liveMatched = 0;
+  const coverage: CoverageRow[] = [];
 
   for (const v of vehicles) {
     if (v.status === "retired") continue;
@@ -122,6 +145,45 @@ export function computeTrackingHealth(
     const tracked = expectsTracking(v);
     const liveHits = byVehicle.get(v.id) || [];
     const best = liveHits[0] || null;
+    const driver = (v.assigned_driver || "").trim() || null;
+
+    // Per-unit coverage for Live map “who’s missing”
+    if (best) {
+      coverage.push({
+        vehicle_id: v.id,
+        unit_number: v.unit_number,
+        assigned_driver: driver,
+        status: v.status,
+        gps_tracker: v.gps_tracker,
+        coverage: "on_map",
+        reason: `Live on ${providerLabel(best.provider)}`,
+        provider: best.provider,
+      });
+    } else if (tracked) {
+      coverage.push({
+        vehicle_id: v.id,
+        unit_number: v.unit_number,
+        assigned_driver: driver,
+        status: v.status,
+        gps_tracker: v.gps_tracker,
+        coverage: "missing",
+        reason: v.gps_tracker
+          ? `Has ${v.gps_tracker} but no live pin (name mismatch, offline, or no GPS fix)`
+          : "Expected on map but no live pin",
+        provider,
+      });
+    } else {
+      coverage.push({
+        vehicle_id: v.id,
+        unit_number: v.unit_number,
+        assigned_driver: driver,
+        status: v.status,
+        gps_tracker: v.gps_tracker,
+        coverage: "no_gps_assigned",
+        reason: "No GPS system set on vehicle (or GPS not expected) — will not show until OneStep/Verizon is assigned and reporting",
+        provider: null,
+      });
+    }
 
     // Manual equipment flags (always useful)
     if (v.gps_status === "not_working" || v.gps_status === "missing") {
@@ -224,6 +286,14 @@ export function computeTrackingHealth(
     }
   }
 
+  coverage.sort((a, b) => {
+    const rank = { missing: 0, no_gps_assigned: 1, on_map: 2 };
+    return (
+      rank[a.coverage] - rank[b.coverage] ||
+      a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true })
+    );
+  });
+
   // Devices on the feed not linked to a fleet unit
   for (const p of positions) {
     if (p.vehicle_id != null) continue;
@@ -258,6 +328,9 @@ export function computeTrackingHealth(
       .length,
     unmatched_devices: issues.filter((i) => i.code === "unmatched_device").length,
     total: issues.length,
+    missing_from_map: coverage.filter((c) => c.coverage === "missing").length,
+    on_map: coverage.filter((c) => c.coverage === "on_map").length,
+    no_gps_assigned: coverage.filter((c) => c.coverage === "no_gps_assigned").length,
   };
 
   return {
@@ -266,6 +339,7 @@ export function computeTrackingHealth(
     issues,
     expected_trackers: expected,
     live_matched: liveMatched,
+    coverage,
   };
 }
 

@@ -53,12 +53,43 @@ interface Issue {
   parts_used: string | null;
   labor_hours: number | null;
   created_at: string;
+  completed_at?: string | null;
+  completed_by_user_id?: number | null;
+  completed_by_name?: string | null;
+  /** driver = tech report; shop = mechanic logged work */
+  origin?: string | null;
   /** pending | confirmed | declined — tech appointment accountability */
   tech_confirm_status?: string | null;
   tech_confirmed_at?: string | null;
   tech_confirmed_by_user_id?: number | null;
   tech_confirmed_by_name?: string | null;
   tech_confirm_note?: string | null;
+}
+
+function todayIsoDate(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function formatPrintWhen(raw: string | null | undefined): string {
+  if (!raw) return "—";
+  const s = String(raw).replace("T", " ").slice(0, 16);
+  return s || "—";
+}
+
+function formatPrintDay(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 /** All open problems for one unit — shop board + print work list */
@@ -162,12 +193,29 @@ export function IssuesPage() {
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [showNew, setShowNew] = useState(false);
+  /** Mechanic logs work they did without a driver ticket */
+  const [showShopLog, setShowShopLog] = useState(false);
   const [manage, setManage] = useState<Issue | null>(null);
 
   const [vehicleId, setVehicleId] = useState("");
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
   const [isEmergency, setIsEmergency] = useState(false);
+
+  /** Calendar day for “Done today / by date” supervisor view */
+  const [completedDay, setCompletedDay] = useState(todayIsoDate);
+
+  // Shop log form (create completed / in_progress work order)
+  const [sVehicleId, setSVehicleId] = useState("");
+  const [sStatus, setSStatus] = useState<"completed" | "in_progress">("completed");
+  const [sConcerns, setSConcerns] = useState<string[]>([]);
+  const [sProblemFound, setSProblemFound] = useState("");
+  const [sDiagnostics, setSDiagnostics] = useState("");
+  const [sWork, setSWork] = useState("");
+  const [sParts, setSParts] = useState("");
+  const [sLabor, setSLabor] = useState("");
+  const [sOilOdo, setSOilOdo] = useState("");
+  const [sOilInterval, setSOilInterval] = useState("5000");
 
   const [mStatus, setMStatus] = useState("scheduled");
   const [mDate, setMDate] = useState("");
@@ -206,11 +254,16 @@ export function IssuesPage() {
   const submitLock = useRef(false);
   /** Receipts on file for soft prompt when completing */
   const [jobReceiptCount, setJobReceiptCount] = useState(0);
-  /** After complete — offer unit parts history */
+  /** After complete — offer unit parts history + tech receipt print */
   const [postComplete, setPostComplete] = useState<{
     vehicleId: number;
     unitNumber: string;
+    issue: Issue | null;
   } | null>(null);
+  /** What browser print should show: open work order (default) vs tech receipt / day log */
+  const [printTarget, setPrintTarget] = useState<
+    null | { kind: "receipt"; issue: Issue } | { kind: "day-log" }
+  >(null);
   const [confirmBusyId, setConfirmBusyId] = useState<number | null>(null);
   const [declineId, setDeclineId] = useState<number | null>(null);
   const [declineNote, setDeclineNote] = useState("");
@@ -218,13 +271,19 @@ export function IssuesPage() {
   async function load() {
     // Deep-link always loads the shop board so the target ticket is present
     const deepId = searchParams.get("id");
-    const q = deepId
-      ? "?report=schedule"
-      : filter === "active" || filter === "today"
-        ? "?report=schedule"
-        : filter === "all"
-          ? ""
-          : `?status=${filter}`;
+    let q = "";
+    if (deepId) {
+      q = "?report=schedule";
+    } else if (filter === "active" || filter === "today") {
+      q = "?report=schedule";
+    } else if (filter === "done_day") {
+      const day = completedDay || todayIsoDate();
+      q = `?report=completed_day&completed_on=${encodeURIComponent(day)}`;
+    } else if (filter === "all") {
+      q = "";
+    } else {
+      q = `?status=${filter}`;
+    }
     const useSchedule = q === "?report=schedule";
     const [iss, vehs, board] = await Promise.all([
       api<{ issues: Issue[]; needs_schedule?: number }>(`/issues${q}`),
@@ -336,12 +395,187 @@ export function IssuesPage() {
 
   useEffect(() => {
     load().catch((e) => setError(e.message));
-  }, [filter]);
+  }, [filter, completedDay]);
 
   useEffect(() => {
     const opt = DRIVER_ISSUE_OPTIONS.find((o) => o.value === category);
     if (opt?.emergency) setIsEmergency(true);
   }, [category]);
+
+  // Body classes drive which print layout is visible (work order vs tech receipt vs day log)
+  useEffect(() => {
+    const clsReceipt = "print-shop-receipt";
+    const clsDay = "print-shop-day-log";
+    document.body.classList.remove(clsReceipt, clsDay);
+    if (printTarget?.kind === "receipt") document.body.classList.add(clsReceipt);
+    if (printTarget?.kind === "day-log") document.body.classList.add(clsDay);
+    return () => {
+      document.body.classList.remove(clsReceipt, clsDay);
+    };
+  }, [printTarget]);
+
+  useEffect(() => {
+    function onAfterPrint() {
+      setPrintTarget(null);
+    }
+    window.addEventListener("afterprint", onAfterPrint);
+    return () => window.removeEventListener("afterprint", onAfterPrint);
+  }, []);
+
+  function runPrint(
+    target: { kind: "receipt"; issue: Issue } | { kind: "day-log" } | null
+  ) {
+    setPrintTarget(target);
+    // Wait for body class + print DOM to paint
+    window.setTimeout(() => {
+      window.print();
+    }, 80);
+  }
+
+  function printTechReceipt(issue: Issue) {
+    runPrint({ kind: "receipt", issue });
+  }
+
+  function printCompletedDayLog() {
+    runPrint({ kind: "day-log" });
+  }
+
+  function printOpenWorkOrder() {
+    setPrintTarget(null);
+    window.setTimeout(() => window.print(), 40);
+  }
+
+  function resetShopLogForm() {
+    setSVehicleId("");
+    setSStatus("completed");
+    setSConcerns([]);
+    setSProblemFound("");
+    setSDiagnostics("");
+    setSWork("");
+    setSParts("");
+    setSLabor("");
+    setSOilOdo("");
+    setSOilInterval("5000");
+  }
+
+  function openShopLog() {
+    resetShopLogForm();
+    setShowShopLog(true);
+    setError("");
+    setOk("");
+  }
+
+  function toggleShopConcern(label: string) {
+    setSConcerns((prev) => {
+      if (prev.includes(label)) return prev.filter((x) => x !== label);
+      return [...prev, label];
+    });
+  }
+
+  const shopLogIsOil = sConcerns.includes("Oil change");
+
+  async function createShopWork(e: FormEvent) {
+    e.preventDefault();
+    if (submitLock.current || submitting) return;
+    setError("");
+    setOk("");
+    if (!sVehicleId) {
+      setError("Pick the unit you worked on.");
+      return;
+    }
+    if (sStatus === "completed") {
+      if (!sConcerns.length && !sProblemFound.trim()) {
+        setError("Check vehicle / tech concerns and/or enter problem found.");
+        return;
+      }
+      if (!sWork.trim() && !sDiagnostics.trim()) {
+        setError("Enter diagnostics/troubleshooting and/or work performed.");
+        return;
+      }
+    }
+    if (sStatus === "completed" && shopLogIsOil) {
+      if (!sOilOdo.trim() || !Number.isFinite(Number(sOilOdo)) || Number(sOilOdo) < 0) {
+        setError("Enter the odometer reading at this oil change.");
+        return;
+      }
+    }
+
+    const title =
+      joinShopConcerns(sConcerns) ||
+      sProblemFound.trim().slice(0, 80) ||
+      "Shop work";
+
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      const res = await api<{ message?: string; issue?: { id: number } }>("/issues", {
+        method: "POST",
+        body: JSON.stringify({
+          shop_work: true,
+          vehicle_id: Number(sVehicleId),
+          status: sStatus,
+          title,
+          mechanic_diagnosis: joinShopConcerns(sConcerns) || null,
+          completion_notes: sProblemFound.trim() || null,
+          work_performed: packWorkPerformed(sDiagnostics, sWork),
+          parts_used: sParts.trim() || null,
+          labor_hours: sLabor === "" ? null : Number(sLabor),
+          record_oil_change: sStatus === "completed" && shopLogIsOil,
+          oil_odometer:
+            sStatus === "completed" && shopLogIsOil ? Number(sOilOdo) : null,
+          oil_interval_miles:
+            sStatus === "completed" && shopLogIsOil
+              ? Number(sOilInterval) || 5000
+              : null,
+        }),
+      });
+      const vid = Number(sVehicleId);
+      const unit =
+        vehicles.find((v) => v.id === vid)?.unit_number || String(vid);
+      setShowShopLog(false);
+      resetShopLogForm();
+      setOk(res.message || "Shop work logged.");
+      if (sStatus === "completed") {
+        const snap: Issue = {
+          id: res.issue?.id ?? 0,
+          vehicle_id: vid,
+          unit_number: unit,
+          assigned_driver:
+            vehicles.find((v) => v.id === vid)?.assigned_driver || null,
+          reporter_name: user?.display_name || "Shop",
+          severity: "medium",
+          title,
+          description: null,
+          status: "completed",
+          scheduled_date: null,
+          schedule_notes: null,
+          completion_notes: sProblemFound.trim() || null,
+          issue_category: null,
+          is_emergency: 0,
+          mechanic_diagnosis: joinShopConcerns(sConcerns) || null,
+          work_performed: packWorkPerformed(sDiagnostics, sWork),
+          parts_used: sParts.trim() || null,
+          labor_hours: sLabor === "" ? null : Number(sLabor),
+          created_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+          completed_by_name: user?.display_name || null,
+          origin: "shop",
+        };
+        setPostComplete({ vehicleId: vid, unitNumber: unit, issue: snap });
+        // useEffect on filter/completedDay reloads the day list
+        setCompletedDay(todayIsoDate());
+        setFilter("done_day");
+      } else {
+        setFilter("in_progress");
+        await load();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to log shop work");
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
+    }
+  }
 
   async function createIssue(e: FormEvent) {
     e.preventDefault();
@@ -569,8 +803,23 @@ export function IssuesPage() {
       } else {
         setOk(statusOk[mStatus] || "Repair record saved.");
       }
-      if (mStatus === "completed" && vehicleIdDone) {
-        setPostComplete({ vehicleId: vehicleIdDone, unitNumber: unitDone });
+      if (mStatus === "completed" && vehicleIdDone && manage) {
+        const snap: Issue = {
+          ...manage,
+          status: "completed",
+          mechanic_diagnosis: joinShopConcerns(mConcerns) || null,
+          completion_notes: mProblemFound.trim() || null,
+          work_performed: packWorkPerformed(mDiagnostics, mWork),
+          parts_used: mParts || null,
+          labor_hours: mLabor === "" ? null : Number(mLabor),
+          completed_at: new Date().toISOString(),
+          completed_by_name: user?.display_name || manage.completed_by_name || null,
+        };
+        setPostComplete({
+          vehicleId: vehicleIdDone,
+          unitNumber: unitDone,
+          issue: snap,
+        });
       } else {
         setPostComplete(null);
       }
@@ -670,6 +919,11 @@ export function IssuesPage() {
             </span>
           )}
           <span className="log-item-badge">{i.status.replace(/_/g, " ")}</span>
+          {i.origin === "shop" && (
+            <span className="log-item-badge" title="Mechanic logged this work (no driver ticket)">
+              Shop logged
+            </span>
+          )}
           {confirmBadge(i)}
           <span className="shop-unit-issue-title">{head}</span>
         </div>
@@ -700,6 +954,12 @@ export function IssuesPage() {
             {shopNote.length > 160 ? `${shopNote.slice(0, 160)}…` : shopNote}
           </div>
         )}
+        {!isDriver && i.parts_used && (
+          <div className="shop-unit-issue-meta">
+            <span className="muted">Parts: </span>
+            {i.parts_used}
+          </div>
+        )}
         <div className="muted shop-unit-issue-meta">
           {i.assigned_driver ? (
             <>
@@ -709,7 +969,21 @@ export function IssuesPage() {
               {" · "}
             </>
           ) : null}
-          Reported by {i.reporter_name} · {i.severity} · {when}
+          {i.status === "completed" ? (
+            <>
+              Completed
+              {i.completed_by_name ? ` by ${i.completed_by_name}` : ""}
+              {i.completed_at
+                ? ` · ${String(i.completed_at).slice(0, 16).replace("T", " ")}`
+                : ""}
+              {i.origin === "shop" ? " · shop-origin" : i.reporter_name ? ` · reported by ${i.reporter_name}` : ""}
+              {i.labor_hours != null ? ` · ${i.labor_hours}h labor` : ""}
+            </>
+          ) : (
+            <>
+              Reported by {i.reporter_name} · {i.severity} · {when}
+            </>
+          )}
         </div>
         {i.status === "scheduled" && i.schedule_notes && (
           <div className="shop-unit-issue-meta">
@@ -794,6 +1068,15 @@ export function IssuesPage() {
             <button className="btn btn-sm" type="button" onClick={() => openManage(i)}>
               {i.status === "open" || opts?.scheduleCta ? "Schedule / shop work" : "Shop work"}
             </button>
+            {i.status === "completed" && (
+              <button
+                className="btn secondary btn-sm"
+                type="button"
+                onClick={() => printTechReceipt(i)}
+              >
+                Print tech receipt
+              </button>
+            )}
             {needsTechConfirm && i.status === "scheduled" && (
               <span className="muted" style={{ fontSize: "0.82rem", alignSelf: "center" }}>
                 Tech has not confirmed yet
@@ -854,8 +1137,13 @@ export function IssuesPage() {
     );
   }
 
+  const receiptIssue =
+    printTarget?.kind === "receipt" ? printTarget.issue : null;
+  const receiptUnpacked = unpackWorkPerformed(receiptIssue?.work_performed);
+
   return (
-    <div>
+    <div className="issues-page">
+      <div className="shop-screen">
       <div className="page-header">
         <div>
           <h1>
@@ -866,12 +1154,17 @@ export function IssuesPage() {
           <p>
             {isDriver
               ? "Tell us what’s wrong — pick from the list. Flat tires go out as emergency. When the shop books a day, you’ll get an alert to bring the unit in."
-              : "Needs scheduling first. Book a date and the tech is notified. Mark In progress when the van is in the bay."}
+              : "Needs scheduling first. Book a date and the tech is notified. Mark In progress when the van is in the bay. Log shop work yourself when you fix something without a driver ticket. Supervisors: Done today shows completed work by day. After a job, print a tech receipt for the driver."}
           </p>
         </div>
         <div className="toolbar no-print">
+          {canShop && (
+            <button className="btn btn-sm" type="button" onClick={openShopLog}>
+              Log shop work
+            </button>
+          )}
           {can(user, "reportIssues") && !isOffice && (
-            <button className="btn btn-sm" type="button" onClick={() => setShowNew(true)}>
+            <button className="btn secondary btn-sm" type="button" onClick={() => setShowNew(true)}>
               {isDriver ? "New request" : "Report issue"}
             </button>
           )}
@@ -881,8 +1174,13 @@ export function IssuesPage() {
             </Link>
           )}
           {canShop && (
-            <button className="btn secondary btn-sm" type="button" onClick={() => window.print()}>
+            <button className="btn secondary btn-sm" type="button" onClick={printOpenWorkOrder}>
               Print work order
+            </button>
+          )}
+          {canShop && filter === "done_day" && issues.length > 0 && (
+            <button className="btn secondary btn-sm" type="button" onClick={printCompletedDayLog}>
+              Print day log
             </button>
           )}
         </div>
@@ -893,12 +1191,21 @@ export function IssuesPage() {
           <div>
             <strong>Unit {postComplete.unitNumber} job finished</strong>
             <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.88rem" }}>
-              Review all parts receipts and costs for this vehicle.
+              Print a receipt for the tech, or review parts costs for this unit.
             </p>
           </div>
           <div className="toolbar">
+            {postComplete.issue && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => printTechReceipt(postComplete.issue!)}
+              >
+                Print tech receipt
+              </button>
+            )}
             <Link
-              className="btn btn-sm"
+              className="btn secondary btn-sm"
               to={`/parts-receipts?vehicle=${postComplete.vehicleId}`}
             >
               Unit parts history
@@ -911,93 +1218,6 @@ export function IssuesPage() {
               Dismiss
             </button>
           </div>
-        </div>
-      )}
-
-      {/* Print: one continuous list — units numerical, all issues under each unit */}
-      {canShop && (
-        <div className="print-only shop-print-worklist" aria-hidden>
-          <header className="shop-print-header">
-            <h1>Shop work order</h1>
-            <p>
-              Printed {printPrintedOn}
-              {printByVehicle.length
-                ? ` · ${printByVehicle.length} unit${printByVehicle.length === 1 ? "" : "s"} · ${
-                    workList.filter((i) =>
-                      ["open", "scheduled", "in_progress"].includes(i.status)
-                    ).length
-                  } problem${
-                    workList.filter((i) =>
-                      ["open", "scheduled", "in_progress"].includes(i.status)
-                    ).length === 1
-                      ? ""
-                      : "s"
-                  }`
-                : " · no open work"}
-            </p>
-            <p className="shop-print-cover-note">
-              All issues listed by unit number (numerical order). Continuous pages — not one sheet
-              per vehicle.
-            </p>
-          </header>
-          {printByVehicle.length === 0 ? (
-            <p>No open or scheduled repairs.</p>
-          ) : (
-            <table className="shop-print-index-table">
-              <thead>
-                <tr>
-                  <th className="col-unit">Unit</th>
-                  <th className="col-driver">Driver</th>
-                  <th className="col-n">#</th>
-                  <th>All issues for this vehicle</th>
-                  <th className="col-flags">Status / flags</th>
-                </tr>
-              </thead>
-              <tbody>
-                {printByVehicle.map((g) => (
-                  <tr key={g.vehicle_id}>
-                    <td className="col-unit">
-                      <strong>{g.unit_number}</strong>
-                    </td>
-                    <td className="col-driver">
-                      {g.assigned_driver?.trim() || "—"}
-                    </td>
-                    <td className="col-n">{g.issues.length}</td>
-                    <td>
-                      <ol className="shop-print-index-problems">
-                        {g.issues.map((i) => (
-                          <li key={i.id}>
-                            <span className="shop-print-issue-main">{issueHeadline(i)}</span>
-                            {i.description &&
-                              issueHeadline(i) !== i.description.trim() && (
-                                <div className="shop-print-issue-sub">{i.description}</div>
-                              )}
-                            <span className="shop-print-index-st">
-                              {i.status.replace(/_/g, " ")}
-                              {i.scheduled_date ? ` · need ${i.scheduled_date}` : ""}
-                              {i.is_emergency ? " · EMERGENCY" : ""}
-                              {i.reporter_name ? ` · reported by ${i.reporter_name}` : ""}
-                            </span>
-                          </li>
-                        ))}
-                      </ol>
-                    </td>
-                    <td className="col-flags">
-                      {g.hasEmergency ? "EMERGENCY" : ""}
-                      {g.needsSchedule > 0
-                        ? `${g.hasEmergency ? "\n" : ""}${g.needsSchedule} need schedule`
-                        : g.hasEmergency
-                          ? ""
-                          : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <footer className="shop-print-unit-foot">
-            Mechanic: ________________ · Date: ________
-          </footer>
         </div>
       )}
 
@@ -1078,10 +1298,11 @@ export function IssuesPage() {
           : [
               ["active", "Shop board"],
               ["today", "Today"],
+              ["done_day", "Done today"],
               ["open", `Needs schedule${needsSchedule.length ? ` (${needsSchedule.length})` : ""}`],
               ["scheduled", "Scheduled"],
               ["in_progress", "In progress"],
-              ["completed", "Completed"],
+              ["completed", "All completed"],
               ["all", "All"],
             ]
         ).map(([k, label]) => (
@@ -1096,7 +1317,62 @@ export function IssuesPage() {
         ))}
       </div>
 
-      {canShop && filter === "today" ? (
+      {canShop && filter === "done_day" && (
+        <div className="card no-print" style={{ marginBottom: "1rem" }}>
+          <div
+            className="toolbar"
+            style={{ flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end" }}
+          >
+            <label style={{ margin: 0 }}>
+              Completed on
+              <input
+                type="date"
+                value={completedDay}
+                onChange={(e) => setCompletedDay(e.target.value || todayIsoDate())}
+                style={{ display: "block", marginTop: "0.25rem" }}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn secondary btn-sm"
+              onClick={() => setCompletedDay(todayIsoDate())}
+            >
+              Today
+            </button>
+            {issues.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={printCompletedDayLog}
+              >
+                Print day log
+              </button>
+            )}
+            <p className="muted" style={{ margin: 0, fontSize: "0.88rem", flex: "1 1 12rem" }}>
+              Day-to-day shop work for supervisors — unit, what was done, who logged it. Print a
+              single tech receipt on each job, or print the full day log.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {canShop && filter === "done_day" ? (
+        <div className="shop-unit-list">
+          {(() => {
+            if (!issues.length) {
+              return (
+                <div className="muted empty">
+                  No completed shop work on {completedDay}. Change the date or use{" "}
+                  <strong>Log shop work</strong> when you finish a job without a driver ticket.
+                </div>
+              );
+            }
+            return groupIssuesByVehicle(issues).map((g) =>
+              renderVehicleGroup(g, { defaultOpen: true, scheduleCta: false })
+            );
+          })()}
+        </div>
+      ) : canShop && filter === "today" ? (
         <div className="shop-unit-list">
           {(() => {
             const todayIssues = issues.filter(isScheduledToday);
@@ -1173,6 +1449,210 @@ export function IssuesPage() {
               })
             );
           })()}
+        </div>
+      )}
+
+      {showShopLog && canShop && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!submitting) setShowShopLog(false);
+          }}
+        >
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+            <h2>Log shop work</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Record work you did in the shop without a driver repair request. No tech appointment
+              confirm. Supervisors see it under <strong>Done today</strong>.
+            </p>
+            <form className="form" onSubmit={createShopWork}>
+              <VehicleQuickPick
+                value={sVehicleId}
+                vehicles={vehicles as VehicleMatch[]}
+                onChange={(id) => {
+                  setSVehicleId(id);
+                  const veh = vehicles.find((v) => String(v.id) === String(id));
+                  if (veh?.current_odometer != null) {
+                    setSOilOdo(String(veh.current_odometer));
+                  }
+                }}
+                required
+                disabled={submitting}
+                label="Unit worked on"
+                placeholder="Type plate or unit #…"
+              />
+              <label>
+                Status
+                <select
+                  value={sStatus}
+                  onChange={(e) =>
+                    setSStatus(e.target.value === "in_progress" ? "in_progress" : "completed")
+                  }
+                  disabled={submitting}
+                >
+                  <option value="completed">Completed — job done</option>
+                  <option value="in_progress">In progress — unit in the bay now</option>
+                </select>
+              </label>
+              {sStatus === "in_progress" && (
+                <div className="info-banner" role="status">
+                  Marks the unit out of service until you complete the job from the shop board.
+                </div>
+              )}
+              <div className="shop-concerns-block">
+                <label className="shop-concerns-label" htmlFor="shop-log-concerns-summary">
+                  Vehicle issues / tech concerns
+                  {sStatus === "completed" ? " *" : ""}
+                </label>
+                <details className="shop-concerns-dropdown">
+                  <summary id="shop-log-concerns-summary" className="shop-concerns-summary">
+                    <span className="shop-concerns-summary-text">
+                      {sConcerns.length === 0
+                        ? "Select concerns…"
+                        : sConcerns.length === 1
+                          ? sConcerns[0]
+                          : `${sConcerns.length} selected`}
+                    </span>
+                    <span className="shop-concerns-summary-meta muted">
+                      {sConcerns.length > 0 ? "tap to edit" : "check all that apply"}
+                      <span className="shop-concerns-chevron" aria-hidden>
+                        ▾
+                      </span>
+                    </span>
+                  </summary>
+                  <ul
+                    className="shop-concerns-list"
+                    role="group"
+                    aria-label="Vehicle issues and concerns"
+                  >
+                    {SHOP_CONCERN_OPTIONS.map((label) => {
+                      const on = sConcerns.includes(label);
+                      return (
+                        <li key={label}>
+                          <label className={`shop-concern-row${on ? " is-on" : ""}`}>
+                            <span className="shop-concern-row-label">{label}</span>
+                            <input
+                              type="checkbox"
+                              className="shop-concern-row-check"
+                              checked={on}
+                              onChange={() => toggleShopConcern(label)}
+                              disabled={submitting}
+                            />
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </details>
+                {sConcerns.length > 1 && (
+                  <p className="shop-concerns-picks muted" aria-live="polite">
+                    {sConcerns.join(" · ")}
+                  </p>
+                )}
+              </div>
+              <label>
+                Problem found{sStatus === "completed" ? " *" : ""}
+                <textarea
+                  value={sProblemFound}
+                  onChange={(e) => setSProblemFound(e.target.value)}
+                  rows={2}
+                  placeholder="What was wrong"
+                  disabled={submitting}
+                />
+              </label>
+              <label>
+                Diagnostics / troubleshooting
+                <textarea
+                  value={sDiagnostics}
+                  onChange={(e) => setSDiagnostics(e.target.value)}
+                  rows={2}
+                  placeholder="Tests, codes, findings"
+                  disabled={submitting}
+                />
+              </label>
+              <label>
+                Work performed{sStatus === "completed" ? " *" : ""}
+                <textarea
+                  value={sWork}
+                  onChange={(e) => setSWork(e.target.value)}
+                  rows={sStatus === "completed" ? 3 : 2}
+                  placeholder="What you did"
+                  disabled={submitting}
+                  required={sStatus === "completed"}
+                />
+              </label>
+              <label>
+                Parts used
+                <textarea
+                  value={sParts}
+                  onChange={(e) => setSParts(e.target.value)}
+                  rows={2}
+                  placeholder="Part #s, description"
+                  disabled={submitting}
+                />
+              </label>
+              <label>
+                Labor hours
+                <input
+                  type="number"
+                  min={0}
+                  step={0.25}
+                  value={sLabor}
+                  onChange={(e) => setSLabor(e.target.value)}
+                  disabled={submitting}
+                  placeholder="e.g. 1.5"
+                />
+              </label>
+              {sStatus === "completed" && shopLogIsOil && (
+                <>
+                  <label>
+                    Odometer at oil change *
+                    <input
+                      type="number"
+                      min={0}
+                      value={sOilOdo}
+                      onChange={(e) => setSOilOdo(e.target.value)}
+                      required
+                      disabled={submitting}
+                    />
+                  </label>
+                  <label>
+                    Interval (miles)
+                    <input
+                      type="number"
+                      min={1000}
+                      step={500}
+                      value={sOilInterval}
+                      onChange={(e) => setSOilInterval(e.target.value)}
+                      disabled={submitting}
+                    />
+                  </label>
+                </>
+              )}
+              {submitting && (
+                <div className="info-banner" role="status" aria-live="polite">
+                  Saving shop work…
+                </div>
+              )}
+              <div className="toolbar">
+                <button className="btn" type="submit" disabled={submitting}>
+                  {submitting
+                    ? "Saving…"
+                    : sStatus === "completed"
+                      ? "Log completed work"
+                      : "Start in-progress job"}
+                </button>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => setShowShopLog(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
@@ -1677,6 +2157,329 @@ export function IssuesPage() {
               </div>
             </form>
           </div>
+        </div>
+      )}
+      </div>
+      {/* end shop-screen */}
+
+      {/* Print: tech work-completed receipt (hand to driver) */}
+      {canShop && receiptIssue && (
+        <div className="print-only shop-print-receipt" aria-hidden>
+          <header className="shop-receipt-header">
+            <div>
+              <p className="shop-receipt-brand">Total Assurance · Fleet shop</p>
+              <h1>Work completed receipt</h1>
+              <p className="shop-receipt-sub">For the technician / unit operator</p>
+            </div>
+            <div className="shop-receipt-meta">
+              <div>
+                <span className="shop-receipt-k">Job #</span> {receiptIssue.id || "—"}
+              </div>
+              <div>
+                <span className="shop-receipt-k">Printed</span> {printPrintedOn}
+              </div>
+            </div>
+          </header>
+
+          <section className="shop-receipt-unit">
+            <div className="shop-receipt-unit-main">
+              <span className="shop-receipt-unit-label">Unit</span>
+              <strong className="shop-receipt-unit-num">{receiptIssue.unit_number}</strong>
+            </div>
+            <div className="shop-receipt-grid">
+              <div>
+                <span className="shop-receipt-k">Assigned driver</span>
+                <div>{receiptIssue.assigned_driver?.trim() || "—"}</div>
+              </div>
+              <div>
+                <span className="shop-receipt-k">Completed</span>
+                <div>{formatPrintWhen(receiptIssue.completed_at)}</div>
+              </div>
+              <div>
+                <span className="shop-receipt-k">Completed by</span>
+                <div>
+                  {receiptIssue.completed_by_name || user?.display_name || "Shop"}
+                </div>
+              </div>
+              <div>
+                <span className="shop-receipt-k">Source</span>
+                <div>
+                  {receiptIssue.origin === "shop"
+                    ? "Shop logged (no driver ticket)"
+                    : `Reported by ${receiptIssue.reporter_name || "—"}`}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="shop-receipt-block">
+            <h2>Reported / title</h2>
+            <p>{receiptIssue.title}</p>
+            {receiptIssue.description ? (
+              <p className="shop-receipt-muted">
+                <strong>Tech said:</strong> {receiptIssue.description}
+              </p>
+            ) : null}
+          </section>
+
+          {receiptIssue.mechanic_diagnosis ? (
+            <section className="shop-receipt-block">
+              <h2>Vehicle / tech concerns</h2>
+              <p>{receiptIssue.mechanic_diagnosis}</p>
+            </section>
+          ) : null}
+
+          {receiptIssue.completion_notes ? (
+            <section className="shop-receipt-block">
+              <h2>Problem found</h2>
+              <p className="shop-receipt-pre">{receiptIssue.completion_notes}</p>
+            </section>
+          ) : null}
+
+          {(receiptUnpacked.diagnostics || receiptUnpacked.work) && (
+            <section className="shop-receipt-block">
+              {receiptUnpacked.diagnostics ? (
+                <>
+                  <h2>Diagnostics / troubleshooting</h2>
+                  <p className="shop-receipt-pre">{receiptUnpacked.diagnostics}</p>
+                </>
+              ) : null}
+              {receiptUnpacked.work ? (
+                <>
+                  <h2>Work performed</h2>
+                  <p className="shop-receipt-pre">{receiptUnpacked.work}</p>
+                </>
+              ) : null}
+            </section>
+          )}
+
+          {!receiptUnpacked.diagnostics &&
+            !receiptUnpacked.work &&
+            receiptIssue.work_performed && (
+              <section className="shop-receipt-block">
+                <h2>Work performed</h2>
+                <p className="shop-receipt-pre">{receiptIssue.work_performed}</p>
+              </section>
+            )}
+
+          <section className="shop-receipt-block shop-receipt-parts">
+            <div className="shop-receipt-grid">
+              <div>
+                <span className="shop-receipt-k">Parts used</span>
+                <p className="shop-receipt-pre">
+                  {receiptIssue.parts_used?.trim() || "— none listed —"}
+                </p>
+              </div>
+              <div>
+                <span className="shop-receipt-k">Labor hours</span>
+                <p>
+                  {receiptIssue.labor_hours != null &&
+                  receiptIssue.labor_hours !== undefined
+                    ? String(receiptIssue.labor_hours)
+                    : "—"}
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <footer className="shop-receipt-sign">
+            <div className="shop-receipt-sign-line">
+              <span>Mechanic sign / print</span>
+              <span className="shop-receipt-line" />
+            </div>
+            <div className="shop-receipt-sign-line">
+              <span>Tech received unit</span>
+              <span className="shop-receipt-line" />
+            </div>
+            <div className="shop-receipt-sign-line">
+              <span>Date / time</span>
+              <span className="shop-receipt-line" />
+            </div>
+            <p className="shop-receipt-foot-note">
+              Keep this slip with the unit paperwork. Shop copy is on file in Field App →
+              Repairs → Done today.
+            </p>
+          </footer>
+        </div>
+      )}
+
+      {/* Print: completed work day log (supervisors / shop) */}
+      {canShop && (
+        <div className="print-only shop-print-day-log" aria-hidden>
+          <header className="shop-print-header">
+            <h1>Shop work completed log</h1>
+            <p>
+              {formatPrintDay(completedDay)} · printed {printPrintedOn}
+              {issues.filter((i) => i.status === "completed").length
+                ? ` · ${issues.filter((i) => i.status === "completed").length} job${
+                    issues.filter((i) => i.status === "completed").length === 1
+                      ? ""
+                      : "s"
+                  }`
+                : ""}
+            </p>
+            <p className="shop-print-cover-note">
+              Day-to-day completed shop work for supervisors and office. One line per job.
+            </p>
+          </header>
+          {(() => {
+            const done = issues.filter((i) => i.status === "completed");
+            if (!done.length) {
+              return <p>No completed jobs on this date.</p>;
+            }
+            return (
+              <table className="shop-print-day-table">
+                <thead>
+                  <tr>
+                    <th className="col-time">When</th>
+                    <th className="col-unit">Unit</th>
+                    <th className="col-driver">Driver</th>
+                    <th>Work completed</th>
+                    <th className="col-who">By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {done.map((i) => {
+                    const up = unpackWorkPerformed(i.work_performed);
+                    const workLine =
+                      up.work ||
+                      up.diagnostics ||
+                      i.work_performed ||
+                      i.completion_notes ||
+                      i.title;
+                    return (
+                      <tr key={i.id}>
+                        <td className="col-time">
+                          {formatPrintWhen(i.completed_at).slice(11) ||
+                            formatPrintWhen(i.completed_at)}
+                        </td>
+                        <td className="col-unit">
+                          <strong>{i.unit_number}</strong>
+                          {i.origin === "shop" ? (
+                            <div className="shop-print-day-tag">shop</div>
+                          ) : null}
+                        </td>
+                        <td className="col-driver">
+                          {i.assigned_driver?.trim() || "—"}
+                        </td>
+                        <td>
+                          <div className="shop-print-issue-main">
+                            {i.mechanic_diagnosis || i.title}
+                          </div>
+                          <div className="shop-print-issue-sub">
+                            {workLine && workLine.length > 220
+                              ? `${workLine.slice(0, 220)}…`
+                              : workLine}
+                          </div>
+                          {i.parts_used ? (
+                            <div className="shop-print-index-st">Parts: {i.parts_used}</div>
+                          ) : null}
+                          {i.labor_hours != null ? (
+                            <div className="shop-print-index-st">
+                              Labor: {i.labor_hours}h
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="col-who">
+                          {i.completed_by_name || i.reporter_name || "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
+          <footer className="shop-print-unit-foot">
+            Reviewed by: ________________ · Date: ________
+          </footer>
+        </div>
+      )}
+
+      {/* Print: open work order list by unit */}
+      {canShop && (
+        <div className="print-only shop-print-worklist" aria-hidden>
+          <header className="shop-print-header">
+            <h1>Shop work order</h1>
+            <p>
+              Printed {printPrintedOn}
+              {printByVehicle.length
+                ? ` · ${printByVehicle.length} unit${
+                    printByVehicle.length === 1 ? "" : "s"
+                  } · ${
+                    workList.filter((i) =>
+                      ["open", "scheduled", "in_progress"].includes(i.status)
+                    ).length
+                  } problem${
+                    workList.filter((i) =>
+                      ["open", "scheduled", "in_progress"].includes(i.status)
+                    ).length === 1
+                      ? ""
+                      : "s"
+                  }`
+                : " · no open work"}
+            </p>
+            <p className="shop-print-cover-note">
+              All issues listed by unit number (numerical order). Continuous pages — not one
+              sheet per vehicle.
+            </p>
+          </header>
+          {printByVehicle.length === 0 ? (
+            <p>No open or scheduled repairs.</p>
+          ) : (
+            <table className="shop-print-index-table">
+              <thead>
+                <tr>
+                  <th className="col-unit">Unit</th>
+                  <th className="col-driver">Driver</th>
+                  <th className="col-n">#</th>
+                  <th>All issues for this vehicle</th>
+                  <th className="col-flags">Status / flags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {printByVehicle.map((g) => (
+                  <tr key={g.vehicle_id}>
+                    <td className="col-unit">
+                      <strong>{g.unit_number}</strong>
+                    </td>
+                    <td className="col-driver">{g.assigned_driver?.trim() || "—"}</td>
+                    <td className="col-n">{g.issues.length}</td>
+                    <td>
+                      <ol className="shop-print-index-problems">
+                        {g.issues.map((i) => (
+                          <li key={i.id}>
+                            <span className="shop-print-issue-main">{issueHeadline(i)}</span>
+                            {i.description &&
+                              issueHeadline(i) !== i.description.trim() && (
+                                <div className="shop-print-issue-sub">{i.description}</div>
+                              )}
+                            <span className="shop-print-index-st">
+                              {i.status.replace(/_/g, " ")}
+                              {i.scheduled_date ? ` · need ${i.scheduled_date}` : ""}
+                              {i.is_emergency ? " · EMERGENCY" : ""}
+                              {i.reporter_name ? ` · reported by ${i.reporter_name}` : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ol>
+                    </td>
+                    <td className="col-flags">
+                      {g.hasEmergency ? "EMERGENCY" : ""}
+                      {g.needsSchedule > 0
+                        ? `${g.hasEmergency ? "\n" : ""}${g.needsSchedule} need schedule`
+                        : g.hasEmergency
+                          ? ""
+                          : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <footer className="shop-print-unit-foot">
+            Mechanic: ________________ · Date: ________
+          </footer>
         </div>
       )}
     </div>

@@ -443,6 +443,9 @@ function applyNameplateHints(
     "global",
   ].filter(Boolean);
 
+  const blob = rawText.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const digitsBlob = blob.replace(/\D/g, "");
+
   for (const sk of keys) {
     const mMap = hints.subs[sk]?.model_number;
     if (mMap && out.model_number && mMap[out.model_number]) {
@@ -452,14 +455,22 @@ function applyNameplateHints(
     if (sMap && out.serial_number && sMap[out.serial_number]) {
       out.serial_number = sMap[out.serial_number];
     }
+    // Prefer previously corrected values that still appear (even garbled) in OCR text
     for (const v of hints.known_values[sk]?.model_number || []) {
-      if (rawText.toUpperCase().includes(v.toUpperCase()) && v.length >= 3) {
+      const vu = v.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (vu.length >= 5 && (blob.includes(vu) || rawText.toUpperCase().includes(v.toUpperCase()))) {
         out.model_number = v.toUpperCase();
         break;
       }
     }
     for (const v of hints.known_values[sk]?.serial_number || []) {
-      if (rawText.toUpperCase().includes(v.toUpperCase()) && v.length >= 4) {
+      const vu = v.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const vd = vu.replace(/\D/g, "");
+      if (
+        (vu.length >= 6 && blob.includes(vu)) ||
+        (vd.length >= 6 && digitsBlob.includes(vd)) ||
+        rawText.toUpperCase().includes(v.toUpperCase())
+      ) {
         out.serial_number = v.toUpperCase();
         break;
       }

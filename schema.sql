@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS employees (
   active INTEGER NOT NULL DEFAULT 1,
   phone TEXT,
   notes TEXT,
+  hire_date TEXT,
+  birthday_md TEXT,
+  -- Last day worked when marked inactive; used for 90-day PTO rehire rule
+  separation_date TEXT,
+  -- First-ever hire (kept when rehire restarts hire_date)
+  original_hire_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -47,6 +53,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   make TEXT,
   model TEXT,
   vin TEXT,
+  tank_capacity_gallons REAL,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'out_of_service', 'retired')),
   current_odometer REAL,
@@ -59,6 +66,9 @@ CREATE TABLE IF NOT EXISTS vehicles (
   gps_tracker TEXT,
   gps_status TEXT DEFAULT 'n/a'
     CHECK (gps_status IS NULL OR gps_status IN ('working', 'not_working', 'missing', 'n/a')),
+  last_lat REAL,
+  last_lng REAL,
+  last_gps_at TEXT,
   registration_expires TEXT,
   inspection_expires TEXT,
   insurance_expires TEXT,
@@ -132,6 +142,8 @@ CREATE TABLE IF NOT EXISTS vehicle_issues (
   completed_at TEXT,
   completion_notes TEXT,
   photo_key TEXT,
+  /** driver = tech reported; shop = mechanic logged work themselves */
+  origin TEXT NOT NULL DEFAULT 'driver',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -224,6 +236,22 @@ CREATE TABLE IF NOT EXISTS downtime_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Dump / landfill ticket logs (warehouse + mechanic)
+CREATE TABLE IF NOT EXISTS dump_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dump_date TEXT NOT NULL,
+  net_weight_lbs REAL NOT NULL,
+  total_amount REAL NOT NULL,
+  notes TEXT,
+  receipt_key TEXT NOT NULL,
+  ocr_raw_text TEXT,
+  logged_by_user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dump_runs_date ON dump_runs(dump_date);
+CREATE INDEX IF NOT EXISTS idx_dump_runs_created ON dump_runs(created_at);
+
 -- Receipt photos when R2 is not configured
 CREATE TABLE IF NOT EXISTS receipt_blobs (
   key TEXT PRIMARY KEY,
@@ -262,6 +290,8 @@ CREATE INDEX IF NOT EXISTS idx_fuel_employee ON fuel_entries(employee_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON mileage_alerts(status);
 CREATE INDEX IF NOT EXISTS idx_issues_status ON vehicle_issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_vehicle ON vehicle_issues(vehicle_id);
+CREATE INDEX IF NOT EXISTS idx_issues_completed_at ON vehicle_issues(completed_at);
+CREATE INDEX IF NOT EXISTS idx_issues_origin ON vehicle_issues(origin);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_vehicles_unit ON vehicles(unit_number);

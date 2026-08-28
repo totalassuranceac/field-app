@@ -34,8 +34,9 @@ export function LoginPage() {
         <h1>Field App</h1>
         <p className="sub">
           Trucks, warehouse, repairs, and parts — one place for the team. Sign in with your
-          username and password. First time? Open the invite link your admin sent you — enter
-          the username they gave you and create your password.
+          username and password (username is not case-sensitive; password is). First time? Open
+          the invite link your admin sent you — enter the username they gave you and create your
+          password.
         </p>
         {error && (
           <div className="error" style={{ marginBottom: "0.85rem" }}>

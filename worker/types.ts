@@ -27,7 +27,10 @@ export interface Env {
   /** Twilio SMS (optional — enables text alerts to drivers / shop) */
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
+  /** Legacy / fallback sender. Prefer TWILIO_MESSAGING_SERVICE_SID for A2P 10DLC. */
   TWILIO_FROM_NUMBER?: string;
+  /** A2P Messaging Service (MG…) — preferred; Twilio picks an approved From from the sender pool */
+  TWILIO_MESSAGING_SERVICE_SID?: string;
   /** LTS / Hikvision NVR for in-app warehouse camera snapshots (use Cloudflare Tunnel URL) */
   WAREHOUSE_NVR_URL?: string;
   WAREHOUSE_NVR_USER?: string;
@@ -90,6 +93,7 @@ export interface VehicleRow {
   make: string | null;
   model: string | null;
   vin: string | null;
+  tank_capacity_gallons: number | null;
   status: "active" | "out_of_service" | "retired";
   current_odometer: number | null;
   assigned_driver: string | null;
@@ -158,6 +162,8 @@ export interface VehicleIssueRow {
   completed_at: string | null;
   completion_notes: string | null;
   photo_key: string | null;
+  /** driver = tech reported; shop = mechanic logged work themselves */
+  origin: string | null;
   created_at: string;
   updated_at: string;
 }

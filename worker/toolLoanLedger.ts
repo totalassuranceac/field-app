@@ -175,6 +175,44 @@ function parseDate(v: unknown): string | null {
   return null;
 }
 
+/** Local YYYY-MM-DD at noon (avoids UTC off-by-one). */
+function toYmdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Pay Friday for tool loan deductions.
+ * Office runs payroll mid-week; guys are paid Friday — always post to that Friday.
+ * - Mon–Thu → this week's Friday
+ * - Friday → that day
+ * - Sat–Sun → next Friday
+ */
+export function toPayFriday(fromYmd?: string | null): string {
+  let d: Date;
+  if (fromYmd && /^\d{4}-\d{2}-\d{2}$/.test(fromYmd)) {
+    const [y, m, day] = fromYmd.split("-").map(Number);
+    d = new Date(y, m - 1, day, 12, 0, 0, 0);
+  } else {
+    const now = new Date();
+    d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0);
+  }
+  const day = d.getDay(); // 0=Sun … 5=Fri
+  const add = (5 - day + 7) % 7;
+  d.setDate(d.getDate() + add);
+  return toYmdLocal(d);
+}
+
+/** Monday of the pay week that ends on the given Friday (YYYY-MM-DD). */
+function payWeekMonday(fridayYmd: string): string {
+  const [y, m, day] = fridayYmd.split("-").map(Number);
+  const d = new Date(y, m - 1, day, 12, 0, 0, 0);
+  d.setDate(d.getDate() - 4); // Fri → Mon
+  return toYmdLocal(d);
+}
+
 /** Tables are created by migration 052 — skip DDL on every request (was risking hangs). */
 export async function ensureToolLoanLedgerTables(_db: D1Database): Promise<void> {
   return;
@@ -827,9 +865,17 @@ export function registerToolLoanLedger(api: App): void {
     const origin = new URL(c.req.url).origin;
     const logoUrl = `${origin}/logo-print.jpg`;
     const chargeDate = (charge.charge_date || "").slice(0, 10);
-    const prepared = new Date().toLocaleString("en-US", {
+    const printedAt = new Date();
+    const prepared = printedAt.toLocaleString("en-US", {
       dateStyle: "medium",
       timeStyle: "short",
+    });
+    /** Form date = day this copy was printed — no handwritten date needed */
+    const formDate = printedAt.toLocaleDateString("en-US", {
+      weekday: "short",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
     });
 
     const html = `<!DOCTYPE html>
@@ -955,19 +1001,20 @@ export function registerToolLoanLedger(api: App): void {
     .sign-block {
       border-top: 1px solid #94a3b8;
       padding-top: 0.45rem;
-      min-height: 4.5rem;
+      min-height: 3.75rem;
     }
     .sign-block .line {
       margin-top: 1.6rem;
       border-bottom: 1px solid #0f172a;
-      height: 1.4rem;
+      height: 1.55rem;
     }
-    /* Pre-filled printed name — separate from blank signature lines so print always shows text */
-    .sign-block .print-name-value {
-      margin-top: 1.1rem;
+    /* Pre-filled printed name / date — separate from blank signature lines */
+    .sign-block .print-name-value,
+    .sign-block .print-date-value {
+      margin-top: 0.85rem;
       border-bottom: 1px solid #000;
-      min-height: 1.65rem;
-      padding: 0.2rem 0 0.25rem;
+      min-height: 1.5rem;
+      padding: 0.15rem 0 0.2rem;
       font-size: 14px;
       font-weight: 700;
       color: #000 !important;
@@ -975,8 +1022,12 @@ export function registerToolLoanLedger(api: App): void {
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
+    .sign-block .print-date-value {
+      font-size: 13px;
+      font-weight: 600;
+    }
     .sign-block .cap {
-      margin-top: 0.35rem;
+      margin-top: 0.3rem;
       font-size: 10px;
       color: #64748b;
       font-weight: 600;
@@ -1065,10 +1116,10 @@ export function registerToolLoanLedger(api: App): void {
   <div class="sign">
     <div class="sign-block">
       <div class="line"></div>
-      <div class="cap">Employee signature</div>
+      <div class="cap">Technician / employee signature</div>
       <div class="print-name-value">${esc(charge.display_name)}</div>
       <div class="cap">Printed name</div>
-      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="print-date-value">${esc(formDate)}</div>
       <div class="cap">Date</div>
     </div>
     <div class="sign-block">
@@ -1076,7 +1127,7 @@ export function registerToolLoanLedger(api: App): void {
       <div class="cap">Office / supervisor signature</div>
       <div class="print-name-value">${esc(officePrinterName)}</div>
       <div class="cap">Printed name</div>
-      <div class="line" style="margin-top:1.1rem"></div>
+      <div class="print-date-value">${esc(formDate)}</div>
       <div class="cap">Date</div>
     </div>
   </div>
@@ -1103,22 +1154,69 @@ export function registerToolLoanLedger(api: App): void {
       amount?: number | string;
       payment_type?: string;
       note?: string;
+      /** When true (default for payroll), reject if already deducted this pay week */
+      prevent_duplicate_week?: boolean;
     }>();
     const personId = Number(body.person_id);
     const amount = parseMoney(body.amount);
-    const date = parseDate(body.payment_date) || new Date().toISOString().slice(0, 10);
     const ptype = ["payroll", "spiff", "other"].includes(body.payment_type || "")
       ? body.payment_type!
       : "payroll";
+    // Payroll always lands on the pay Friday so the paycheck date is clear for employees.
+    // Spiff/other keep the exact date provided (or today).
+    const rawDate = parseDate(body.payment_date);
+    const date =
+      ptype === "payroll"
+        ? toPayFriday(rawDate)
+        : rawDate || new Date().toISOString().slice(0, 10);
     if (!personId || amount == null || amount <= 0) {
       return c.json({ error: "person_id and positive amount required" }, 400);
     }
+
+    // Once per pay week: block if this person already has a payroll deduction
+    // dated that Friday OR anywhere Mon–Fri of the same week (legacy mid-week dates).
+    if (ptype === "payroll" && body.prevent_duplicate_week !== false) {
+      const weekMon = payWeekMonday(date);
+      const existing = await c.env.DB.prepare(
+        `SELECT id, amount, payment_date, created_at FROM tool_loan_payments
+         WHERE person_id = ?
+           AND payment_type = 'payroll'
+           AND IFNULL(voided, 0) = 0
+           AND payment_date >= ?
+           AND payment_date <= ?
+         ORDER BY payment_date DESC, id DESC
+         LIMIT 1`
+      )
+        .bind(personId, weekMon, date)
+        .first<{ id: number; amount: number; payment_date: string; created_at: string }>();
+      if (existing) {
+        return c.json(
+          {
+            error: `Payroll deduction already recorded for this employee this pay week ($${Number(
+              existing.amount
+            ).toFixed(2)} on ${existing.payment_date}). Apply only once per week — void that payment first if you need to re-apply.`,
+            already_exists: true,
+            payment_id: existing.id,
+            payment_date: existing.payment_date,
+            pay_friday: date,
+            amount: existing.amount,
+            created_at: existing.created_at,
+          },
+          409
+        );
+      }
+    }
+
+    const note =
+      (body.note || "").trim() ||
+      (ptype === "payroll" ? `Payroll deduction for Friday ${date}` : null);
+
     const r = await c.env.DB.prepare(
       `INSERT INTO tool_loan_payments
          (person_id, payment_date, amount, payment_type, note, source, created_by_user_id)
        VALUES (?, ?, ?, ?, ?, 'manual', ?)`
     )
-      .bind(personId, date, amount, ptype, body.note?.trim() || null, user.id)
+      .bind(personId, date, amount, ptype, note, user.id)
       .run();
     await writeAudit(
       c.env.DB,
@@ -1126,9 +1224,9 @@ export function registerToolLoanLedger(api: App): void {
       "create",
       "tool_loan_payment",
       String(r.meta.last_row_id),
-      `${ptype} $${amount}`
+      `${ptype} $${amount} · pay ${date}`
     );
-    return c.json({ id: Number(r.meta.last_row_id), ok: true });
+    return c.json({ id: Number(r.meta.last_row_id), ok: true, payment_date: date });
   });
 
   api.post("/tool-loan-ledger/charges/:id/void", async (c) => {
@@ -1146,6 +1244,103 @@ export function registerToolLoanLedger(api: App): void {
       .run();
     await writeAudit(c.env.DB, user, "void", "tool_loan_charge", String(id), body.reason || "");
     return c.json({ ok: true });
+  });
+
+  /**
+   * Correct a charge amount/description (e.g. forgot sales tax).
+   * Keeps the same charge id so acknowledgment print still works.
+   * Body: amount (required), description?, reason?, pretax_amount?, tax_rate?
+   */
+  api.post("/tool-loan-ledger/charges/:id/amend", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) return denied;
+    await ensureToolLoanLedgerTables(c.env.DB);
+    const id = Number(c.req.param("id"));
+    if (!id) return c.json({ error: "Invalid charge id" }, 400);
+
+    const body = await c.req.json<{
+      amount?: number | string;
+      description?: string;
+      reason?: string;
+      pretax_amount?: number | string;
+      tax_rate?: number | string;
+    }>().catch(() => ({} as Record<string, never>));
+
+    const before = await c.env.DB.prepare(
+      `SELECT id, person_id, description, amount, charge_date, voided
+       FROM tool_loan_charges WHERE id = ?`
+    )
+      .bind(id)
+      .first<{
+        id: number;
+        person_id: number;
+        description: string;
+        amount: number;
+        charge_date: string;
+        voided: number;
+      }>();
+    if (!before) return c.json({ error: "Charge not found" }, 404);
+    if (before.voided) {
+      return c.json({ error: "Cannot edit a voided charge — create a new one instead" }, 400);
+    }
+
+    let newAmount = parseMoney(body.amount);
+    const pretax = parseMoney(body.pretax_amount);
+    const taxRateRaw = Number(body.tax_rate);
+    if ((newAmount == null || newAmount <= 0) && pretax != null && pretax > 0) {
+      const rate =
+        Number.isFinite(taxRateRaw) && taxRateRaw >= 0
+          ? Math.round(taxRateRaw * 1000) / 1000
+          : 8.25;
+      const tax = Math.round(pretax * (rate / 100) * 100) / 100;
+      newAmount = Math.round((pretax + tax) * 100) / 100;
+    }
+    if (newAmount == null || newAmount <= 0) {
+      return c.json({ error: "Positive amount required" }, 400);
+    }
+
+    const oldAmount = Math.round(Number(before.amount) * 100) / 100;
+    let desc = (body.description || "").trim() || before.description;
+    const reason = (body.reason || "").trim();
+    // If tax fields provided, document breakdown in description when not already detailed
+    if (pretax != null && pretax > 0 && Number.isFinite(taxRateRaw) && taxRateRaw >= 0) {
+      const tax = Math.round(pretax * (taxRateRaw / 100) * 100) / 100;
+      if (!/\+.*% tax/i.test(desc)) {
+        desc = `${desc.replace(/\s*\(pre-tax[\s\S]*$/i, "").trim()} (pre-tax $${pretax.toFixed(
+          2
+        )} + ${taxRateRaw}% tax $${tax.toFixed(2)} = $${newAmount.toFixed(2)})`;
+      }
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE tool_loan_charges SET amount = ?, description = ? WHERE id = ? AND IFNULL(voided, 0) = 0`
+    )
+      .bind(newAmount, desc, id)
+      .run();
+
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "tool_loan_charge",
+      String(id),
+      `amend $${oldAmount} → $${newAmount}${reason ? ` · ${reason}` : ""}`
+    );
+
+    const bal = (await balancesForPeople(c.env.DB, [before.person_id]))[0];
+
+    return c.json({
+      ok: true,
+      id,
+      amount_before: oldAmount,
+      amount_after: newAmount,
+      description: desc,
+      person_id: before.person_id,
+      balance_after: bal?.balance ?? null,
+      weekly_after: bal ? policyWeeklyDeduction(bal.balance) : null,
+      print_path: `/api/tool-loan-ledger/charges/${id}/print-agreement`,
+    });
   });
 
   api.post("/tool-loan-ledger/payments/:id/void", async (c) => {

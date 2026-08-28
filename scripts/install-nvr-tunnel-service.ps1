@@ -5,8 +5,11 @@
 #   .\install-nvr-tunnel-service.ps1
 #
 # Stack:
-#   cloudflared -> http://127.0.0.1:8790 (media proxy)
+#   cloudflared -> http://127.0.0.1:8791 (media proxy)  **never point tunnel at the NVR**
 #   media proxy -> NVR (snapshots/ISAPI) + /fieldapp/clip (ffmpeg MP4)
+#
+# After install, run fix-nvr-always-on.ps1 as Admin if cameras go offline
+# (quick tunnels rotate public URLs; that script rewrites warehouse_nvr_url).
 
 $ErrorActionPreference = 'Stop'
 $NvrLan = 'http://192.168.1.111'

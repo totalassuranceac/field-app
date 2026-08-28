@@ -142,7 +142,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const focusTicketId = Number(searchParams.get("ticket") || "") || null;
   /** Counter actions: pick / not ready / partial */
   const canResolve =
-    user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
+    user?.role === "admin" ||
+    user?.role === "warehouse" ||
+    user?.role === "office" ||
+    user?.role === "mechanic" ||
+    user?.role === "supervisor";
   /** Drop a part that is no longer needed (field + warehouse) */
   const canNotNeeded =
     canResolve || user?.role === "driver" || user?.role === "mechanic";

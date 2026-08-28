@@ -131,14 +131,37 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "handbook",
     title: "Read and acknowledge the handbook",
-    summary: "Company policies live here — some versions need your check-off.",
+    summary: "Company policies in searchable sections — confirm after you read.",
     roles: ["everyone"],
     path: "/handbook",
     steps: [
       "Open Handbook from the menu.",
-      "Read the document (scroll or page through the PDF).",
-      "When you have finished reading, check the acknowledgment box if it is shown.",
-      "Only admin can clear an acknowledgment if a new version must be re-read.",
+      "Search (sick, overtime, vehicle…) or tap a section, then open a topic.",
+      "Read on your phone — use Previous / Next to move between topics.",
+      "If confirmation is required, check I have read and understand, then Submit confirmation.",
+      "Only admin can clear an acknowledgment if someone must re-read.",
+    ],
+    tips: [
+      "Quick answers at the top jump straight to common topics like sick days and company vehicles.",
+    ],
+  },
+  {
+    id: "new-hire-packet",
+    title: "Print a new hire packet",
+    summary: "One button from People — checklist, application, W-4, I-9, deposit, emergency contact.",
+    roles: ["office", "admin", "supervisor"],
+    path: "/onboarding",
+    steps: [
+      "Open People (Admin) and tap New hire packet.",
+      "Optional: type the hire’s name, position, and start date so the letterhead is personalized.",
+      "Tap Print full hire packet — one job includes company forms plus official W-4 and I-9.",
+      "Before they leave: photocopy driver’s license and Social Security card (MUST COLLECT on the checklist).",
+      "Send their Field App invite and have them read/confirm the Handbook.",
+    ],
+    tips: [
+      "Wait for “Loading W-4 & I-9…” then the print dialog — preview should show company pages then W-4 then I-9.",
+      "Each January, download the new IRS W-4 and use Replace W-4 / I-9 so blanks stay current.",
+      "Do not recreate W-4 or I-9 yourself — always use the official IRS / USCIS PDF.",
     ],
   },
   {
@@ -163,7 +186,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     id: "tool-loan",
     title: "Tool Loan Request",
     summary:
-      "Ask for a company tool loan for field work. Weekly deduction is 10% of the loan (minimum $50). Example: $600 loan → $60/week until paid off.",
+      "Ask for a company tool loan for field work. Weekly deduction is 10% of the loan (minimum $50). Office tracks: approved → ordered → arrived → paperwork signed (with optional signed form scan).",
     roles: ["everyone"],
     path: "/tool-loans",
     steps: [
@@ -212,12 +235,12 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     path: "/settings",
     steps: [
       "Open Settings (tap your name in the sidebar).",
-      "Update phone — Live map uses it for Call when someone finds you by name.",
+      "Update phone — office / warehouse / shop use it for Call on Live map when they find you by name.",
       "Use Change password with your current password, then a new one.",
       "Sign out from the same screen when you leave a shared device.",
     ],
     tips: [
-      "Without a phone on file, Call on Live map stays disabled for your unit.",
+      "Without a phone on file, Call on Live map stays disabled for your unit (office/shop still see you on the map).",
     ],
   },
   {
@@ -418,10 +441,10 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     id: "live-map-find-tech",
     title: "Find a tech on Live map — Map or Call",
     summary: "Search by name, then open directions or dial them without knowing the number.",
-    roles: ["everyone", "driver", "office", "warehouse", "mechanic", "admin"],
+    roles: ["office", "warehouse", "mechanic", "supervisor", "admin"],
     path: "/live",
     steps: [
-      "Open Live map (Fleet menu).",
+      "Open Live map (Fleet menu). Field techs do not see this map.",
       "Type the tech’s name in Find tech by name… (above the map).",
       "When their unit is selected, tap Map for turn-by-turn to their GPS, or Call to dial their phone on file.",
       "You can also tap a row in the vehicle list, then use Map or Call on that row.",
@@ -430,6 +453,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     tips: [
       "Call needs a phone on their user or employee record (Settings / People).",
       "Search also works for unit numbers (e.g. 004).",
+      "Live map is limited to supervisors, warehouse, shop, and office.",
     ],
   },
 
@@ -568,8 +592,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   {
     id: "mech-shop",
     title: "Work the repair board",
-    summary: "Schedule, update, and close shop work.",
-    roles: ["mechanic", "office", "admin"],
+    summary: "Schedule, update, and close shop work. Log work you did without a driver ticket.",
+    roles: ["mechanic", "office", "admin", "supervisor"],
     path: "/issues",
     steps: [
       "Open Repairs & shop.",
@@ -579,10 +603,15 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "If the app says no user is linked to the unit, call them and fix the assigned driver under Vehicles.",
       "Mark In progress only when the unit is actually in the bay (that marks it out of service).",
       "Record what you fixed and parts used when closing — tech is notified when done or cancelled.",
+      "Did work with no driver ticket? Use Log shop work — pick the unit, concerns, work performed, and mark Completed (or In progress).",
+      "When a job is finished, Print tech receipt and hand the slip to the tech (unit, work done, parts, sign-off lines).",
+      "Supervisors: open Done today (or pick a date) to see completed work; use Print day log for a printable list of that day’s jobs.",
     ],
     tips: [
       "Booking a future date does not take the truck off the road — only In progress does.",
       "Changing the shop date resets confirmation — the tech must confirm the new appointment.",
+      "Shop-logged jobs skip tech appointment confirm — they are already in the bay or already done.",
+      "Print work order = open / scheduled jobs for the bay. Print tech receipt = one completed job for the driver.",
     ],
   },
   {
@@ -596,6 +625,22 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Review what is due if the due list is shown.",
       "Add a service record for the unit (type, miles/date, notes).",
       "Update when complete so reports stay accurate.",
+    ],
+  },
+  {
+    id: "dump-runs",
+    title: "Log a dump run",
+    summary: "Photo the landfill ticket; record net weight and total. OCR learns from your fixes.",
+    roles: ["warehouse", "mechanic", "admin"],
+    path: "/dump-runs",
+    steps: [
+      "Open Dump runs (Warehouse or Shop menu).",
+      "Take a photo of the full scale ticket / receipt.",
+      "Check net weight (lbs) and total $ — fix anything OCR missed.",
+      "Save. The app learns corrections so the next similar ticket fills faster.",
+    ],
+    tips: [
+      "Hold the ticket flat with little glare so weight and total read cleanly.",
     ],
   },
   {
@@ -754,10 +799,10 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     roles: ["everyone", "admin", "office", "warehouse", "driver", "mechanic"],
     path: "/howto",
     steps: [
-      "Field: fuel receipts, weekly checks, warranty drop-off, request repair, truck gear, parts receipts, live map Map/Call.",
-      "Warehouse: inventory, scan-to-receive, issue-to-tech + truck scan, pickup log, bottles, warranties, log fuel receipts.",
-      "Mechanic: shop repairs, oil/service, yard walk, fleet flags, vehicles, weekly checks, log fuel receipts.",
-      "Office: live map Map/Call, fuel, scheduled repairs, people, inventory overview, warranties, reports.",
+      "Field: fuel receipts, weekly checks, warranty drop-off, request repair, truck gear, parts receipts (no live map).",
+      "Warehouse: inventory, scan-to-receive, issue-to-tech + truck scan, pickup log, bottles, warranties, live map, log fuel receipts.",
+      "Mechanic: shop repairs, oil/service, yard walk, fleet flags, vehicles, weekly checks, live map, log fuel receipts.",
+      "Office / supervisor: live map Map/Call, fuel, scheduled repairs, people, inventory overview, warranties, reports.",
       "Admin: everything + invite/resend, role simulator, audit, settings.",
       "Viewer: same screens as admin, cannot save or submit.",
     ],

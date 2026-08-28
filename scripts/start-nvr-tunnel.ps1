@@ -9,8 +9,10 @@
 $ErrorActionPreference = 'Continue'
 $InstallDir = 'C:\ProgramData\TotalAssurance\nvr-tunnel'
 $RepoProxy = 'C:\grok\fueltracker\scripts\nvr-media-proxy.mjs'
-$log = Join-Path $env:TEMP 'cf-nvr-live.log'
-$proxyPort = 8791
+# User-writable run dir (avoids stuck SYSTEM process on 8791)
+$UserDir = Join-Path $env:USERPROFILE 'ta-nvr-proxy'
+$log = Join-Path $UserDir 'tunnel.log'
+$proxyPort = 8792
 
 if (-not (Test-Path -LiteralPath $InstallDir)) {
   Write-Host "Missing $InstallDir - run install-nvr-tunnel-service.ps1 as Admin once first." -ForegroundColor Red

@@ -1,6 +1,7 @@
 import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { suggestTankCapacity } from "../tankCapacity";
 
 export interface Vehicle {
   id: number;
@@ -10,6 +11,7 @@ export interface Vehicle {
   make: string | null;
   model: string | null;
   vin: string | null;
+  tank_capacity_gallons?: number | null;
   status: string;
   current_odometer: number | null;
   assigned_driver: string | null;
@@ -53,6 +55,7 @@ const emptyForm = {
   make: "",
   model: "",
   vin: "",
+  tank_capacity_gallons: "",
   status: "active",
   assigned_driver: "",
   phone: "",
@@ -122,6 +125,8 @@ export function VehiclesPage() {
   const [assignEmpId, setAssignEmpId] = useState("");
   const [assignHelperId, setAssignHelperId] = useState("");
   const [assignNote, setAssignNote] = useState("");
+  /** Clear tech and label as Warehouse truck on the live map */
+  const [assignAsWarehouse, setAssignAsWarehouse] = useState(false);
   const [assignBusy, setAssignBusy] = useState(false);
   const [fleetInsurance, setFleetInsurance] = useState("");
   const [fleetBusy, setFleetBusy] = useState(false);
@@ -150,6 +155,7 @@ export function VehiclesPage() {
     setAssignEmpId(v.assigned_employee_id ? String(v.assigned_employee_id) : "");
     setAssignHelperId(v.helper_employee_id ? String(v.helper_employee_id) : "");
     setAssignNote("");
+    setAssignAsWarehouse(false);
     setError("");
     setOk("");
   }
@@ -161,6 +167,7 @@ export function VehiclesPage() {
     setError("");
     setOk("");
     try {
+      const asWarehouse = assignAsWarehouse && !assignEmpId;
       const clear = !assignEmpId;
       await api(`/vehicles/${assignVehicle.id}/assign`, {
         method: "POST",
@@ -169,12 +176,15 @@ export function VehiclesPage() {
           employee_id: clear ? null : Number(assignEmpId),
           helper_employee_id: assignHelperId ? Number(assignHelperId) : null,
           note: assignNote.trim() || null,
+          pool_label: asWarehouse ? "Warehouse truck" : null,
         }),
       });
       setOk(
-        clear
-          ? `Cleared assignment on unit ${assignVehicle.unit_number}`
-          : `Unit ${assignVehicle.unit_number} reassigned — map will track this unit for that crew`
+        asWarehouse
+          ? `Unit ${assignVehicle.unit_number} marked Warehouse truck — unassigned, still on the live map`
+          : clear
+            ? `Cleared assignment on unit ${assignVehicle.unit_number}`
+            : `Unit ${assignVehicle.unit_number} reassigned — map will track this unit for that crew`
       );
       setAssignVehicle(null);
       await load();
@@ -197,6 +207,12 @@ export function VehiclesPage() {
 
   function openEdit(v: Vehicle) {
     setEdit(v);
+    const cap =
+      v.tank_capacity_gallons != null && Number(v.tank_capacity_gallons) > 0
+        ? String(v.tank_capacity_gallons)
+        : suggestTankCapacity(v.make, v.model) != null
+          ? String(suggestTankCapacity(v.make, v.model))
+          : "";
     setForm({
       unit_number: v.unit_number,
       plate: v.plate || "",
@@ -204,6 +220,7 @@ export function VehiclesPage() {
       make: v.make || "",
       model: v.model || "",
       vin: v.vin || "",
+      tank_capacity_gallons: cap,
       status: v.status,
       assigned_driver: v.assigned_driver || "",
       phone: v.phone || "",
@@ -230,13 +247,32 @@ export function VehiclesPage() {
     setShowForm(true);
   }
 
+  function setMakeModel(next: { make?: string; model?: string }) {
+    setForm((prev) => {
+      const make = next.make !== undefined ? next.make : prev.make;
+      const model = next.model !== undefined ? next.model : prev.model;
+      const suggested = suggestTankCapacity(make, model);
+      const keepCap = prev.tank_capacity_gallons.trim() !== "";
+      return {
+        ...prev,
+        make,
+        model,
+        // Auto-fill only when capacity is blank so we don't overwrite manual edits
+        tank_capacity_gallons:
+          keepCap || suggested == null ? prev.tank_capacity_gallons : String(suggested),
+      };
+    });
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const personal = isPersonalVehicleUnit(form.unit_number);
+    const tankRaw = form.tank_capacity_gallons.trim();
     const payload: Record<string, unknown> = {
       ...form,
       year: form.year ? Number(form.year) : null,
       gps_status: form.gps_status || "n/a",
+      tank_capacity_gallons: tankRaw ? Number(tankRaw) : null,
     };
     if (canCompliance) {
       payload.registration_expires = form.registration_expires || null;
@@ -477,6 +513,11 @@ export function VehiclesPage() {
                   ) : null}
                 </Field>
                 <Field label="Vehicle">{vehicleTitle(v)}</Field>
+                <Field label="Tank">
+                  {v.tank_capacity_gallons != null && Number(v.tank_capacity_gallons) > 0
+                    ? `${Number(v.tank_capacity_gallons)} gal`
+                    : "—"}
+                </Field>
                 <Field label="Plate">{v.plate || "—"}</Field>
                 <Field label="VIN">{v.vin || "—"}</Field>
                 <Field label="Dash cam">
@@ -528,12 +569,19 @@ export function VehiclesPage() {
             <h2>Assign unit {assignVehicle.unit_number}</h2>
             <p className="muted" style={{ marginTop: 0 }}>
               Put a tech (and helper if they ride together) on this truck. They are cleared off any
-              other unit so live map search and their fuel/checks follow this GPS unit.
+              other unit so live map search and their fuel/checks follow this GPS unit. Warehouse /
+              pool trucks can stay unassigned and still show on the map.
             </p>
             <form className="form" onSubmit={submitAssign}>
               <label>
                 Tech / primary driver
-                <select value={assignEmpId} onChange={(e) => setAssignEmpId(e.target.value)}>
+                <select
+                  value={assignEmpId}
+                  onChange={(e) => {
+                    setAssignEmpId(e.target.value);
+                    if (e.target.value) setAssignAsWarehouse(false);
+                  }}
+                >
                   <option value="">— Unassigned —</option>
                   {employees.map((e) => (
                     <option key={e.id} value={e.id}>
@@ -560,6 +608,25 @@ export function VehiclesPage() {
                   ))}
                 </select>
               </label>
+              {!assignEmpId && (
+                <label
+                  className="checkbox-row"
+                  style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={assignAsWarehouse}
+                    onChange={(e) => setAssignAsWarehouse(e.target.checked)}
+                    style={{ marginTop: "0.2rem" }}
+                  />
+                  <span>
+                    <strong>Warehouse / pool truck</strong>
+                    <span className="muted" style={{ display: "block", fontSize: "0.85rem" }}>
+                      No tech assigned — live map shows “Warehouse truck” and keeps the GPS pin.
+                    </span>
+                  </span>
+                </label>
+              )}
               <label>
                 Note (optional)
                 <input
@@ -573,7 +640,13 @@ export function VehiclesPage() {
                   Cancel
                 </button>
                 <button className="btn" type="submit" disabled={assignBusy}>
-                  {assignBusy ? "Saving…" : assignEmpId ? "Assign to this unit" : "Clear assignment"}
+                  {assignBusy
+                    ? "Saving…"
+                    : assignEmpId
+                      ? "Assign to this unit"
+                      : assignAsWarehouse
+                        ? "Mark warehouse truck"
+                        : "Clear assignment"}
                 </button>
               </div>
             </form>
@@ -620,11 +693,37 @@ export function VehiclesPage() {
                 </label>
                 <label>
                   Make
-                  <input value={form.make} onChange={(e) => setForm({ ...form, make: e.target.value })} />
+                  <input
+                    value={form.make}
+                    onChange={(e) => setMakeModel({ make: e.target.value })}
+                  />
                 </label>
                 <label>
                   Model
-                  <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+                  <input
+                    value={form.model}
+                    onChange={(e) => setMakeModel({ model: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Tank capacity (gal)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={form.tank_capacity_gallons}
+                    onChange={(e) =>
+                      setForm({ ...form, tank_capacity_gallons: e.target.value })
+                    }
+                    placeholder="e.g. 31"
+                  />
+                  <span className="muted" style={{ fontSize: "0.78rem" }}>
+                    Used to flag fills bigger than the tank. Suggested from make/model when blank
+                    {suggestTankCapacity(form.make, form.model) != null
+                      ? ` (suggest ${suggestTankCapacity(form.make, form.model)} gal)`
+                      : ""}
+                    .
+                  </span>
                 </label>
                 <label>
                   Status

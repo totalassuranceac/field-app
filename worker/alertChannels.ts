@@ -241,8 +241,9 @@ export async function findNearestDrivers(
 }
 
 /**
- * Phones for optional SMS on fleet incidents.
- * Prefers admin-set role lines (shop / mechanic / office), then individual user phones.
+ * Legacy group phone list (Settings shop/mechanic/office lines + role phones).
+ * Prefer coreFleetNotifyIds / notifyAndSms for personal alerts — do not use for
+ * routine repair broadcasts (texts the whole shop).
  */
 export async function shopPhones(db: D1Database): Promise<string[]> {
   const phones: string[] = [];
@@ -312,23 +313,15 @@ export async function alertFleetIncident(
   };
 
   if (!opts.skipMainPush) {
-    const phones = await shopPhones(db);
-    channels = await fanOutAlert(
-      env,
-      db,
-      {
-        title,
-        body,
-        sms: `TA Fleet ${opts.isEmergency ? "EMERGENCY" : "repair"} unit ${opts.unitNumber}: ${opts.title}. ${shortDesc || "Open app."} — ${opts.fromName}`,
-        priority: opts.isEmergency ? "urgent" : "high",
-        tags: opts.isEmergency ? ["rotating_light", "exclamation"] : ["wrench"],
-      },
-      {
-        fromUserId: opts.fromUserId,
-        context: opts.isEmergency ? `emergency_issue:${opts.issueId}` : `repair_issue:${opts.issueId}`,
-        smsPhones: phones,
-      }
-    );
+    // Optional Discord channel only here — personal SMS/in-app already sent to
+    // Chuck + Chris (+ requester) by the /issues route. Do NOT text shop/office groups.
+    const discord = await sendDiscord(db, {
+      title,
+      body,
+      priority: opts.isEmergency ? "urgent" : "high",
+      tags: opts.isEmergency ? ["rotating_light", "exclamation"] : ["wrench"],
+    });
+    channels = { discord: discord.ok, sms: 0 };
   }
 
   let nearby: NearbyDriver[] = [];

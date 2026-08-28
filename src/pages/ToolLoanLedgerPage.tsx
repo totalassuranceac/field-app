@@ -15,6 +15,18 @@ type PersonSummary = {
   balance: number;
   suggested_weekly: number;
   weekly_this_week?: number;
+  last_payroll_date?: string | null;
+  last_payroll_at?: string | null;
+  already_deducted_for_week?: boolean;
+  week_deducted_amount?: number | null;
+  week_deducted_at?: string | null;
+};
+
+type SelectedWeekStatus = {
+  payment_date: string;
+  already_applied: boolean;
+  employee_count: number;
+  total_amount: number;
 };
 
 type Charge = {
@@ -78,6 +90,42 @@ function formatWeekLabel(iso: string): string {
     });
   } catch {
     return iso;
+  }
+}
+
+/** Local YYYY-MM-DD (avoid UTC off-by-one on date-only values). */
+function toYmdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Pay Friday for tool loan deductions.
+ * Payroll is run Wed; guys are paid Fri — always post deductions to the upcoming Friday
+ * (today if Friday, otherwise next Friday).
+ */
+function upcomingPayFriday(from = new Date()): string {
+  const d = new Date(from.getFullYear(), from.getMonth(), from.getDate(), 12, 0, 0, 0);
+  const day = d.getDay(); // 0=Sun … 5=Fri
+  const add = (5 - day + 7) % 7;
+  d.setDate(d.getDate() + add);
+  return toYmdLocal(d);
+}
+
+function formatShortWhen(iso: string | null | undefined): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso.includes("T") ? iso : iso + "T12:00:00");
+    if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
+    return d.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return String(iso).slice(0, 10);
   }
 }
 
@@ -150,20 +198,31 @@ export function ToolLoanLedgerPage() {
   const [addKind, setAddKind] = useState("tool_purchase");
   const [addReason, setAddReason] = useState("");
   const [addAmt, setAddAmt] = useState("");
+  /** When checked, Amount is treated as pre-tax and 8.25% sales tax is added. */
+  const [addIncludeTax, setAddIncludeTax] = useState(false);
+  const ADD_TAX_RATE = 8.25;
   const [addDate, setAddDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [lastChargePrintId, setLastChargePrintId] = useState<number | null>(null);
   /** Optional: include $0 / not-yet-on-ledger active employees. */
   const [showZeroBalances, setShowZeroBalances] = useState(false);
+  /** Correct amount on an existing charge (e.g. forgot tax). */
+  const [editChargeId, setEditChargeId] = useState<number | null>(null);
+  const [editDesc, setEditDesc] = useState("");
+  const [editPretax, setEditPretax] = useState("");
+  const [editTaxRate, setEditTaxRate] = useState("8.25");
+  const [editReason, setEditReason] = useState("");
 
   /** Payroll week: bulk deduct everyone checked, with optional amount overrides. */
-  const [payrollWeekDate, setPayrollWeekDate] = useState(() =>
-    new Date().toISOString().slice(0, 10)
-  );
+  /** Always the pay Friday deductions hit the paycheck (not the Wed office run day). */
+  const [payrollWeekDate, setPayrollWeekDate] = useState(() => upcomingPayFriday());
   const [weekDeductAmounts, setWeekDeductAmounts] = useState<Record<number, string>>(
     {}
   );
   /** When false, that person is skipped by the bulk button. */
   const [weekInclude, setWeekInclude] = useState<Record<number, boolean>>({});
+  const [selectedWeekStatus, setSelectedWeekStatus] = useState<SelectedWeekStatus | null>(
+    null
+  );
 
   function suggestedWeekAmount(p: PersonSummary): number {
     const raw =
@@ -225,13 +284,19 @@ export function ToolLoanLedgerPage() {
       }
 
       // include_zero=1 so $0 ledger people are available when the roster checkbox is on
+      // week_of = pay Friday so we know who already had deductions this paycheck
+      const payFriday = payrollWeekDate || upcomingPayFriday();
       const [summary, owner, pickerRes, empsRes] = await Promise.all([
         api<{
           people: PersonSummary[];
           open_count: number;
           total_owed: number;
+          selected_week?: SelectedWeekStatus | null;
           error?: string;
-        }>("/tool-loan-ledger/summary?include_zero=1", { timeoutMs: 30_000 }),
+        }>(
+          `/tool-loan-ledger/summary?include_zero=1&week_of=${encodeURIComponent(payFriday)}`,
+          { timeoutMs: 30_000 }
+        ),
         api<OwnerReport>("/tool-loan-ledger/owner-report", { timeoutMs: 30_000 }),
         api<{
           active_employees?: ActiveEmployee[];
@@ -248,8 +313,20 @@ export function ToolLoanLedgerPage() {
       setPeople(list);
       setOpenCount(summary.open_count || 0);
       setTotalOwed(summary.total_owed || 0);
+      setSelectedWeekStatus(summary.selected_week ?? null);
       setReport(owner);
       seedWeekAmounts(list);
+      // Auto-uncheck anyone already deducted for this pay Friday
+      setWeekInclude((prev) => {
+        const next = { ...prev };
+        for (const p of list) {
+          if (p.already_deducted_for_week) next[p.person_id] = false;
+          else if (prev[p.person_id] === undefined && p.balance > 0.009) {
+            next[p.person_id] = true;
+          }
+        }
+        return next;
+      });
 
       // Build full active roster from picker (preferred) and/or employees + app users
       const byName = new Map<string, ActiveEmployee>();
@@ -288,7 +365,7 @@ export function ToolLoanLedgerPage() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, []);
+  }, [payrollWeekDate]);
 
   const loadDetail = useCallback(async (id: number) => {
     setError("");
@@ -311,6 +388,29 @@ export function ToolLoanLedgerPage() {
     if (!isOffice) return;
     void loadAll();
   }, [isOffice, loadAll]);
+
+  // Scope aggressive print CSS to this page only (see styles.css tool-loan print rules)
+  useEffect(() => {
+    document.body.classList.add("on-tool-loan-ledger");
+    return () => document.body.classList.remove("on-tool-loan-ledger");
+  }, []);
+
+  // Deep-link from tool loan paperwork match: /tool-loan-ledger?person=123
+  useEffect(() => {
+    if (!isOffice) return;
+    const q = new URLSearchParams(window.location.search);
+    const pid = Number(q.get("person") || "");
+    if (pid > 0) {
+      setSelectedId(pid);
+      setSelectedOffLedger(null);
+      window.setTimeout(() => {
+        document.getElementById("employee-ledger-detail")?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 200);
+    }
+  }, [isOffice]);
 
   useEffect(() => {
     if (selectedId) void loadDetail(selectedId);
@@ -357,12 +457,22 @@ export function ToolLoanLedgerPage() {
     setDetail(null);
   }
 
-  function openChargeAgreementPrint(chargeId: number) {
+  /**
+   * Open acknowledgment and auto-print.
+   * Pass an already-opened window (from a sync click) so browsers don't block
+   * print after an async charge save.
+   */
+  function openChargeAgreementPrint(
+    chargeId: number,
+    preexisting?: Window | null
+  ) {
     setError("");
     const url = `/api/tool-loan-ledger/charges/${chargeId}/print-agreement`;
-    const w = window.open(url, "_blank");
+    const w = preexisting && !preexisting.closed ? preexisting : window.open("about:blank", "_blank");
     if (w == null) {
-      setError("Pop-up blocked — allow pop-ups for this site, then try Print acknowledgment again.");
+      setError(
+        "Pop-up blocked — allow pop-ups for this site, then use Re-print last acknowledgment."
+      );
       return;
     }
     try {
@@ -370,14 +480,133 @@ export function ToolLoanLedgerPage() {
     } catch {
       /* ignore */
     }
+    try {
+      w.document.open();
+      w.document.write(
+        `<!DOCTYPE html><html><body style="font-family:system-ui;padding:1.5rem">Preparing acknowledgment…</body></html>`
+      );
+      w.document.close();
+    } catch {
+      /* cross-origin / restricted — fall back to navigate */
+      w.location.href = url;
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await fetch(url, { credentials: "include" });
+        const html = await res.text();
+        if (!res.ok) {
+          w.document.open();
+          w.document.write(html || `<p>Could not load form (${res.status}).</p>`);
+          w.document.close();
+          return;
+        }
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+        // HTML also auto-prints; call again after paint for reliability
+        window.setTimeout(() => {
+          try {
+            w.focus();
+            w.print();
+          } catch {
+            /* ignore */
+          }
+        }, 600);
+      } catch {
+        w.location.href = url;
+      }
+    })();
+  }
+
+  function openEditCharge(c: Charge) {
+    setEditChargeId(c.id);
+    setEditDesc(c.description || "");
+    // If description already has tax breakdown, still start pretax from amount/1.0825 when rate 8.25
+    const amt = Number(c.amount) || 0;
+    const rate = 8.25;
+    const pretaxGuess = Math.round((amt / (1 + rate / 100)) * 100) / 100;
+    setEditPretax(String(pretaxGuess > 0 ? pretaxGuess : amt));
+    setEditTaxRate(String(rate));
+    setEditReason("Forgot to include sales tax");
+    setError("");
+    setOk("");
+  }
+
+  function closeEditCharge() {
+    setEditChargeId(null);
+    setEditDesc("");
+    setEditPretax("");
+    setEditTaxRate("8.25");
+    setEditReason("");
+  }
+
+  const editTaxPreview = useMemo(() => {
+    const pretax = Number(editPretax);
+    const rate = Number(editTaxRate);
+    if (!(pretax > 0) || !(rate >= 0)) return { pretax: 0, rate: 0, tax: 0, total: 0 };
+    const tax = Math.round(pretax * (rate / 100) * 100) / 100;
+    const total = Math.round((pretax + tax) * 100) / 100;
+    return { pretax, rate, tax, total };
+  }, [editPretax, editTaxRate]);
+
+  const addTaxPreview = useMemo(() => {
+    const pretax = Number(addAmt);
+    if (!(pretax > 0)) return { pretax: 0, tax: 0, total: 0 };
+    if (!addIncludeTax) return { pretax, tax: 0, total: pretax };
+    const tax = Math.round(pretax * (ADD_TAX_RATE / 100) * 100) / 100;
+    const total = Math.round((pretax + tax) * 100) / 100;
+    return { pretax, tax, total };
+  }, [addAmt, addIncludeTax]);
+
+  async function saveEditCharge(e: FormEvent) {
+    e.preventDefault();
+    if (editChargeId == null) return;
+    if (!(editTaxPreview.total > 0)) {
+      setError("Enter a valid pre-tax amount (tax is added automatically).");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const res = await api<{
+        amount_before: number;
+        amount_after: number;
+        print_path?: string;
+      }>(`/tool-loan-ledger/charges/${editChargeId}/amend`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: editTaxPreview.total,
+          pretax_amount: editTaxPreview.pretax,
+          tax_rate: editTaxPreview.rate,
+          description: editDesc.trim() || undefined,
+          reason: editReason.trim() || "Corrected amount",
+        }),
+      });
+      setOk(
+        `Loan updated: ${money(res.amount_before)} → ${money(res.amount_after)} (tax included).`
+      );
+      const printId = editChargeId;
+      closeEditCharge();
+      if (selectedId) await loadDetail(selectedId);
+      await loadAll({ quiet: true });
+      if (window.confirm("Amount updated. Open the acknowledgment form to re-print for signature?")) {
+        openChargeAgreementPrint(printId);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update charge");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function voidCharge(chargeId: number, description: string) {
     const reason = window.prompt(
-      `Void this loan/charge?\n\n${description}\n\nOptional reason (shown in audit):`,
+      `Void this loan/charge?\n\n${description}\n\nTip: use Edit instead if you only need to fix the amount (e.g. add tax).\n\nOptional void reason:`,
       ""
     );
-    if (reason === null) return; // cancelled
+    if (reason === null) return;
     setBusy(true);
     setError("");
     setOk("");
@@ -387,6 +616,7 @@ export function ToolLoanLedgerPage() {
         body: JSON.stringify({ reason: reason.trim() || undefined }),
       });
       setOk("Charge voided — balance updated.");
+      if (editChargeId === chargeId) closeEditCharge();
       if (selectedId) await loadDetail(selectedId);
       await loadAll({ quiet: true });
     } catch (err) {
@@ -431,22 +661,55 @@ export function ToolLoanLedgerPage() {
       setError("Enter the reason for this charge (required for the acknowledgment form).");
       return;
     }
-    const amount = Number(addAmt);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    const pretax = Number(addAmt);
+    if (!Number.isFinite(pretax) || pretax <= 0) {
       setError("Enter a positive amount.");
       return;
+    }
+    const amount = addIncludeTax ? addTaxPreview.total : pretax;
+    if (!(amount > 0)) {
+      setError("Enter a positive amount.");
+      return;
+    }
+
+    // Open print window NOW (same click) — after await, browsers often block pop-ups / auto-print
+    const printWin = window.open("about:blank", "_blank");
+    if (printWin == null) {
+      setError(
+        "Allow pop-ups for this site so the acknowledgment can print automatically after save."
+      );
+    } else {
+      try {
+        printWin.document.write(
+          `<!DOCTYPE html><html><body style="font-family:system-ui;padding:1.5rem">Saving charge… acknowledgment will print next.</body></html>`
+        );
+        printWin.document.close();
+      } catch {
+        /* ignore */
+      }
     }
 
     setBusy(true);
     setError("");
     setOk("");
     try {
+      let reason = addReason.trim();
+      if (addIncludeTax && addTaxPreview.tax > 0) {
+        const breakdown = `Pretax ${money(addTaxPreview.pretax)} + ${ADD_TAX_RATE}% tax ${money(addTaxPreview.tax)} = ${money(addTaxPreview.total)}`;
+        if (!/pretax|tax\s*%|\+\s*\d+(\.\d+)?%\s*tax/i.test(reason)) {
+          reason = `${reason} · ${breakdown}`;
+        }
+      }
       const payload: Record<string, unknown> = {
         amount,
         charge_date: addDate,
-        reason: addReason.trim(),
+        reason,
         charge_kind: addKind,
       };
+      if (addIncludeTax) {
+        payload.pretax_amount = addTaxPreview.pretax;
+        payload.tax_rate = ADD_TAX_RATE;
+      }
       if (addEmployeeKey.startsWith("p:")) {
         payload.person_id = Number(addEmployeeKey.slice(2));
       } else if (addEmployeeKey.startsWith("u:")) {
@@ -473,14 +736,15 @@ export function ToolLoanLedgerPage() {
       setLastChargePrintId(res.id);
       setAddReason("");
       setAddAmt("");
+      setAddIncludeTax(false);
       setSelectedOffLedger(null);
       setSelectedId(res.person_id);
       setAddEmployeeKey(`p:${res.person_id}`);
       setOk(
-        `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. Opening acknowledgment form to print.`
+        `Charge of ${money(amount)} added for ${res.display_name}. New balance ${money(res.balance_after)}. Printing acknowledgment…`
       );
-      // Print first — don't make success wait on a full ledger reload
-      openChargeAgreementPrint(res.id);
+      // Print into the window opened on click (auto print dialog)
+      openChargeAgreementPrint(res.id, printWin);
       // Refresh list quietly; never turn a saved charge into a red timeout banner
       try {
         await loadAll({ quiet: true });
@@ -491,6 +755,11 @@ export function ToolLoanLedgerPage() {
         );
       }
     } catch (err) {
+      try {
+        printWin?.close();
+      } catch {
+        /* ignore */
+      }
       setError(err instanceof Error ? err.message : "Charge failed");
     } finally {
       setBusy(false);
@@ -562,7 +831,12 @@ export function ToolLoanLedgerPage() {
     let count = 0;
     let total = 0;
     let skipped = 0;
+    let already = 0;
     for (const p of payrollCandidates) {
+      if (p.already_deducted_for_week) {
+        already += 1;
+        continue;
+      }
       if (weekInclude[p.person_id] === false) {
         skipped += 1;
         continue;
@@ -572,7 +846,7 @@ export function ToolLoanLedgerPage() {
       count += 1;
       total += Math.min(n, p.balance);
     }
-    return { count, total: Math.round(total * 100) / 100, skipped };
+    return { count, total: Math.round(total * 100) / 100, skipped, already };
   }, [payrollCandidates, weekDeductAmounts, weekInclude]);
 
   const allChecked =
@@ -602,11 +876,31 @@ export function ToolLoanLedgerPage() {
   /**
    * One-click bulk: records payroll payments for every checked person
    * using their amount (suggested by default, editable per row).
+   * payment_date = pay Friday (paycheck day), not the Wed office run day.
    */
   async function recordWeeklyPayroll() {
+    // Always snap to pay Friday so a Wed/Thu run still hits the Friday paycheck
+    const payFriday = upcomingPayFriday(
+      payrollWeekDate
+        ? new Date(payrollWeekDate + "T12:00:00")
+        : new Date()
+    );
+    if (payrollWeekDate !== payFriday) {
+      setPayrollWeekDate(payFriday);
+    }
+
+    const alreadyIds = new Set(
+      people.filter((p) => p.already_deducted_for_week).map((p) => p.person_id)
+    );
+
     const lines: { person_id: number; name: string; amount: number }[] = [];
+    const alreadySkipped: string[] = [];
     for (const p of payrollCandidates) {
       if (weekInclude[p.person_id] === false) continue;
+      if (alreadyIds.has(p.person_id) || p.already_deducted_for_week) {
+        alreadySkipped.push(p.display_name);
+        continue;
+      }
       const n = Number(weekDeductAmounts[p.person_id]);
       if (!Number.isFinite(n) || n <= 0) continue;
       const amount = Math.round(Math.min(n, p.balance) * 100) / 100;
@@ -614,21 +908,39 @@ export function ToolLoanLedgerPage() {
       lines.push({ person_id: p.person_id, name: p.display_name, amount });
     }
     if (!lines.length) {
-      setError(
-        "No one is ready to deduct. Check at least one person and enter an amount greater than $0 (or use Reset to policy amounts)."
+      if (alreadySkipped.length) {
+        setError(
+          `Everyone checked already has a deduction for pay Friday ${formatShortWhen(payFriday)}. Nothing new to apply.`
+        );
+      } else {
+        setError(
+          "No one is ready to deduct. Check at least one person and enter an amount greater than $0 (or use Reset to policy amounts)."
+        );
+      }
+      return;
+    }
+    if (!payFriday) {
+      setError("Choose the pay Friday date.");
+      return;
+    }
+
+    if (selectedWeekStatus?.already_applied && selectedWeekStatus.payment_date === payFriday) {
+      const cont = window.confirm(
+        `Deductions for pay Friday ${formatWeekLabel(payFriday)} were already applied (${selectedWeekStatus.employee_count} employees · ${money(selectedWeekStatus.total_amount)}).\n\nOnly people not yet deducted will be included (${lines.length}).\n\nContinue?`
       );
-      return;
+      if (!cont) return;
     }
-    if (!payrollWeekDate) {
-      setError("Choose the payroll week date.");
-      return;
-    }
+
     const total = lines.reduce((s, l) => s + l.amount, 0);
     const skipped = payrollCandidates.filter((p) => weekInclude[p.person_id] === false).length;
     const skipNote =
       skipped > 0 ? `\n${skipped} person${skipped === 1 ? "" : "s"} unchecked (skipped).` : "";
+    const alreadyNote =
+      alreadySkipped.length > 0
+        ? `\n${alreadySkipped.length} already deducted this Friday (skipped): ${alreadySkipped.slice(0, 5).join(", ")}${alreadySkipped.length > 5 ? "…" : ""}`
+        : "";
     const okConfirm = window.confirm(
-      `Apply bulk weekly deductions for ${lines.length} employee${lines.length === 1 ? "" : "s"} totaling $${total.toFixed(2)} (week of ${payrollWeekDate})?${skipNote}\n\nThis records a payroll payment on each checked person's ledger.`
+      `Apply weekly deductions for ${lines.length} employee${lines.length === 1 ? "" : "s"} totaling $${total.toFixed(2)}?\n\nPay Friday (paycheck): ${formatWeekLabel(payFriday)}${skipNote}${alreadyNote}\n\nThis posts one payroll payment per person dated that Friday so it shows on the correct paycheck.`
     );
     if (!okConfirm) return;
 
@@ -637,27 +949,40 @@ export function ToolLoanLedgerPage() {
     setOk("");
     try {
       let recorded = 0;
+      const failed: string[] = [];
       for (const line of lines) {
-        await api("/tool-loan-ledger/payments", {
-          method: "POST",
-          body: JSON.stringify({
-            person_id: line.person_id,
-            payment_date: payrollWeekDate,
-            amount: line.amount,
-            payment_type: "payroll",
-            note: `Payroll week of ${payrollWeekDate}`,
-          }),
-        });
-        recorded += 1;
+        try {
+          await api("/tool-loan-ledger/payments", {
+            method: "POST",
+            body: JSON.stringify({
+              person_id: line.person_id,
+              payment_date: payFriday,
+              amount: line.amount,
+              payment_type: "payroll",
+              note: `Payroll deduction for Friday ${payFriday}`,
+              prevent_duplicate_week: true,
+            }),
+          });
+          recorded += 1;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "failed";
+          failed.push(`${line.name}: ${msg}`);
+        }
       }
       // Uncheck + clear amounts so a second click cannot double-post
       clearWeekAmounts();
       setAllIncluded(false);
       if (selectedId) await loadDetail(selectedId);
       await loadAll();
-      setOk(
-        `Bulk deducted ${recorded} employee${recorded === 1 ? "" : "s"} for week of ${payrollWeekDate}. Balances updated — open anyone for payment history.`
-      );
+      if (failed.length && recorded === 0) {
+        setError(failed.slice(0, 3).join(" · "));
+      } else {
+        setOk(
+          `Deducted ${recorded} employee${recorded === 1 ? "" : "s"} for pay Friday ${formatShortWhen(payFriday)}.${
+            failed.length ? ` ${failed.length} skipped (already posted).` : ""
+          } Balances updated.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record payroll deductions");
     } finally {
@@ -1005,17 +1330,27 @@ export function ToolLoanLedgerPage() {
           </div>
           <div className="owner-report-meta">
             <div>
-              <span className="owner-meta-label">Week of</span>
+              <span className="owner-meta-label">Pay Friday</span>
               <strong className="no-print">
                 <input
                   type="date"
                   value={payrollWeekDate}
-                  onChange={(e) => setPayrollWeekDate(e.target.value)}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (!raw) return;
+                    // Always snap to the Friday of that week (paycheck day)
+                    setPayrollWeekDate(
+                      upcomingPayFriday(new Date(raw + "T12:00:00"))
+                    );
+                  }}
                   className="payroll-week-input"
-                  aria-label="Payroll week date"
+                  aria-label="Pay Friday — paycheck date for deductions"
                 />
               </strong>
               <strong className="print-only">{formatWeekLabel(payrollWeekDate)}</strong>
+              <div className="owner-meta-hint no-print muted">
+                Always the Friday paycheck — apply once mid-week
+              </div>
             </div>
             <div>
               <span className="owner-meta-label">Prepared</span>
@@ -1079,21 +1414,33 @@ export function ToolLoanLedgerPage() {
             <button
               type="button"
               className="btn primary"
-              disabled={busy || loading || weekPayrollPreview.count === 0}
+              disabled={
+                busy ||
+                loading ||
+                weekPayrollPreview.count === 0 ||
+                // Full week already done — block double-click until next week
+                (Boolean(selectedWeekStatus?.already_applied) &&
+                  weekPayrollPreview.count === 0)
+              }
               onClick={() => void recordWeeklyPayroll()}
+              title={
+                selectedWeekStatus?.already_applied && weekPayrollPreview.count === 0
+                  ? "Already applied for this pay Friday — wait until next week"
+                  : selectedWeekStatus?.already_applied
+                    ? "Some people still open — only undeducted will be included"
+                    : "Post deductions dated on this Friday paycheck (once per week)"
+              }
             >
               {busy
                 ? "Applying…"
-                : `Apply deductions (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`}
+                : selectedWeekStatus?.already_applied && weekPayrollPreview.count === 0
+                  ? "Already applied this week"
+                  : selectedWeekStatus?.already_applied
+                    ? `Apply remaining (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`
+                    : `Apply for Friday (${weekPayrollPreview.count}) · ${money(weekPayrollPreview.total)}`}
             </button>
           </div>
         </div>
-
-        <p className="owner-report-policy muted no-print">
-          Check who to deduct (header box = all), edit weekly amount if needed, then Apply once.
-          Click a name for loans, charges, or reprint acknowledgments. Turn on “Include all active
-          employees” to list the full payroll roster (including $0).
-        </p>
 
         <div className="table-wrap owner-report-table-wrap weekly-payroll-table-wrap">
           <table className="data-table owner-report-table weekly-payroll-table payroll-unified-table">
@@ -1155,12 +1502,16 @@ export function ToolLoanLedgerPage() {
                       ) : (
                         <input
                           type="checkbox"
-                          checked={included}
-                          disabled={busy}
+                          checked={included && !person?.already_deducted_for_week}
+                          disabled={busy || Boolean(person?.already_deducted_for_week)}
                           onChange={(e) =>
                             setPersonIncluded(row.person_id!, e.target.checked)
                           }
-                          aria-label={`Include ${row.display_name} in bulk deduct`}
+                          aria-label={
+                            person?.already_deducted_for_week
+                              ? `${row.display_name} already deducted this Friday`
+                              : `Include ${row.display_name} in bulk deduct`
+                          }
                         />
                       )}
                     </td>
@@ -1180,9 +1531,35 @@ export function ToolLoanLedgerPage() {
                       >
                         {row.display_name}
                       </button>
+                      {person?.already_deducted_for_week ? (
+                        <span
+                          className="weekly-skip-badge is-deducted"
+                          title={
+                            person.week_deducted_at
+                              ? `Already deducted for this Friday · entered ${person.week_deducted_at}`
+                              : "Already deducted for this pay Friday"
+                          }
+                        >
+                          deducted {formatShortWhen(payrollWeekDate)}
+                          {person.week_deducted_amount != null
+                            ? ` · ${money(person.week_deducted_amount)}`
+                            : ""}
+                        </span>
+                      ) : person?.last_payroll_date ? (
+                        <span
+                          className="weekly-last-deduct muted"
+                          title={
+                            person.last_payroll_at
+                              ? `Last payroll deduction entered ${person.last_payroll_at}`
+                              : undefined
+                          }
+                        >
+                          last {formatShortWhen(person.last_payroll_date)}
+                        </span>
+                      ) : null}
                       {isZero ? (
                         <span className="weekly-skip-badge">$0</span>
-                      ) : !included ? (
+                      ) : !included && !person?.already_deducted_for_week ? (
                         <span className="weekly-skip-badge">skip</span>
                       ) : null}
                     </td>
@@ -1376,7 +1753,7 @@ export function ToolLoanLedgerPage() {
                   placeholder="What was purchased and why"
                 />
               </label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.65rem" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.65rem", alignItems: "flex-end" }}>
                 <label>
                   Date
                   <input
@@ -1387,7 +1764,7 @@ export function ToolLoanLedgerPage() {
                   />
                 </label>
                 <label>
-                  Amount ($)
+                  {addIncludeTax ? "Pre-tax amount ($)" : "Amount ($)"}
                   <input
                     type="number"
                     required
@@ -1397,10 +1774,28 @@ export function ToolLoanLedgerPage() {
                     onChange={(e) => setAddAmt(e.target.value)}
                   />
                 </label>
+                <label className="tool-loan-add-tax-check" title={`Adds ${ADD_TAX_RATE}% sales tax to the amount`}>
+                  <input
+                    type="checkbox"
+                    checked={addIncludeTax}
+                    onChange={(e) => setAddIncludeTax(e.target.checked)}
+                  />
+                  <span>Add tax ({ADD_TAX_RATE}%)</span>
+                </label>
               </div>
+              {addIncludeTax && addTaxPreview.pretax > 0 ? (
+                <p className="tool-loan-add-tax-preview muted">
+                  Tax {money(addTaxPreview.tax)} ·{" "}
+                  <strong>Total charged {money(addTaxPreview.total)}</strong>
+                </p>
+              ) : null}
               <div className="add-loan-charge-actions">
                 <button type="submit" className="btn primary" disabled={busy}>
-                  {busy ? "Saving…" : "Add charge and print acknowledgment"}
+                  {busy
+                    ? "Saving…"
+                    : addIncludeTax && addTaxPreview.total > 0
+                      ? `Add ${money(addTaxPreview.total)} (with tax) and print`
+                      : "Add charge and print acknowledgment"}
                 </button>
                 {lastChargePrintId != null && (
                   <button
@@ -1468,8 +1863,80 @@ export function ToolLoanLedgerPage() {
 
               <h3 style={{ fontSize: "1rem", marginTop: "1.25rem" }}>Loans / charges</h3>
               <p className="muted no-print" style={{ fontSize: "0.82rem", margin: "0.15rem 0 0.45rem" }}>
-                Click a loan to reprint acknowledgment · use Void if it was entered by mistake.
+                Click a loan to reprint · <strong>Edit</strong> to fix amount/tax ·{" "}
+                <strong>Void</strong> only if entered by mistake.
               </p>
+              {editChargeId != null && (
+                <form
+                  className="card form tool-loan-amend-form no-print"
+                  onSubmit={saveEditCharge}
+                  style={{ marginBottom: "0.75rem" }}
+                >
+                  <h4 style={{ margin: "0 0 0.4rem", fontSize: "0.95rem" }}>
+                    Correct loan amount
+                  </h4>
+                  <p className="muted" style={{ margin: "0 0 0.55rem", fontSize: "0.82rem" }}>
+                    Use this when tax was forgotten. Pre-tax + tax % → new payroll total. Same
+                    loan stays on file (not voided).
+                  </p>
+                  <label>
+                    Description
+                    <input
+                      value={editDesc}
+                      onChange={(e) => setEditDesc(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <div className="tool-loan-amend-grid">
+                    <label>
+                      Pre-tax
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        required
+                        value={editPretax}
+                        onChange={(e) => setEditPretax(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Tax %
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={editTaxRate}
+                        onChange={(e) => setEditTaxRate(e.target.value)}
+                      />
+                    </label>
+                    <div className="tool-loan-amend-total">
+                      <span className="muted">Tax {money(editTaxPreview.tax)}</span>
+                      <strong>Total {money(editTaxPreview.total)}</strong>
+                    </div>
+                  </div>
+                  <label>
+                    Reason (audit)
+                    <input
+                      value={editReason}
+                      onChange={(e) => setEditReason(e.target.value)}
+                      placeholder="e.g. Forgot to include sales tax"
+                    />
+                  </label>
+                  <div className="toolbar" style={{ marginTop: "0.35rem" }}>
+                    <button type="submit" className="btn primary" disabled={busy}>
+                      {busy ? "Saving…" : "Save corrected amount"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      disabled={busy}
+                      onClick={closeEditCharge}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
               <div className="table-wrap">
                 <table className="data-table charge-history-table">
                   <thead>
@@ -1486,7 +1953,13 @@ export function ToolLoanLedgerPage() {
                       return (
                         <tr
                           key={c.id}
-                          className={c.voided ? "muted" : undefined}
+                          className={
+                            c.voided
+                              ? "muted"
+                              : editChargeId === c.id
+                                ? "is-editing-charge"
+                                : undefined
+                          }
                         >
                           <td>{c.charge_date?.slice(0, 10)}</td>
                           <td>
@@ -1508,19 +1981,29 @@ export function ToolLoanLedgerPage() {
                           <td className="num">{money(Number(c.amount))}</td>
                           <td className="no-print">
                             {canAct ? (
-                              <button
-                                type="button"
-                                className="btn secondary small"
-                                disabled={busy}
-                                onClick={() =>
-                                  void voidCharge(
-                                    c.id,
-                                    `${c.description} · ${money(Number(c.amount))}`
-                                  )
-                                }
-                              >
-                                Void
-                              </button>
+                              <div className="charge-row-actions">
+                                <button
+                                  type="button"
+                                  className="btn secondary small"
+                                  disabled={busy}
+                                  onClick={() => openEditCharge(c)}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn secondary small"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void voidCharge(
+                                      c.id,
+                                      `${c.description} · ${money(Number(c.amount))}`
+                                    )
+                                  }
+                                >
+                                  Void
+                                </button>
+                              </div>
                             ) : (
                               <span className="muted">voided</span>
                             )}

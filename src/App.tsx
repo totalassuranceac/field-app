@@ -75,8 +75,17 @@ const WarrantiesPage = lazy(() =>
 const PartsPurchasesPage = lazy(() =>
   import("./pages/PartsPurchasesPage").then((m) => ({ default: m.PartsPurchasesPage }))
 );
+const DumpRunsPage = lazy(() =>
+  import("./pages/DumpRunsPage").then((m) => ({ default: m.DumpRunsPage }))
+);
 const HandbookPage = lazy(() =>
   import("./pages/HandbookPage").then((m) => ({ default: m.HandbookPage }))
+);
+const OnboardingPage = lazy(() =>
+  import("./pages/OnboardingPage").then((m) => ({ default: m.OnboardingPage }))
+);
+const TerminationPage = lazy(() =>
+  import("./pages/TerminationPage").then((m) => ({ default: m.TerminationPage }))
 );
 const HowToPage = lazy(() =>
   import("./pages/HowToPage").then((m) => ({ default: m.HowToPage }))
@@ -290,6 +299,10 @@ export default function App() {
                       element={<LazyPage title="Bought parts" Page={PartsPurchasesPage} />}
                     />
                     <Route
+                      path="/dump-runs"
+                      element={<LazyPage title="Dump runs" Page={DumpRunsPage} />}
+                    />
+                    <Route
                       path="/downtime"
                       element={<LazyPage title="Downtime" Page={DowntimePage} />}
                     />
@@ -308,6 +321,16 @@ export default function App() {
                     <Route
                       path="/handbook"
                       element={<LazyPage title="Employee handbook" Page={HandbookPage} />}
+                    />
+                    <Route
+                      path="/onboarding"
+                      element={<LazyPage title="New hire packet" Page={OnboardingPage} />}
+                    />
+                    <Route
+                      path="/termination"
+                      element={
+                        <LazyPage title="Separation notice" Page={TerminationPage} />
+                      }
                     />
                     <Route
                       path="/howto"

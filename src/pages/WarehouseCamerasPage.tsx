@@ -1,7 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, apiBinary } from "../api";
+import { api, apiBinary, apiBinaryWithHeaders } from "../api";
 import { useAuth } from "../auth";
 
+/** Unified camera tile (NVR channel or Wyze). */
+type CamTile = {
+  key: string;
+  source: "nvr" | "wyze";
+  id: string;
+  label: string;
+  enabled?: boolean;
+  rtsp_path?: string;
+};
+
+/** One motion recording from the NVR / Wyze ring buffer */
+type MotionClip = {
+  start: string;
+  end: string;
+  durationSec: number;
+};
+
+/** @deprecated legacy shape — still accepted from older API responses */
 type Channel = { id: number; label: string; enabled?: boolean };
 
 type CamConfig = {
@@ -10,13 +28,49 @@ type CamConfig = {
   nvr_user: string;
   nvr_pass_set: boolean;
   channels: Channel[];
+  /** Preferred: NVR + Wyze */
+  cameras?: CamTile[];
+  wyze_cameras?: { id: string; label: string; rtsp_path?: string; enabled?: boolean }[];
   reachable_hint: string;
   needs_tunnel: boolean;
 };
 
+function tilesFromConfig(cfg: CamConfig | null): CamTile[] {
+  if (!cfg) return [];
+  if (cfg.cameras?.length) {
+    return cfg.cameras.filter((c) => c.enabled !== false);
+  }
+  // Fallback: NVR channels + default Wyze three if API is older mid-deploy
+  const nvr: CamTile[] = (cfg.channels || [])
+    .filter((c) => c.enabled !== false)
+    .map((c) => ({
+      key: `nvr:${c.id}`,
+      source: "nvr" as const,
+      id: String(c.id),
+      label: c.label,
+      enabled: true,
+    }));
+  // Only show Wyze when API includes them (enabled). Do not invent defaults
+  // that hammer a shop proxy with no Bridge installed.
+  const wyze: CamTile[] = (cfg.wyze_cameras || [])
+    .filter((w) => w.enabled !== false)
+    .map((w) => ({
+      key: `wyze:${w.id}`,
+      source: "wyze" as const,
+      id: w.id,
+      label: w.label,
+      enabled: true,
+      rtsp_path: w.rtsp_path,
+    }));
+  return [...nvr, ...wyze];
+}
+
 const SNAPSHOT_REFRESH_MS = 5000;
 /** 2.5-minute clips — half of 5 min for faster load, still enough to scrub */
 const CLIP_SEC = 150;
+/** First emergency play window — shorter so the first load is not a 40MB wait */
+const FIRST_PLAY_SEC = 60;
+const DEFAULT_PAD_MIN = 30;
 /** Play rates: normal + FF/REW cycle (1 click = 2x, 2 = 5x, 3 = 10x) */
 const SPEED_STEPS = [1, 2, 5, 10] as const;
 
@@ -53,7 +107,14 @@ function toTimePart(d: Date): string {
 
 function combineDateTime(dateStr: string, timeStr: string): Date | null {
   if (!dateStr || !timeStr) return null;
-  const d = new Date(`${dateStr}T${timeStr}:00`);
+  // HTML time can be "HH:MM" or "HH:MM:SS" — never append a second ":00" to seconds
+  const t = timeStr.trim();
+  const withSec = /^\d{1,2}:\d{2}:\d{2}$/.test(t)
+    ? t
+    : /^\d{1,2}:\d{2}$/.test(t)
+      ? `${t}:00`
+      : t;
+  const d = new Date(`${dateStr}T${withSec}`);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -63,9 +124,26 @@ function friendlyCamError(msg: string): string {
     return "Camera link is down (tunnel offline on shop PC).";
   }
   if (/502|503|timeout|took too long/i.test(s)) {
-    return "Camera took too long to respond. Try again.";
+    return "Camera took too long to respond. Try again in a moment.";
   }
-  return s.length > 120 ? s.slice(0, 117) + "…" : s;
+  if (/No recording found|no recording near|No Wyze recording|No earlier recording|No later recording/i.test(s)) {
+    return "No recording near that time. This NVR only saves motion clips — quiet gaps have no video. Try when something was moving, or jump a few minutes.";
+  }
+  if (
+    /Wyze path not on shop|Wyze Bridge|wyze snapshot|Wyze snapshot|media proxy may be outdated|Update media proxy|install-wyze-bridge/i.test(
+      s
+    )
+  ) {
+    return "Wyze not ready on shop PC — run install-wyze-bridge.ps1 + update media proxy.";
+  }
+  if (
+    /Document Error|Access Error 404|Can't open URL|<!DOCTYPE|no \/fieldapp\/segments|outdated/i.test(
+      s
+    )
+  ) {
+    return "Shop camera proxy is outdated. Update nvr-media-proxy on the NUC and restart FIX-CAMERAS-NOW.";
+  }
+  return s.length > 160 ? s.slice(0, 157) + "…" : s;
 }
 
 function formatClock(sec: number): string {
@@ -73,6 +151,61 @@ function formatClock(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Shop-local clock label for a clip start (e.g. 3:32:15 PM) */
+function formatClipTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatClipDur(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 1) return "1s";
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatGapHint(gapSec: number | null | undefined): string {
+  if (gapSec == null || gapSec < 45) return "";
+  if (gapSec < 120) return `~${gapSec}s from pick`;
+  return `~${Math.round(gapSec / 60)} min from pick`;
+}
+
+/**
+ * Choose a play window inside a listed clip.
+ * Short motion clips: play the whole event.
+ * Long continuous segments: start near the time the user picked (emergency-friendly).
+ */
+function clipWindowForPlay(
+  clip: MotionClip,
+  around?: Date | null
+): { start: Date; end: Date } {
+  const segStart = new Date(clip.start);
+  const segEnd = new Date(clip.end);
+  const aroundMs = around && !Number.isNaN(around.getTime()) ? around.getTime() : null;
+  const segMs = segEnd.getTime() - segStart.getTime();
+  if (
+    aroundMs != null &&
+    aroundMs >= segStart.getTime() - 2000 &&
+    aroundMs <= segEnd.getTime() + 2000 &&
+    segMs > FIRST_PLAY_SEC * 1000
+  ) {
+    const start = new Date(Math.max(segStart.getTime(), aroundMs - 15_000));
+    const end = new Date(Math.min(segEnd.getTime(), start.getTime() + FIRST_PLAY_SEC * 1000));
+    return { start, end };
+  }
+  // Cap very long segments so the first load stays snappy
+  const end = new Date(
+    Math.min(segEnd.getTime(), segStart.getTime() + Math.max(CLIP_SEC, 180) * 1000)
+  );
+  return { start: segStart, end };
 }
 
 /**
@@ -85,13 +218,13 @@ export function WarehouseCamerasPage() {
 
   const [cfg, setCfg] = useState<CamConfig | null>(null);
   const [error, setError] = useState("");
-  const [tileUrls, setTileUrls] = useState<Record<number, string>>({});
-  const [tileErr, setTileErr] = useState<Record<number, string>>({});
+  const [tileUrls, setTileUrls] = useState<Record<string, string>>({});
+  const [tileErr, setTileErr] = useState<Record<string, string>>({});
   const [proxyStatus, setProxyStatus] = useState<"idle" | "loading" | "ok" | "fail">("idle");
   const [proxyError, setProxyError] = useState("");
   const blobUrlsRef = useRef<string[]>([]);
 
-  const [viewerCh, setViewerCh] = useState<Channel | null>(null);
+  const [viewerCh, setViewerCh] = useState<CamTile | null>(null);
   const [pickDate, setPickDate] = useState(() => toDatePart(new Date(Date.now() - 5 * 60 * 1000)));
   const [pickTime, setPickTime] = useState(() => toTimePart(new Date(Date.now() - 5 * 60 * 1000)));
   const [playBusy, setPlayBusy] = useState(false);
@@ -106,14 +239,26 @@ export function WarehouseCamerasPage() {
   const [direction, setDirection] = useState<"fwd" | "rew">("fwd");
   /** YouTube-style chrome over video */
   const [showChrome, setShowChrome] = useState(true);
+  /** Motion clips near the picked time — tap to play */
+  const [clipList, setClipList] = useState<MotionClip[]>([]);
+  const [clipListPadMin, setClipListPadMin] = useState(DEFAULT_PAD_MIN);
+  const [clipListBusy, setClipListBusy] = useState(false);
+  const [activeClipIdx, setActiveClipIdx] = useState<number>(-1);
+  const [nearestClipIdx, setNearestClipIdx] = useState<number>(-1);
+  const [nearestGapSec, setNearestGapSec] = useState<number | null>(null);
+  /** Time used for the last Find clips search — used to land inside long segments */
+  const searchAroundRef = useRef<Date | null>(null);
+  const clipListRef = useRef<HTMLDivElement | null>(null);
 
   const videoBlobRef = useRef<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const autoPlayGen = useRef(0);
   const rewTimerRef = useRef<number | null>(null);
   const chromeHideRef = useRef<number | null>(null);
-  /** Absolute start of the clip currently loaded (for continuous chain) */
+  /** Absolute start of the clip currently loaded (actual NVR segment) */
   const clipStartRef = useRef<Date | null>(null);
+  /** Absolute end of the clip currently loaded (actual NVR segment) */
+  const clipEndRef = useRef<Date | null>(null);
   /** Prevent double auto-load while a chain request is in flight */
   const chainLockRef = useRef(false);
   /** Resume mode after a continuous block loads */
@@ -177,40 +322,46 @@ export function WarehouseCamerasPage() {
     };
   }, [allowed]);
 
-  const activeChannels = useMemo(
-    () => (cfg?.channels || []).filter((c) => c.enabled !== false),
-    [cfg]
-  );
+  const activeCameras = useMemo(() => tilesFromConfig(cfg), [cfg]);
 
   const cloudProxyReady = Boolean(
     cfg?.configured && cfg.nvr_pass_set && !cfg.needs_tunnel && cfg.nvr_base_url
   );
 
   const refreshCloudTiles = useCallback(async () => {
-    if (!allowed || !cloudProxyReady || !activeChannels.length) return;
+    if (!allowed || !cloudProxyReady || !activeCameras.length) return;
     if (viewerCh) return;
 
     setProxyStatus((s) => (s === "ok" ? "ok" : "loading"));
-    const next: Record<number, string> = {};
-    const errs: Record<number, string> = {};
+    const next: Record<string, string> = {};
+    const errs: Record<string, string> = {};
     const newBlobs: string[] = [];
     let anyOk = false;
-    let firstErr = "";
+    let firstNvrErr = "";
+
+    // NVR first (must stay fast); Wyze second with short timeout
+    const ordered = [
+      ...activeCameras.filter((c) => c.source === "nvr"),
+      ...activeCameras.filter((c) => c.source !== "nvr"),
+    ];
 
     await Promise.all(
-      activeChannels.map(async (ch) => {
+      ordered.map(async (ch) => {
         try {
-          const blob = await apiBinary(`/warehouse-cameras/snapshot/${ch.id}`, {
-            timeoutMs: 20_000,
+          const snapKey = encodeURIComponent(ch.key);
+          // Wyze: fail fast if Bridge offline so NVR wall never freezes
+          const timeoutMs = ch.source === "wyze" ? 8_000 : 18_000;
+          const blob = await apiBinary(`/warehouse-cameras/snapshot/${snapKey}`, {
+            timeoutMs,
           });
           const url = URL.createObjectURL(blob);
           newBlobs.push(url);
-          next[ch.id] = url;
+          next[ch.key] = url;
           anyOk = true;
         } catch (e) {
           const msg = friendlyCamError(e instanceof Error ? e.message : "Failed");
-          errs[ch.id] = msg;
-          if (!firstErr) firstErr = msg;
+          errs[ch.key] = msg;
+          if (!firstNvrErr && ch.source === "nvr") firstNvrErr = msg;
         }
       })
     );
@@ -225,9 +376,9 @@ export function WarehouseCamerasPage() {
       setProxyError("");
     } else {
       setProxyStatus("fail");
-      setProxyError(firstErr || "Could not load camera snapshots.");
+      setProxyError(firstNvrErr || "Could not load camera snapshots.");
     }
-  }, [allowed, cloudProxyReady, activeChannels, revokeBlobs, viewerCh]);
+  }, [allowed, cloudProxyReady, activeCameras, revokeBlobs, viewerCh]);
 
   useEffect(() => {
     if (!cloudProxyReady || !allowed) return;
@@ -272,23 +423,36 @@ export function WarehouseCamerasPage() {
 
   const loadClip = useCallback(
     async (
-      ch: Channel,
+      ch: CamTile,
       startRaw: Date,
       opts?: {
         /** Continuous chain: keep speed and land at start or end of new block */
         chain?: { dir: "fwd" | "rew"; speedIdx: number; seek: "start" | "end" };
+        /** NVR motion-segment chain mode */
+        mode?: "at" | "prev" | "next";
+        /** Play this exact window (from clip list) — do not snap to clock blocks */
+        exactEnd?: Date;
+        /** Index in clipList when playing from the picker */
+        clipIndex?: number;
       }
     ) => {
-      const start = snapToClipStart(startRaw);
+      const mode = opts?.mode || "at";
+      const exact = Boolean(opts?.exactEnd);
+      const start =
+        mode === "at" && !exact ? snapToClipStart(startRaw) : startRaw;
       // Don't load future blocks
-      if (start.getTime() > Date.now()) {
+      if (start.getTime() > Date.now() + 60_000) {
         setPlayError("No more video in that direction yet.");
         chainLockRef.current = false;
         return;
       }
-      const end = new Date(start.getTime() + CLIP_SEC * 1000);
+      const end =
+        opts?.exactEnd && opts.exactEnd.getTime() > start.getTime()
+          ? opts.exactEnd
+          : new Date(start.getTime() + CLIP_SEC * 1000);
       setPickDate(toDatePart(start));
       setPickTime(toTimePart(start));
+      if (typeof opts?.clipIndex === "number") setActiveClipIdx(opts.clipIndex);
       setPlayBusy(true);
       setPlayError("");
       clearVideo({ keepRate: Boolean(opts?.chain) });
@@ -298,15 +462,42 @@ export function WarehouseCamerasPage() {
       else resumeRef.current = null;
 
       try {
-        const blob = await apiBinary(
-          `/warehouse-cameras/clip?channel=${ch.id}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`,
+        const qs = new URLSearchParams({
+          key: ch.key,
+          start: start.toISOString(),
+          end: end.toISOString(),
+          // Exact list picks still use "at" on the proxy (overlap that window)
+          mode: mode === "prev" || mode === "next" ? mode : "at",
+        });
+        const { blob, headers } = await apiBinaryWithHeaders(
+          `/warehouse-cameras/clip?${qs.toString()}`,
           { timeoutMs: 300_000 }
         );
         if (gen !== autoPlayGen.current) return;
 
+        const hdrStart = headers.get("X-Clip-Start");
+        const hdrEnd = headers.get("X-Clip-End");
+        const gapSec = Number(headers.get("X-Clip-Gap-Sec") || "0");
+        const actualStart = hdrStart ? new Date(hdrStart) : start;
+        const actualEnd = hdrEnd ? new Date(hdrEnd) : end;
+        if (!Number.isNaN(actualStart.getTime())) {
+          clipStartRef.current = actualStart;
+          setPickDate(toDatePart(actualStart));
+          setPickTime(toTimePart(actualStart));
+        } else {
+          clipStartRef.current = start;
+        }
+        clipEndRef.current = !Number.isNaN(actualEnd.getTime()) ? actualEnd : end;
+
+        if (gapSec >= 90 && !exact) {
+          const gapMin = Math.round(gapSec / 60);
+          setPlayError(
+            `Motion gap: no recording for ~${gapMin} min before/after this clip (NVR only saves when something moves). Use the clip list below to pick the right time.`
+          );
+        }
+
         const url = URL.createObjectURL(blob);
         videoBlobRef.current = url;
-        clipStartRef.current = start;
         setVideoUrl(url);
 
         const resume = resumeRef.current;
@@ -362,26 +553,152 @@ export function WarehouseCamerasPage() {
     [clearVideo]
   );
 
-  /** Load previous (-1) or next (+1) block for continuous scrub */
+  const fetchClipList = useCallback(
+    async (
+      ch: CamTile,
+      around: Date,
+      padMin = DEFAULT_PAD_MIN,
+      opts?: { autoPlayNearest?: boolean }
+    ) => {
+      setClipListBusy(true);
+      setPlayError("");
+      searchAroundRef.current = around;
+      try {
+        const qs = new URLSearchParams({
+          key: ch.key,
+          around: around.toISOString(),
+          padMin: String(padMin),
+        });
+        const res = await api<{
+          ok: boolean;
+          segments: MotionClip[];
+          nearestIndex: number;
+          nearestGapSec: number | null;
+          padMin?: number;
+        }>(`/warehouse-cameras/segments?${qs.toString()}`, { timeoutMs: 90_000 });
+        const segs = res.segments || [];
+        setClipList(segs);
+        setClipListPadMin(res.padMin ?? padMin);
+        setNearestClipIdx(res.nearestIndex ?? -1);
+        setNearestGapSec(res.nearestGapSec ?? null);
+        if (!segs.length) {
+          setActiveClipIdx(-1);
+          setPlayError(
+            "No motion clips in that window. This NVR only saves when something moves — try another time or widen the search."
+          );
+          return segs;
+        }
+        // Scroll nearest into view after paint
+        window.setTimeout(() => {
+          const el = clipListRef.current?.querySelector(
+            `[data-clip-idx="${res.nearestIndex}"]`
+          ) as HTMLElement | null;
+          el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }, 80);
+        if (opts?.autoPlayNearest !== false && res.nearestIndex >= 0 && segs[res.nearestIndex]) {
+          const nearest = segs[res.nearestIndex];
+          const win = clipWindowForPlay(nearest, around);
+          void loadClip(ch, win.start, {
+            exactEnd: win.end,
+            clipIndex: res.nearestIndex,
+            mode: "at",
+          });
+        }
+        return segs;
+      } catch (e) {
+        setClipList([]);
+        setActiveClipIdx(-1);
+        setNearestClipIdx(-1);
+        setPlayError(
+          friendlyCamError(e instanceof Error ? e.message : "Could not list clips")
+        );
+        return [];
+      } finally {
+        setClipListBusy(false);
+      }
+    },
+    [loadClip]
+  );
+
+  const playClipFromList = useCallback(
+    (idx: number) => {
+      if (!viewerCh || playBusy) return;
+      const clip = clipList[idx];
+      if (!clip) return;
+      const win = clipWindowForPlay(clip, searchAroundRef.current);
+      if (Number.isNaN(win.start.getTime()) || Number.isNaN(win.end.getTime())) return;
+      setPlayError("");
+      void loadClip(viewerCh, win.start, {
+        exactEnd: win.end,
+        clipIndex: idx,
+        mode: "at",
+      });
+    },
+    [viewerCh, playBusy, clipList, loadClip]
+  );
+
+  const jumpClipInList = useCallback(
+    (dir: -1 | 1) => {
+      if (!clipList.length || playBusy) return;
+      const base = activeClipIdx >= 0 ? activeClipIdx : nearestClipIdx;
+      const next = Math.max(0, Math.min(clipList.length - 1, (base < 0 ? 0 : base) + dir));
+      if (next === activeClipIdx && videoUrl) return;
+      playClipFromList(next);
+    },
+    [clipList, playBusy, activeClipIdx, nearestClipIdx, videoUrl, playClipFromList]
+  );
+
+  /** Load previous / next *motion segment* (prefer clip list, else NVR prev/next) */
   const chainBlock = useCallback(
     async (dir: -1 | 1, playDir: "fwd" | "rew") => {
       if (!viewerCh || chainLockRef.current || playBusy) return;
-      const base = clipStartRef.current || combineDateTime(pickDate, pickTime);
-      if (!base) return;
-      const nextStart = snapToClipStart(new Date(base.getTime() + dir * CLIP_SEC * 1000));
-      // Same block (snap edge) — nothing to do
-      if (clipStartRef.current && nextStart.getTime() === clipStartRef.current.getTime()) {
-        if (playDir === "rew") {
-          setDirection("fwd");
-          setSpeedIdx(0);
-          setPaused(true);
+
+      // Prefer jumping within the visible clip list — predictable in emergencies
+      if (clipList.length > 0) {
+        const base = activeClipIdx >= 0 ? activeClipIdx : nearestClipIdx;
+        const next = (base < 0 ? 0 : base) + dir;
+        if (next < 0 || next >= clipList.length) {
+          setPlayError(
+            dir < 0
+              ? "No earlier clip in this list — widen the search or pick an earlier time."
+              : "No later clip in this list — widen the search or pick a later time."
+          );
+          return;
         }
+        const clip = clipList[next];
+        const win = clipWindowForPlay(clip, searchAroundRef.current);
+        if (Number.isNaN(win.start.getTime()) || Number.isNaN(win.end.getTime())) return;
+        chainLockRef.current = true;
+        stopRewTimer();
+        setPlayError("");
+        await loadClip(viewerCh, win.start, {
+          exactEnd: win.end,
+          clipIndex: next,
+          mode: "at",
+          chain: {
+            dir: playDir,
+            speedIdx: playDir === "rew" ? Math.max(1, speedIdx || 1) : Math.max(0, speedIdx),
+            seek: playDir === "rew" ? "end" : "start",
+          },
+        });
         return;
       }
+
+      const segStart = clipStartRef.current || combineDateTime(pickDate, pickTime);
+      const segEnd =
+        clipEndRef.current ||
+        (segStart ? new Date(segStart.getTime() + CLIP_SEC * 1000) : null);
+      if (!segStart || !segEnd) return;
+
+      // prev: find clip ending before current start; next: clip starting after current end
+      const anchor = dir < 0 ? segStart : segEnd;
+      const mode = dir < 0 ? "prev" : "next";
+
       chainLockRef.current = true;
       stopRewTimer();
       setPlayError("");
-      await loadClip(viewerCh, nextStart, {
+      await loadClip(viewerCh, anchor, {
+        mode,
         chain: {
           dir: playDir,
           speedIdx: playDir === "rew" ? Math.max(1, speedIdx || 1) : Math.max(0, speedIdx),
@@ -389,7 +706,18 @@ export function WarehouseCamerasPage() {
         },
       });
     },
-    [viewerCh, playBusy, pickDate, pickTime, speedIdx, loadClip, stopRewTimer]
+    [
+      viewerCh,
+      playBusy,
+      pickDate,
+      pickTime,
+      speedIdx,
+      loadClip,
+      stopRewTimer,
+      clipList,
+      activeClipIdx,
+      nearestClipIdx,
+    ]
   );
 
   chainBlockRef.current = chainBlock;
@@ -429,22 +757,33 @@ export function WarehouseCamerasPage() {
     return () => stopRewTimer();
   }, [applyPlaybackMode, stopRewTimer]);
 
-  function openViewer(ch: Channel) {
-    const start = snapToClipStart(new Date(Date.now() - 5 * 60 * 1000));
+  function openViewer(ch: CamTile) {
+    const start = new Date(Date.now() - 5 * 60 * 1000);
     setViewerCh(ch);
     setPickDate(toDatePart(start));
     setPickTime(toTimePart(start));
     setPlayError("");
     chainLockRef.current = false;
     clipStartRef.current = null;
+    clipEndRef.current = null;
+    setClipList([]);
+    setActiveClipIdx(-1);
+    setNearestClipIdx(-1);
+    setNearestGapSec(null);
+    setClipListPadMin(DEFAULT_PAD_MIN);
     clearVideo();
-    void loadClip(ch, start);
+    // List motion clips near now, then auto-play the nearest — no clock-block jumping
+    void fetchClipList(ch, start, DEFAULT_PAD_MIN, { autoPlayNearest: true });
   }
 
   function closeViewer() {
     autoPlayGen.current += 1;
     setViewerCh(null);
     setPlayError("");
+    setClipList([]);
+    setActiveClipIdx(-1);
+    setNearestClipIdx(-1);
+    setNearestGapSec(null);
     clearVideo();
   }
 
@@ -516,12 +855,26 @@ export function WarehouseCamerasPage() {
 
   function loadPickedSlot() {
     if (!viewerCh) return;
+    if (playBusy || clipListBusy) return;
     const start = combineDateTime(pickDate, pickTime);
     if (!start) {
-      setPlayError("Pick a valid date and time.");
+      setPlayError("Pick a valid date and time (use the calendar and clock).");
       return;
     }
-    void loadClip(viewerCh, start);
+    if (start.getTime() > Date.now()) {
+      setPlayError("That time is in the future — pick a time earlier today or another day.");
+      return;
+    }
+    setPlayError("");
+    // Find motion clips near the picked time — tap the right one (e.g. 3:32 drop-off)
+    void fetchClipList(viewerCh, start, clipListPadMin || DEFAULT_PAD_MIN, { autoPlayNearest: true });
+  }
+
+  function widenClipSearch() {
+    if (!viewerCh || playBusy || clipListBusy) return;
+    const start = combineDateTime(pickDate, pickTime) || new Date(Date.now() - 5 * 60 * 1000);
+    const nextPad = clipListPadMin >= 180 ? 360 : clipListPadMin >= 60 ? 180 : 60;
+    void fetchClipList(viewerCh, start, nextPad, { autoPlayNearest: true });
   }
 
   const speedLabel =
@@ -556,7 +909,7 @@ export function WarehouseCamerasPage() {
                   ? "Loading cameras…"
                   : proxyStatus === "fail"
                     ? "Cameras temporarily unavailable."
-                    : "Tap a camera to open playback for that camera only."
+                    : "Tap a camera to open playback. NVR + Wyze on one wall."
                 : "Cameras are not available right now."}
         </p>
         {proxyError && (
@@ -566,11 +919,11 @@ export function WarehouseCamerasPage() {
         )}
       </div>
 
-      {cloudProxyReady && activeChannels.length > 0 && (
+      {cloudProxyReady && activeCameras.length > 0 && (
         <div className="warehouse-cam-grid">
-          {activeChannels.map((ch) => (
+          {activeCameras.map((ch) => (
             <button
-              key={ch.id}
+              key={ch.key}
               type="button"
               className="warehouse-cam-tile warehouse-cam-tile-btn"
               onClick={() => openViewer(ch)}
@@ -578,14 +931,16 @@ export function WarehouseCamerasPage() {
             >
               <div className="warehouse-cam-tile-label">
                 {ch.label}
-                <span className="warehouse-cam-tile-hint">Open →</span>
+                <span className="warehouse-cam-tile-hint">
+                  {ch.source === "wyze" ? "Wyze · Open →" : "Open →"}
+                </span>
               </div>
               <div className="warehouse-cam-tile-img-wrap">
-                {tileUrls[ch.id] ? (
-                  <img src={tileUrls[ch.id]} alt={ch.label} className="warehouse-cam-tile-img" />
+                {tileUrls[ch.key] ? (
+                  <img src={tileUrls[ch.key]} alt={ch.label} className="warehouse-cam-tile-img" />
                 ) : (
                   <div className="warehouse-cam-tile-err">
-                    {tileErr[ch.id] ||
+                    {tileErr[ch.key] ||
                       (proxyStatus === "loading" ? "Loading…" : "No image yet")}
                   </div>
                 )}
@@ -616,7 +971,7 @@ export function WarehouseCamerasPage() {
               </button>
             </div>
 
-            {/* Date + time only — loads a 2.5-minute clip (faster) */}
+            {/* Date + time → list of real motion clips (no quiet-gap jumping) */}
             <div className="warehouse-cam-pick-row">
               <label className="warehouse-cam-pick">
                 <span>Date</span>
@@ -628,23 +983,130 @@ export function WarehouseCamerasPage() {
                 />
               </label>
               <label className="warehouse-cam-pick">
-                <span>Time</span>
+                <span>Time (shop local)</span>
                 <input
                   type="time"
-                  step={150}
-                  value={pickTime}
-                  onChange={(e) => setPickTime(e.target.value)}
+                  step={60}
+                  value={pickTime.length === 5 ? pickTime : pickTime.slice(0, 5)}
+                  onChange={(e) => {
+                    // Normalize to HH:MM so Find always parses cleanly
+                    const v = e.target.value;
+                    setPickTime(v.length >= 5 ? v.slice(0, 5) : v);
+                  }}
                 />
               </label>
               <button
                 type="button"
-                className="btn primary"
-                disabled={playBusy}
+                className="btn primary warehouse-cam-find-btn"
+                disabled={playBusy || clipListBusy}
                 onClick={loadPickedSlot}
               >
-                {playBusy ? "Loading…" : "Go"}
+                {clipListBusy ? "Finding..." : "Play this minute"}
               </button>
             </div>
+            <p className="muted" style={{ margin: "0.35rem 0 0.5rem", fontSize: "0.85rem" }}>
+              NVR saves motion only. Plays the clip nearest this minute. Quiet gaps have no video.
+            </p>
+            {(clipListBusy || playBusy) && (
+              <p className="muted" style={{ margin: "0 0 0.5rem", fontSize: "0.85rem" }}>
+                {clipListBusy
+                  ? "Listing motion clips near that time…"
+                  : viewerCh.source === "wyze"
+                    ? "Loading Wyze clip… can take up to a minute."
+                    : "Loading clip… can take up to a minute."}
+              </p>
+            )}
+
+            {(clipList.length > 0 || clipListBusy) && (
+              <div className="warehouse-cam-clip-list-wrap">
+                <div className="warehouse-cam-clip-list-head">
+                  <strong>
+                    {clipListBusy
+                      ? "Finding clips…"
+                      : `${clipList.length} motion clip${clipList.length === 1 ? "" : "s"} (±${clipListPadMin} min)`}
+                  </strong>
+                  <div className="warehouse-cam-clip-list-actions">
+                    <button
+                      type="button"
+                      className="btn secondary small"
+                      disabled={
+                        playBusy ||
+                        clipListBusy ||
+                        activeClipIdx <= 0 ||
+                        (activeClipIdx < 0 && nearestClipIdx <= 0)
+                      }
+                      onClick={() => jumpClipInList(-1)}
+                      title="Previous motion clip"
+                    >
+                      ← Prev clip
+                    </button>
+                    <button
+                      type="button"
+                      className="btn secondary small"
+                      disabled={
+                        playBusy ||
+                        clipListBusy ||
+                        !clipList.length ||
+                        (activeClipIdx >= 0
+                          ? activeClipIdx >= clipList.length - 1
+                          : nearestClipIdx >= clipList.length - 1)
+                      }
+                      onClick={() => jumpClipInList(1)}
+                      title="Next motion clip"
+                    >
+                      Next clip →
+                    </button>
+                    {clipListPadMin < 360 && (
+                      <button
+                        type="button"
+                        className="btn secondary small"
+                        disabled={playBusy || clipListBusy}
+                        onClick={widenClipSearch}
+                      >
+                        Wider (±{clipListPadMin >= 180 ? 6 : 3}h)
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {nearestGapSec != null && nearestGapSec >= 90 && clipList.length > 0 && (
+                  <p className="muted" style={{ margin: "0 0 0.4rem", fontSize: "0.8rem" }}>
+                    Nearest clip is {formatGapHint(nearestGapSec)} — tap the list if that is not the right event.
+                  </p>
+                )}
+                <div className="warehouse-cam-clip-list" ref={clipListRef} role="list">
+                  {clipList.map((clip, idx) => {
+                    const isActive = idx === activeClipIdx;
+                    const isNearest = idx === nearestClipIdx;
+                    return (
+                      <button
+                        key={`${clip.start}-${idx}`}
+                        type="button"
+                        role="listitem"
+                        data-clip-idx={idx}
+                        className={`warehouse-cam-clip-item${isActive ? " is-active" : ""}${isNearest && !isActive ? " is-nearest" : ""}`}
+                        disabled={playBusy || clipListBusy}
+                        onClick={() => playClipFromList(idx)}
+                      >
+                        <span className="warehouse-cam-clip-time">{formatClipTime(clip.start)}</span>
+                        <span className="warehouse-cam-clip-dur">
+                          {clip.durationSec > 180
+                            ? `${formatClipDur(clip.durationSec)} - jumps to pick`
+                            : formatClipDur(clip.durationSec)}
+                        </span>
+                        {isActive ? (
+                          <span className="warehouse-cam-clip-tag">Playing</span>
+                        ) : isNearest ? (
+                          <span className="warehouse-cam-clip-tag warehouse-cam-clip-tag-near">Nearest</span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                  {!clipListBusy && clipList.length === 0 && (
+                    <div className="warehouse-cam-clip-empty">No clips in this window</div>
+                  )}
+                </div>
+              </div>
+            )}
             <div
               className={`warehouse-cam-viewer-stage${showChrome || paused || !videoUrl ? " show-chrome" : ""}`}
               onMouseMove={bumpChrome}
@@ -697,15 +1159,19 @@ export function WarehouseCamerasPage() {
                     togglePlayPause();
                   }}
                 />
-              ) : tileUrls[viewerCh.id] ? (
+              ) : tileUrls[viewerCh.key] ? (
                 <img
-                  src={tileUrls[viewerCh.id]}
+                  src={tileUrls[viewerCh.key]}
                   alt={viewerCh.label}
                   className="warehouse-cam-video warehouse-cam-video-large warehouse-cam-video-still"
                 />
               ) : (
                 <div className="warehouse-cam-viewer-placeholder">
-                  {playBusy ? "Loading recording…" : "Pick a date and time, then Go"}
+                  {clipListBusy
+                    ? "Finding motion clips…"
+                    : playBusy
+                      ? "Loading recording…"
+                      : "Pick a date and time, then Find clips"}
                 </div>
               )}
 

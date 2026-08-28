@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, can } from "../api";
-import { useTheme } from "../theme";
+import { TEXT_SIZE_OPTIONS, useTheme } from "../theme";
 import { useAuth } from "../auth";
 import { PasswordField } from "../components/PasswordField";
 
@@ -17,7 +17,7 @@ interface SmsContact {
 }
 
 export function SettingsPage() {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, textSize, setTextSize } = useTheme();
   const { user, refresh, logout } = useAuth();
   const [phone, setPhone] = useState(user?.phone || "");
   /** Explicit SMS consent (required when saving a mobile number) */
@@ -35,10 +35,25 @@ export function SettingsPage() {
   const [smsTo, setSmsTo] = useState("");
   const [smsMsg, setSmsMsg] = useState("");
   const [smsBusy, setSmsBusy] = useState(false);
+  const [smsTestBusy, setSmsTestBusy] = useState(false);
   const [shopPhone, setShopPhone] = useState("");
   const [mechanicPhone, setMechanicPhone] = useState("");
   const [officePhone, setOfficePhone] = useState("");
   const [rolePhonesBusy, setRolePhonesBusy] = useState(false);
+  const [smsLog, setSmsLog] = useState<
+    Array<{
+      id: number;
+      to_phone: string;
+      status: string;
+      error: string | null;
+      context: string | null;
+      created_at: string;
+      body: string;
+      provider_sid?: string | null;
+    }>
+  >([]);
+  const [smsFromMasked, setSmsFromMasked] = useState<string | null>(null);
+  const [smsRefreshBusy, setSmsRefreshBusy] = useState(false);
 
   useEffect(() => {
     setPhone(user?.phone || "");
@@ -73,8 +88,90 @@ export function SettingsPage() {
           setOfficePhone(s.office_phone || "");
         })
         .catch(() => {});
+      void loadSmsLog(false);
     }
   }, [forced, user]);
+
+  async function loadSmsLog(refreshTwilio: boolean) {
+    try {
+      const d = await api<{
+        from_masked?: string | null;
+        log: Array<{
+          id: number;
+          to_phone: string;
+          status: string;
+          error: string | null;
+          context: string | null;
+          created_at: string;
+          body: string;
+          provider_sid?: string | null;
+        }>;
+      }>(`/sms/log?limit=25${refreshTwilio ? "&refresh=1" : ""}`);
+      setSmsLog(d.log || []);
+      setSmsFromMasked(d.from_masked || null);
+    } catch {
+      if (!refreshTwilio) setSmsLog([]);
+    }
+  }
+
+  async function sendTestToMe() {
+    setError("");
+    setOk("");
+    setSmsTestBusy(true);
+    try {
+      const res = await api<{ ok: boolean; to_phone?: string; sid?: string; error?: string }>(
+        "/sms/test",
+        { method: "POST", body: "{}" }
+      );
+      // Twilio may accept the API call, then carriers reject (e.g. 30034). Refresh delivery.
+      if (can(user, "manageIssues") || user?.role === "admin" || user?.role === "office") {
+        await loadSmsLog(true);
+        try {
+          const latest = await api<{
+            log: Array<{ context?: string | null; status?: string; error?: string | null }>;
+          }>("/sms/log?limit=5&refresh=1");
+          const testRow = (latest.log || []).find((r) => r.context === "sms_test");
+          const st = String(testRow?.status || "").toLowerCase();
+          if (testRow && (st === "undelivered" || st === "failed" || testRow.error)) {
+            setError(
+              testRow.error ||
+                `Twilio accepted the message but it was not delivered (status: ${testRow.status}). Often error 30034 — A2P campaign / Messaging Service not fully approved.`
+            );
+            setOk("");
+            return;
+          }
+        } catch {
+          /* keep success message below */
+        }
+      }
+      setOk(
+        `Test text sent to ${res.to_phone || "your phone"}. Check your messages — it should say “TA Fleet test”.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "SMS test failed");
+      if (can(user, "manageIssues") || user?.role === "admin" || user?.role === "office") {
+        await loadSmsLog(true);
+      }
+    } finally {
+      setSmsTestBusy(false);
+    }
+  }
+
+  async function refreshSmsDelivery() {
+    setError("");
+    setOk("");
+    setSmsRefreshBusy(true);
+    try {
+      await loadSmsLog(true);
+      setOk(
+        "Checked Twilio delivery status for recent texts. Look at Status / Detail in the log below."
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not refresh Twilio status");
+    } finally {
+      setSmsRefreshBusy(false);
+    }
+  }
 
   async function savePhone(e: FormEvent) {
     e.preventDefault();
@@ -125,7 +222,7 @@ export function SettingsPage() {
           method: "PUT",
           body: JSON.stringify({ phone: shopPhone.trim() }),
         });
-        setOk("Shop SMS number saved — drivers can text this number from Settings.");
+        setOk("Shop SMS number saved — used for automatic alerts when Twilio is on.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save phone numbers");
@@ -359,6 +456,16 @@ export function SettingsPage() {
                       Clear number
                     </button>
                   )}
+                  {smsConfigured && phone.trim() && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={smsTestBusy || phoneBusy}
+                      onClick={() => void sendTestToMe()}
+                    >
+                      {smsTestBusy ? "Sending test…" : "Send test text to my phone"}
+                    </button>
+                  )}
                 </div>
               </form>
 
@@ -375,65 +482,155 @@ export function SettingsPage() {
               </p>
             </div>
 
-            <div className="card">
-              <h2>Send a text</h2>
-              {!smsConfigured ? (
-                <p className="muted" style={{ marginTop: 0 }}>
-                  SMS is not connected yet. An admin needs to add Twilio credentials on the server
-                  (Account SID, Auth Token, From number). Until then, use Notifications in the app.
+            {user?.role === "admin" && (
+              <div className="card">
+                <h2>Send a text</h2>
+                <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
+                  Admin only — text a staff phone on file. Everyone else uses Notifications in the
+                  app; automatic shop alerts still send when Twilio is on.
                 </p>
-              ) : !contacts.length ? (
-                <p className="muted" style={{ marginTop: 0 }}>
-                  No contacts with phone numbers yet. Drivers and shop staff need a phone saved
-                  above with SMS consent.
-                </p>
-              ) : (
-                <form className="form" onSubmit={sendText}>
-                  <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
-                    {user?.role === "driver"
-                      ? "Text the shop or a mechanic when you need help."
-                      : "Text a driver — uses the number on their profile."}
+                {!smsConfigured ? (
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    SMS is not connected yet. Add Twilio credentials on the server (Account SID, Auth
+                    Token, From number / Messaging Service).
                   </p>
-                  <label>
-                    To
-                    <select value={smsTo} onChange={(e) => setSmsTo(e.target.value)} required>
-                      <option value="">Select…</option>
-                      {contacts.map((c, i) => (
-                        <option
-                          key={`${c.user_id ?? c.phone}-${i}`}
-                          value={c.user_id ? `u:${c.user_id}` : `p:${c.phone}`}
-                        >
-                          {c.name}
-                          {c.unit_number ? ` · unit ${c.unit_number}` : ""}
-                          {c.role === "shop" ? " (shop line)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Message
-                    <textarea
-                      value={smsMsg}
-                      onChange={(e) => setSmsMsg(e.target.value)}
-                      required
-                      placeholder="Short text — they see it as a normal SMS"
-                      maxLength={1400}
-                    />
-                  </label>
-                  <button className="btn" type="submit" disabled={smsBusy}>
-                    {smsBusy ? "Sending…" : "Send text"}
+                ) : !contacts.length ? (
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    No contacts with phone numbers yet. Staff need a phone saved above with SMS
+                    consent.
+                  </p>
+                ) : (
+                  <form className="form" onSubmit={sendText}>
+                    <label>
+                      To
+                      <select value={smsTo} onChange={(e) => setSmsTo(e.target.value)} required>
+                        <option value="">Select…</option>
+                        {contacts.map((c, i) => (
+                          <option
+                            key={`${c.user_id ?? c.phone}-${i}`}
+                            value={c.user_id ? `u:${c.user_id}` : `p:${c.phone}`}
+                          >
+                            {c.name}
+                            {c.unit_number ? ` · unit ${c.unit_number}` : ""}
+                            {c.role === "shop" ? " (shop line)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Message
+                      <textarea
+                        value={smsMsg}
+                        onChange={(e) => setSmsMsg(e.target.value)}
+                        required
+                        placeholder="Short text — they see it as a normal SMS"
+                        maxLength={1400}
+                      />
+                    </label>
+                    <button className="btn" type="submit" disabled={smsBusy}>
+                      {smsBusy ? "Sending…" : "Send text"}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {(can(user, "manageIssues") ||
+              user?.role === "admin" ||
+              user?.role === "office" ||
+              user?.role === "supervisor") && (
+              <div className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Recent SMS log</h2>
+                <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
+                  App “sent” only means Twilio accepted the API call. Tap{" "}
+                  <strong>Check delivery from Twilio</strong> to see if the carrier actually
+                  delivered it (delivered / undelivered / failed + error code).
+                  {smsFromMasked ? (
+                    <>
+                      {" "}
+                      Sending as <code>{smsFromMasked}</code>.
+                    </>
+                  ) : null}
+                </p>
+                <div className="toolbar" style={{ marginBottom: "0.75rem" }}>
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    disabled={smsRefreshBusy}
+                    onClick={() => void refreshSmsDelivery()}
+                  >
+                    {smsRefreshBusy ? "Checking Twilio…" : "Check delivery from Twilio"}
                   </button>
-                </form>
-              )}
-            </div>
+                </div>
+                {!smsLog.length ? (
+                  <p className="muted">No SMS attempts logged yet.</p>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>When</th>
+                          <th>To</th>
+                          <th>Status</th>
+                          <th>Context</th>
+                          <th>Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {smsLog.map((row) => {
+                          const st = String(row.status || "").toLowerCase();
+                          const okish = st === "delivered" || st === "sent";
+                          const bad =
+                            st === "failed" || st === "undelivered" || Boolean(row.error);
+                          return (
+                            <tr key={row.id}>
+                              <td style={{ whiteSpace: "nowrap" }}>
+                                {String(row.created_at || "")
+                                  .replace("T", " ")
+                                  .slice(0, 16)}
+                              </td>
+                              <td>{row.to_phone}</td>
+                              <td>
+                                <strong
+                                  style={{
+                                    color: bad
+                                      ? "#b91c1c"
+                                      : okish
+                                        ? "var(--ok, #15803d)"
+                                        : undefined,
+                                  }}
+                                >
+                                  {row.status}
+                                </strong>
+                              </td>
+                              <td className="muted" style={{ fontSize: "0.85rem" }}>
+                                {row.context || "—"}
+                              </td>
+                              <td style={{ fontSize: "0.85rem", maxWidth: "20rem" }}>
+                                {row.error
+                                  ? row.error
+                                  : st === "delivered"
+                                    ? "Delivered to handset"
+                                    : (row.body || "").slice(0, 80) +
+                                      ((row.body || "").length > 80 ? "…" : "")}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
 
             {(can(user, "manageSettings") || can(user, "manageIssues")) && (
               <div className="card">
                 <h2>Role phone numbers</h2>
                 <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
                   {user?.role === "admin"
-                    ? "Set the shop line, mechanic cell, and office line (default for everyone else). Techs can text these; emergencies can SMS them when Twilio is on."
-                    : "Shop line drivers can text. Admin can set mechanic and office numbers too."}
+                    ? "Set the shop line, mechanic cell, and office line. Used for automatic alerts when Twilio is on. Manual “Send a text” is admin-only."
+                    : "Shop line for automatic alerts. Admin can set mechanic and office numbers too."}
                 </p>
                 <form className="form" onSubmit={saveRolePhones}>
                   <label>
@@ -481,8 +678,30 @@ export function SettingsPage() {
             <div className="card">
               <h2>Appearance</h2>
               <p className="muted" style={{ marginTop: 0 }}>
-                Choose how the app looks. Saved on this device.
+                Choose how the app looks on <strong>this phone or computer</strong>. Each person can
+                pick their own size — it does not change anyone else’s screen.
               </p>
+              <h3 style={{ fontSize: "1rem", margin: "0 0 0.5rem" }}>Text size</h3>
+              <div className="text-size-picker" role="group" aria-label="Text size">
+                {TEXT_SIZE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`text-size-option ${textSize === opt.id ? "active" : ""}`}
+                    onClick={() => setTextSize(opt.id)}
+                    aria-pressed={textSize === opt.id}
+                  >
+                    <span className="text-size-option-label" data-preview={opt.id}>
+                      {opt.label}
+                    </span>
+                    <span className="muted text-size-option-hint">{opt.hint}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="text-size-preview" aria-live="polite">
+                Preview: menus, buttons, and forms use this size. Tap a size above to try it.
+              </p>
+              <h3 style={{ fontSize: "1rem", margin: "1.15rem 0 0.5rem" }}>Color</h3>
               <div className="theme-picker" role="group" aria-label="Color theme">
                 <button
                   type="button"

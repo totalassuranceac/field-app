@@ -210,17 +210,31 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
 
   /** Group drop-offs by vendor for warehouse labeling (address — part under each store). */
   const vendorGroups = useMemo(() => {
+    const preferSpelling = (a: string, b: string) => {
+      const score = (s: string) => {
+        if (s !== s.toLowerCase() && s !== s.toUpperCase()) return 3;
+        if (s === s.toUpperCase() && /[A-Z]/.test(s)) return 1;
+        return 0;
+      };
+      return score(b) > score(a) ? b : a;
+    };
     const map = new Map<
       string,
       { vendor: string; sortKey: string; items: Dropoff[] }
     >();
     for (const d of list) {
       const vendor = (d.vendor_name || "Unknown").trim() || "Unknown";
-      const key = vendor.toLowerCase();
+      const key = vendor
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
       let g = map.get(key);
       if (!g) {
         g = { vendor, sortKey: key, items: [] };
         map.set(key, g);
+      } else {
+        g.vendor = preferSpelling(g.vendor, vendor);
       }
       g.items.push(d);
     }

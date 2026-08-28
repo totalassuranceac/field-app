@@ -181,6 +181,9 @@ export const ROLE_PERMS = {
     "viewer",
     "supervisor",
   ] as Role[],
+  /** Dump / landfill ticket logs — warehouse + fleet mechanic */
+  logDumpRuns: ["admin", "warehouse", "mechanic"] as Role[],
+  viewDumpRuns: ["admin", "warehouse", "mechanic", "viewer", "supervisor"] as Role[],
   /** Read mileage flags + tracking health (viewers browse-only) */
   viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"] as Role[],
   /** Ack / dismiss flags — admin, office, mechanic (shop eyes) */
@@ -210,6 +213,19 @@ export const ROLE_PERMS = {
   viewInventory: ["admin", "office", "warehouse", "viewer", "supervisor"] as Role[],
   manageInventory: ["admin", "warehouse"] as Role[],
   manageInventoryLevels: ["admin", "warehouse"] as Role[],
+  /**
+   * Live GPS map (OneStep + Verizon).
+   * Supervisors, warehouse, fleet mechanic, office (+ admin/viewer).
+   * Field drivers are excluded — they do not need to see where others are.
+   */
+  viewLiveMap: [
+    "admin",
+    "office",
+    "mechanic",
+    "warehouse",
+    "supervisor",
+    "viewer",
+  ] as Role[],
   /**
    * Company assets (bottles, ladders, tools) — outside pricebook
    * - view: broad; manage: warehouse + admin only
@@ -405,14 +421,36 @@ export async function getDriverVehicleIds(
   return [...idSet];
 }
 
-/** SQL fragment: AND col IN (?,?,?) — empty ids become AND 0 (no rows). */
+/**
+ * SQL fragment: AND col IN (?,?,?) — empty ids become AND 0 (no rows).
+ * D1 allows max 100 bound parameters per query — keep IN lists well under that.
+ */
 export function sqlInIds(
   column: string,
-  ids: number[]
+  ids: number[],
+  /** Soft cap; callers that need more must chunk with runInChunks. */
+  maxIds = 80
 ): { clause: string; binds: number[] } {
   if (!ids.length) return { clause: ` AND 0`, binds: [] };
-  const placeholders = ids.map(() => "?").join(",");
-  return { clause: ` AND ${column} IN (${placeholders})`, binds: ids };
+  const capped = ids.length > maxIds ? ids.slice(0, maxIds) : ids;
+  const placeholders = capped.map(() => "?").join(",");
+  return { clause: ` AND ${column} IN (${placeholders})`, binds: capped };
+}
+
+/** Run an async fn over id chunks (D1 max ~100 binds/query). */
+export async function forIdChunks<T>(
+  ids: number[],
+  chunkSize: number,
+  fn: (chunk: number[]) => Promise<T[]>
+): Promise<T[]> {
+  if (!ids.length) return [];
+  const size = Math.max(1, Math.min(chunkSize, 80));
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    const part = await fn(ids.slice(i, i + size));
+    out.push(...part);
+  }
+  return out;
 }
 
 export function assertDriverVehicleAccess(
