@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
+import { ZeroChargeCard } from "../components/ZeroChargeCard";
 
 
 interface SchedIssue {
@@ -96,6 +97,8 @@ export function OfficeHome() {
       )}
 
       <MyShortcuts />
+
+      <ZeroChargeCard />
 
       <div className="office-actions">
         <Link to="/live" className="office-action primary">

@@ -107,6 +107,32 @@ async function stFetch(
   });
 }
 
+/** Public GET helper for other modules (jobs, job-types, etc.). Read-only callers. */
+export async function stApiGet(
+  env: Env,
+  db: D1Database,
+  path: string
+): Promise<{ ok: boolean; status: number; json: unknown; text: string }> {
+  const creds = await loadStCredentials(env, db);
+  if (!creds) {
+    return { ok: false, status: 503, json: null, text: "ServiceTitan not configured" };
+  }
+  const res = await stFetch(env, db, creds, path, { method: "GET" });
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
+export async function stTenantId(env: Env, db: D1Database): Promise<string | null> {
+  const creds = await loadStCredentials(env, db);
+  return creds?.tenantId || null;
+}
+
 function sniffImageType(buf: ArrayBuffer, fallbackPath: string, headerCt: string): string | null {
   const ct = (headerCt || "").toLowerCase().split(";")[0].trim();
   const u8 = new Uint8Array(buf.slice(0, 12));

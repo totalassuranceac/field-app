@@ -54,6 +54,8 @@ export interface UserRow {
   is_warehouse?: number;
   employee_id: number | null;
   phone: string | null;
+  /** ServiceTitan technician id for Zero-charge counts */
+  st_technician_id?: number | null;
   must_change_password: number;
   auth_provider: "password" | "google" | "both";
   google_sub: string | null;
@@ -72,6 +74,7 @@ export interface PublicUser {
   is_warehouse?: boolean;
   employee_id: number | null;
   phone: string | null;
+  st_technician_id?: number | null;
   must_change_password: boolean;
 }
 

@@ -7,6 +7,10 @@ const SESSION_DAYS = 14;
 /** Map DB row → public user. Warehouse is stored as office + is_warehouse=1 (CHECK on role). */
 export function toPublicUser(u: UserRow): PublicUser {
   const isWh = Boolean(u.is_warehouse) || u.role === "warehouse";
+  const stId =
+    u.st_technician_id != null && Number(u.st_technician_id) > 0
+      ? Number(u.st_technician_id)
+      : null;
   return {
     id: u.id,
     email: u.email,
@@ -16,6 +20,7 @@ export function toPublicUser(u: UserRow): PublicUser {
     is_warehouse: isWh,
     employee_id: u.employee_id,
     phone: u.phone ?? null,
+    st_technician_id: stId,
     must_change_password: Boolean(u.must_change_password),
   };
 }

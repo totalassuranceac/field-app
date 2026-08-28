@@ -129,6 +129,7 @@ import {
   toPayFriday,
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
+import { buildZeroChargePayload } from "./zeroCharge";
 
 /**
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
@@ -8201,6 +8202,7 @@ api.get("/users", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   try {
     const rows = await c.env.DB.prepare(
       `SELECT u.id, u.email, u.username, u.display_name, u.role, u.employee_id, u.phone,
+              u.st_technician_id,
               u.must_change_password, u.auth_provider, u.active, u.created_at,
               u.manager_user_id, m.display_name as manager_name,
               CASE WHEN u.password_hash IS NOT NULL AND TRIM(u.password_hash) != '' THEN 1 ELSE 0 END as has_password
@@ -8436,6 +8438,19 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
         newUsername = val;
       }
       values.push(val);
+    }
+  }
+  if (body.st_technician_id !== undefined) {
+    if (body.st_technician_id === "" || body.st_technician_id == null) {
+      sets.push("st_technician_id = ?");
+      values.push(null);
+    } else {
+      const n = Number(body.st_technician_id);
+      if (!Number.isInteger(n) || n <= 0) {
+        return c.json({ error: "ServiceTitan technician id must be a positive integer" }, 400);
+      }
+      sets.push("st_technician_id = ?");
+      values.push(n);
     }
   }
   if (body.active !== undefined) {
@@ -9632,6 +9647,34 @@ api.get("/inventory/parts/codes", requireRoles(ROLE_PERMS.viewInventory), async 
 });
 
 // ——— ServiceTitan API (admin) ———
+
+/**
+ * Zero-charge monthly counts from ServiceTitan (Follow-up Visit + Warranty Service only).
+ * Tech → own counts only. Admin/office/supervisor (+ named managers) → full roster.
+ * Client cannot request another tech's id — server scopes by session user.
+ */
+api.get("/zero-charge", async (c) => {
+  const user = c.get("user");
+  try {
+    const payload = await buildZeroChargePayload(c.env, c.env.DB, user);
+    return c.json(payload);
+  } catch (e) {
+    return c.json(
+      {
+        view: "self",
+        month_label: "",
+        last_month_label: "",
+        timezone: "America/Chicago",
+        job_types_used: [],
+        job_types_missing: [],
+        self: null,
+        roster: [],
+        error: e instanceof Error ? e.message : "Zero-charge failed",
+      },
+      500
+    );
+  }
+});
 
 api.get("/integrations/servicetitan/status", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   const configured = await stConfigured(c.env, c.env.DB);

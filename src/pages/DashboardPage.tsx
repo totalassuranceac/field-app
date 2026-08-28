@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, can, roleLabel } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
+import { ZeroChargeCard } from "../components/ZeroChargeCard";
 import { OfficeHome } from "./OfficeHome";
 
 interface Dash {
@@ -903,6 +904,8 @@ export function DashboardPage() {
       {handbookBanner}
 
       <MyShortcuts />
+
+      {!isWarehouse ? <ZeroChargeCard /> : null}
 
       {/* Role-specific at-a-glance board */}
       <FocusGrid

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     CHECK (role IN ('admin', 'office', 'driver', 'mechanic', 'viewer', 'supervisor')),
   employee_id INTEGER,
   phone TEXT,
+  st_technician_id INTEGER,
   must_change_password INTEGER NOT NULL DEFAULT 0,
   auth_provider TEXT NOT NULL DEFAULT 'password'
     CHECK (auth_provider IN ('password', 'google', 'both')),

@@ -64,6 +64,8 @@ interface AdminUser {
   manager_user_id?: number | null;
   manager_name?: string | null;
   phone: string | null;
+  /** ServiceTitan technician id for Zero-charge */
+  st_technician_id?: number | null;
   must_change_password: number;
   auth_provider: string;
   active: number;
@@ -138,6 +140,7 @@ export function AdminPage() {
   const [loginEdit, setLoginEdit] = useState<AdminUser | null>(null);
   const [loginEditName, setLoginEditName] = useState("");
   const [loginEditUser, setLoginEditUser] = useState("");
+  const [loginEditStTech, setLoginEditStTech] = useState("");
   const [loginEditBusy, setLoginEditBusy] = useState(false);
   const loginEditRef = useRef<HTMLDivElement>(null);
 
@@ -162,6 +165,11 @@ export function AdminPage() {
     setLoginEdit(u);
     setLoginEditName(u.display_name);
     setLoginEditUser(u.username || "");
+    setLoginEditStTech(
+      u.st_technician_id != null && Number(u.st_technician_id) > 0
+        ? String(u.st_technician_id)
+        : ""
+    );
     setError("");
     requestAnimationFrame(() => {
       loginEditRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -844,6 +852,15 @@ export function AdminPage() {
     }
     setLoginEditBusy(true);
     try {
+      const stRaw = loginEditStTech.trim();
+      await api(`/users/${loginEdit.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          username: un,
+          display_name: loginEditName.trim() || loginEdit.display_name,
+          st_technician_id: stRaw ? Number(stRaw) : null,
+        }),
+      });
       if (alsoInvite) {
         const okInvite = await sendInviteLink(loginEdit, {
           username: un,
@@ -851,14 +868,8 @@ export function AdminPage() {
           skipConfirm: true,
         });
         if (okInvite) closeLoginEdit();
+        else await load();
       } else {
-        await api(`/users/${loginEdit.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            username: un,
-            display_name: loginEditName.trim() || loginEdit.display_name,
-          }),
-        });
         await load();
         showFeedback(`Saved login @${un} for ${loginEditName.trim() || loginEdit.display_name}`);
         closeLoginEdit();
@@ -1117,9 +1128,24 @@ export function AdminPage() {
                 title="2–40 characters: letters, numbers, . _ -"
               />
             </label>
+            <label>
+              ServiceTitan technician ID
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={loginEditStTech}
+                onChange={(e) => setLoginEditStTech(e.target.value)}
+                placeholder="e.g. 12345678"
+                autoComplete="off"
+              />
+              <span className="muted" style={{ fontSize: "0.78rem" }}>
+                Required for Zero-charge counts. Leave blank if not a field tech.
+              </span>
+            </label>
             <div className="admin-match-actions">
               <button className="btn secondary" type="submit" disabled={loginEditBusy}>
-                {loginEditBusy ? "Saving…" : "Save username"}
+                {loginEditBusy ? "Saving…" : "Save login"}
               </button>
               <button
                 className="btn"

@@ -18186,3 +18186,81 @@ svg {
 .term-sign-line {
   min-height: 2.5rem;
 }
+
+/* ——— Zero-charge monthly counter (ServiceTitan) ——— */
+.zero-charge-card {
+  margin: 0.75rem 0 1rem;
+  padding: 0.85rem 1rem;
+  max-width: 28rem;
+}
+.zero-charge-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+.zero-charge-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.zero-charge-month {
+  font-size: 0.82rem;
+}
+.zero-charge-stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.zero-charge-stat-label {
+  color: var(--muted, #6b7280);
+  font-size: 0.9rem;
+}
+.zero-charge-stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.zero-charge-vs {
+  margin-top: 0.35rem;
+  font-size: 0.92rem;
+}
+.zero-charge-meta {
+  margin: 0.25rem 0 0;
+  font-size: 0.88rem;
+}
+.zero-charge-self-inline {
+  margin-bottom: 0.65rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+}
+.zero-charge-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 16rem;
+  overflow: auto;
+}
+.zero-charge-roster-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.92rem;
+}
+.zero-charge-roster-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zero-charge-roster-nums {
+  flex-shrink: 0;
+}
+.office-home .zero-charge-card {
+  max-width: none;
+}
