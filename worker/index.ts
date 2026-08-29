@@ -120,6 +120,9 @@ import {
   createStMaterial,
   deactivateStMaterial,
   applyStUsageDeductions,
+  syncStMaterialsInsertOnlyPage,
+  cronSyncStMaterialsInsertOnly,
+  refreshStMaterialNamesPage,
 } from "./servicetitan";
 import type { Env, PublicUser, Role, UserRow, Variables } from "./types";
 import {
@@ -130,6 +133,7 @@ import {
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
 import { buildZeroChargePayload } from "./zeroCharge";
+import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
 
 /**
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
@@ -9653,12 +9657,38 @@ api.get("/inventory/parts/codes", requireRoles(ROLE_PERMS.viewInventory), async 
  * Tech → own counts only. Admin/office/supervisor (+ named managers) → full roster.
  * Client cannot request another tech's id — server scopes by session user.
  */
+/**
+ * Studio SSO handoff — logged-in Field App users who may open Studio get a
+ * short-lived signed URL. Studio verifies STUDIO_SSO_SECRET and sets its cookie.
+ */
+api.get("/studio/handoff", async (c) => {
+  const user = c.get("user");
+  if (!canOpenStudioServer(user)) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const result = await buildStudioHandoffUrl(c.env, user);
+  if ("error" in result) {
+    return c.json({ error: result.error }, result.status as 403 | 503);
+  }
+  return c.json({ url: result.url });
+});
+
 api.get("/zero-charge", async (c) => {
   const user = c.get("user");
+  const wantSales =
+    c.req.query("sales") === "1" ||
+    c.req.query("sales") === "true" ||
+    c.req.query("include_sales") === "1";
   try {
-    const payload = await buildZeroChargePayload(c.env, c.env.DB, user);
+    const payload = await buildZeroChargePayload(c.env, c.env.DB, user, {
+      sales: wantSales,
+    });
     return c.json(payload);
   } catch (e) {
+    const msg = e instanceof Error ? e.message : "Zero-charge failed";
+    const slow =
+      /timeout|timed out|AbortError|network|fetch failed|deadline/i.test(msg) ||
+      /1015|1101|1102|524|522/i.test(msg);
     return c.json(
       {
         view: "self",
@@ -9669,7 +9699,9 @@ api.get("/zero-charge", async (c) => {
         job_types_missing: [],
         self: null,
         roster: [],
-        error: e instanceof Error ? e.message : "Zero-charge failed",
+        error: slow
+          ? "ServiceTitan is slow, try again"
+          : msg || "Zero-charge failed",
       },
       500
     );
@@ -9791,6 +9823,177 @@ api.post("/inventory/sync-images", requireRoles(ROLE_PERMS.manageInventory), asy
     `ST image sync: ${result.saved} saved / ${result.attempted} attempted`
   );
   return c.json({ ok: true, ...result });
+});
+
+/** Pull one page of ST materials into catalog (insert_only — never overwrite prices). Equipment out. */
+api.post("/inventory/sync-st-materials", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
+  if (!(await stConfigured(c.env, c.env.DB))) {
+    return c.json(
+      {
+        error:
+          "ServiceTitan API not configured. Admin -> ServiceTitan: add Tenant ID, Client ID, Secret, App Key.",
+      },
+      503
+    );
+  }
+  const body = (await c.req
+    .json<{ page?: number; pageSize?: number; baseline?: string }>()
+    .catch(() => ({}))) as { page?: number; pageSize?: number; baseline?: string };
+  const result = await syncStMaterialsInsertOnlyPage(c.env, c.env.DB, {
+    page: body.page,
+    pageSize: body.pageSize,
+    baseline: body.baseline,
+  });
+  if (result.needsBaseline || result.status === 409) {
+    return c.json(
+      {
+        error: result.error || "Need a baseline date for incremental pull",
+        needs_baseline: true,
+        inserted: 0,
+        skipped: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      409
+    );
+  }
+  if (result.missingPricebookView || result.status === 403) {
+    return c.json(
+      {
+        error: result.error || "Pricebook View missing",
+        missing_pricebook_view: true,
+        inserted: 0,
+        skipped: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      403
+    );
+  }
+  if (!result.ok) {
+    return c.json(
+      {
+        error: result.error || "Materials API failed",
+        inserted: 0,
+        skipped: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      502
+    );
+  }
+  try {
+    await writeAudit(
+      c.env.DB,
+      c.get("user"),
+      "import",
+      "parts",
+      null,
+      `ST materials insert_only page ${result.page}: +${result.inserted} skip ${result.skipped}`
+    );
+  } catch {
+    /* audit optional */
+  }
+  return c.json({
+    ok: true,
+    inserted: result.inserted,
+    skipped: result.skipped,
+    errors: result.errors,
+    hasMore: result.hasMore,
+    page: result.page,
+    pageSize: result.pageSize,
+    fetched: result.fetched,
+    mapped: result.mapped,
+    since: result.since || null,
+  });
+});
+
+
+/** Refresh name + description on existing parts (modifiedOnOrAfter). Never writes price. */
+api.post("/inventory/refresh-st-material-names", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
+  if (!(await stConfigured(c.env, c.env.DB))) {
+    return c.json(
+      {
+        error:
+          "ServiceTitan API not configured. Admin -> ServiceTitan: add Tenant ID, Client ID, Secret, App Key.",
+      },
+      503
+    );
+  }
+  const body = (await c.req
+    .json<{ page?: number; pageSize?: number; baseline?: string }>()
+    .catch(() => ({}))) as { page?: number; pageSize?: number; baseline?: string };
+  const result = await refreshStMaterialNamesPage(c.env, c.env.DB, {
+    page: body.page,
+    pageSize: body.pageSize,
+    baseline: body.baseline,
+  });
+  if (result.needsBaseline || result.status === 409) {
+    return c.json(
+      {
+        error: result.error || "Need a baseline date for name refresh",
+        needs_baseline: true,
+        updated: 0,
+        skipped: 0,
+        unmatched: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      409
+    );
+  }
+  if (result.missingPricebookView || result.status === 403) {
+    return c.json(
+      {
+        error: result.error || "Pricebook View missing",
+        missing_pricebook_view: true,
+        updated: 0,
+        skipped: 0,
+        unmatched: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      403
+    );
+  }
+  if (!result.ok) {
+    return c.json(
+      {
+        error: result.error || "Materials API failed",
+        updated: 0,
+        skipped: 0,
+        unmatched: 0,
+        hasMore: false,
+        page: result.page,
+      },
+      502
+    );
+  }
+  try {
+    await writeAudit(
+      c.env.DB,
+      c.get("user"),
+      "import",
+      "parts",
+      null,
+      `ST materials name refresh page ${result.page}: ${result.updated} updated, ${result.unmatched} unmatched`
+    );
+  } catch {
+    /* audit optional */
+  }
+  return c.json({
+    ok: true,
+    updated: result.updated,
+    skipped: result.skipped,
+    unmatched: result.unmatched,
+    errors: 0,
+    hasMore: result.hasMore,
+    page: result.page,
+    pageSize: result.pageSize,
+    fetched: result.fetched,
+    mapped: result.mapped,
+    since: result.since || null,
+  });
 });
 
 /** Sync one part's photo from ServiceTitan (by external_st_id). */
@@ -19271,6 +19474,11 @@ export default {
           await applyDueAnniversariesAll(env.DB);
         } catch {
           /* best-effort PTO anniversary refresh */
+        }
+        try {
+          await cronSyncStMaterialsInsertOnly(env, env.DB);
+        } catch {
+          /* best-effort ST materials insert_only; never overwrite */
         }
       })()
     );

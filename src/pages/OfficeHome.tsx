@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
+import { StudioDoor } from "../components/StudioDoor";
 import { ZeroChargeCard } from "../components/ZeroChargeCard";
 
 
@@ -101,6 +102,7 @@ export function OfficeHome() {
       <ZeroChargeCard />
 
       <div className="office-actions">
+        <StudioDoor variant="office" />
         <Link to="/live" className="office-action primary">
           <span className="office-action-icon" aria-hidden>
             🗺

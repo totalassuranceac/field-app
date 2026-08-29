@@ -1,4 +1,4 @@
-import { can, type User } from "./api";
+import { can, canOpenStudio, type User } from "./api";
 
 export type FavoriteRoute = {
   path: string;
@@ -41,6 +41,7 @@ export const FAVORITE_CATALOG: FavoriteRoute[] = [
   { path: "/handbook", label: "Handbook", hint: "Policies" },
   { path: "/notifications", label: "Inbox", hint: "Notifications" },
   { path: "/tv", label: "TV board", hint: "Shop TV" },
+  { path: "/studio", label: "Studio", hint: "Rate ads" },
   { path: "/settings", label: "Settings", hint: "Account" },
 ];
 
@@ -138,6 +139,8 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return true;
     case "/tv":
       return adminShell || isOffice || isMechanic || isSupervisor;
+    case "/studio":
+      return canOpenStudio(user);
     default:
       return false;
   }

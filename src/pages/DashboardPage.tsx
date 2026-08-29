@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, can, roleLabel } from "../api";
+import { api, can, canOpenStudio, roleLabel } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
+import { StudioDoor } from "../components/StudioDoor";
 import { ZeroChargeCard } from "../components/ZeroChargeCard";
 import { OfficeHome } from "./OfficeHome";
 
@@ -906,6 +907,12 @@ export function DashboardPage() {
       <MyShortcuts />
 
       {!isWarehouse ? <ZeroChargeCard /> : null}
+
+      {canOpenStudio(user) ? (
+        <div className="home-actions studio-door-row" style={{ marginBottom: "0.75rem" }}>
+          <StudioDoor variant="home" />
+        </div>
+      ) : null}
 
       {/* Role-specific at-a-glance board */}
       <FocusGrid

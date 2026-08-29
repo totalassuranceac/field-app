@@ -40,6 +40,10 @@ export interface Env {
   ST_CLIENT_ID?: string;
   ST_CLIENT_SECRET?: string;
   ST_APP_KEY?: string;
+  /** Shared with ta-ads worker — signs Field App → Studio handoff tokens */
+  STUDIO_SSO_SECRET?: string;
+  /** Override live Studio URL (default https://ta-ads.totalassurance.workers.dev) */
+  STUDIO_URL?: string;
 }
 
 export interface UserRow {

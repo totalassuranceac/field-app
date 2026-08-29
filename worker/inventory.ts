@@ -1331,3 +1331,67 @@ export async function lowStockReport(db: D1Database): Promise<{
 
   return { warehouse, trucks };
 }
+
+/**
+ * Patch name + description_text on existing parts only.
+ * Match by code (case-insensitive) or external_st_id, same as importParts.
+ * Never writes price, cost, or any other catalog field.
+ */
+export async function refreshPartNamesDescriptions(
+  db: D1Database,
+  rows: Array<{
+    code?: string | null;
+    name?: string | null;
+    description_text?: string | null;
+    external_st_id?: string | number | null;
+  }>
+): Promise<{ updated: number; skipped: number; unmatched: number }> {
+  let updated = 0;
+  let skipped = 0;
+  let unmatched = 0;
+  const existingRows = await db
+    .prepare(`SELECT id, code, external_st_id FROM parts`)
+    .all<{ id: number; code: string; external_st_id: string | null }>();
+  const byCode = new Map<string, number>();
+  const byExternal = new Map<string, number>();
+  for (const r of existingRows.results || []) {
+    if (r.code) byCode.set(String(r.code).toLowerCase(), r.id);
+    if (r.external_st_id) byExternal.set(String(r.external_st_id).trim(), r.id);
+  }
+  const seen = new Set<number>();
+  for (const row of rows) {
+    const code = String(row.code || "").trim();
+    const name = String(row.name || "").trim();
+    if (!name) {
+      skipped++;
+      continue;
+    }
+    const codeKey = code.toLowerCase();
+    const external =
+      row.external_st_id != null && String(row.external_st_id).trim() !== ""
+        ? String(row.external_st_id).trim()
+        : null;
+    const existingId =
+      (codeKey ? byCode.get(codeKey) : undefined) ??
+      (external ? byExternal.get(external) : undefined) ??
+      null;
+    if (existingId == null) {
+      unmatched++;
+      continue;
+    }
+    if (seen.has(existingId)) {
+      skipped++;
+      continue;
+    }
+    seen.add(existingId);
+    const desc = clipDesc(row.description_text);
+    await db
+      .prepare(
+        `UPDATE parts SET name = ?, description_text = ?, updated_at = datetime('now') WHERE id = ?`
+      )
+      .bind(name, desc, existingId)
+      .run();
+    updated++;
+  }
+  return { updated, skipped, unmatched };
+}

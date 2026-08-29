@@ -8,6 +8,11 @@
 
 import type { Env } from "./types";
 import { getSetting, setSetting } from "./audit";
+import { importParts, refreshPartNamesDescriptions, type PartImportRow } from "./inventory";
+import {
+  mapStMaterialApiToPartImportRow,
+  filterStMaterialsLikeExcel,
+} from "../src/pricebookMap";
 
 const AUTH_URL = "https://auth.servicetitan.io/connect/token";
 const API_BASE = "https://api.servicetitan.io";
@@ -366,6 +371,498 @@ export function extractMaterialImageUrl(mat: Record<string, unknown>): string | 
     return extractMaterialImageUrl(mat.media as Record<string, unknown>);
   }
   return null;
+}
+
+const ST_MATERIALS_PAGE_SIZE = 50;
+export const ST_MATERIALS_LAST_IMPORT_KEY = "st_materials_last_import";
+const ST_MATERIALS_IMPORT_PAGE_KEY = "st_materials_import_page";
+
+export type StMaterialsSyncPageResult = {
+  ok: boolean;
+  status: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  fetched: number;
+  mapped: number;
+  inserted: number;
+  skipped: number;
+  errors: number;
+  error?: string;
+  missingPricebookView?: boolean;
+  needsBaseline?: boolean;
+  since?: string;
+};
+
+function d1DateToIso(raw: string): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const normalized = s.includes("T") ? s : s.replace(" ", "T");
+  const withZ =
+    /Z$/i.test(normalized) || /[+-]\d{2}:\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
+  const d = new Date(withZ);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
+/** Last successful materials import ISO. Stored setting, else xlsx dump MAX(parts.created_at). */
+export async function resolveMaterialsLastImportIso(db: D1Database): Promise<string | null> {
+  const stored = (await getSetting(db, ST_MATERIALS_LAST_IMPORT_KEY, "")).trim();
+  if (stored) {
+    const iso = d1DateToIso(stored);
+    if (iso) return iso;
+  }
+  try {
+    const row = await db
+      .prepare(`SELECT MAX(created_at) AS t FROM parts`)
+      .first<{ t: string | null }>();
+    const iso = row?.t ? d1DateToIso(row.t) : "";
+    if (iso) return iso;
+  } catch {
+    /* parts table missing */
+  }
+  return null;
+}
+
+async function freezeMaterialsImportSince(db: D1Database, since: string): Promise<void> {
+  const stored = (await getSetting(db, ST_MATERIALS_LAST_IMPORT_KEY, "")).trim();
+  if (!stored) {
+    await setSetting(db, ST_MATERIALS_LAST_IMPORT_KEY, since);
+  }
+}
+
+async function advanceMaterialsLastImport(db: D1Database): Promise<void> {
+  await setSetting(db, ST_MATERIALS_LAST_IMPORT_KEY, new Date().toISOString());
+  await setSetting(db, ST_MATERIALS_IMPORT_PAGE_KEY, "1");
+}
+
+/**
+ * One page of materials ADDED in ServiceTitan after last import.
+ * GET uses createdOnOrAfter (official Pricebook materials list param, RFC3339).
+ * importParts insert_only: existing code / external_st_id skip. Never upsert. Never overwrite prices.
+ * Equipment is not fetched. Photo sync stays syncAllPartImages.
+ */
+export async function syncStMaterialsInsertOnlyPage(
+  env: Env,
+  db: D1Database,
+  opts?: { page?: number; pageSize?: number; baseline?: string }
+): Promise<StMaterialsSyncPageResult> {
+  const page = Math.max(1, Math.floor(Number(opts?.page) || 1));
+  const pageSize = Math.min(
+    100,
+    Math.max(1, Math.floor(Number(opts?.pageSize) || ST_MATERIALS_PAGE_SIZE))
+  );
+  const empty: StMaterialsSyncPageResult = {
+    ok: false,
+    status: 0,
+    page,
+    pageSize,
+    hasMore: false,
+    fetched: 0,
+    mapped: 0,
+    inserted: 0,
+    skipped: 0,
+    errors: 0,
+  };
+
+  const tenantId = await stTenantId(env, db);
+  if (!tenantId) {
+    return { ...empty, status: 503, error: "ServiceTitan not configured" };
+  }
+
+  let since = await resolveMaterialsLastImportIso(db);
+  const named = opts?.baseline ? d1DateToIso(String(opts.baseline)) : "";
+  if (!since && named) since = named;
+  if (!since) {
+    return {
+      ...empty,
+      status: 409,
+      needsBaseline: true,
+      error:
+        "Need a baseline date for incremental pull (last xlsx import). No st_materials_last_import setting and no parts.created_at. Do not dump the whole book.",
+    };
+  }
+  try {
+    await freezeMaterialsImportSince(db, since);
+  } catch {
+    /* freeze optional; GET still uses since */
+  }
+
+  const qs = new URLSearchParams({
+    createdOnOrAfter: since,
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  const path = `/pricebook/v2/tenant/${encodeURIComponent(tenantId)}/materials?${qs.toString()}`;
+  let got: { ok: boolean; status: number; json: unknown; text: string };
+  try {
+    got = await stApiGet(env, db, path);
+  } catch (e) {
+    return {
+      ...empty,
+      status: 500,
+      since,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  if (got.status === 403) {
+    return {
+      ...empty,
+      status: 403,
+      since,
+      missingPricebookView: true,
+      error:
+        "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin.",
+    };
+  }
+  if (!got.ok) {
+    return {
+      ...empty,
+      status: got.status,
+      since,
+      error: `Materials API ${got.status}: ${String(got.text || "").slice(0, 180)}`,
+    };
+  }
+
+  const body = (got.json && typeof got.json === "object" ? got.json : {}) as {
+    data?: unknown;
+    hasMore?: boolean;
+    page?: number;
+  };
+  const data = Array.isArray(body.data) ? body.data : [];
+  const hasMore = Boolean(body.hasMore);
+
+  const mapped: PartImportRow[] = [];
+  for (const item of data) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const row = mapStMaterialApiToPartImportRow(rec);
+    if (!row) continue;
+    if (!row.image_url) {
+      const img = extractMaterialImageUrl(rec);
+      if (img) row.image_url = img;
+    }
+    mapped.push(row as PartImportRow);
+  }
+  const filtered = filterStMaterialsLikeExcel(mapped).slice(0, 100);
+
+  if (!filtered.length) {
+    if (!hasMore) {
+      try {
+        await advanceMaterialsLastImport(db);
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      ok: true,
+      status: got.status,
+      page,
+      pageSize,
+      hasMore,
+      fetched: data.length,
+      mapped: 0,
+      inserted: 0,
+      skipped: 0,
+      errors: 0,
+      since,
+    };
+  }
+
+  const result = await importParts(db, filtered, { mode: "insert_only" });
+  if (!hasMore) {
+    try {
+      await advanceMaterialsLastImport(db);
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    ok: true,
+    status: got.status,
+    page,
+    pageSize,
+    hasMore,
+    fetched: data.length,
+    mapped: filtered.length,
+    inserted: result.inserted,
+    skipped: result.skipped,
+    errors: result.errors,
+    since,
+  };
+}
+
+/** Daily cron: one/few createdOnOrAfter pages, insert_only. Cannot overwrite. 403 -> log and skip. */
+export async function cronSyncStMaterialsInsertOnly(env: Env, db: D1Database): Promise<void> {
+  if (!(await stConfigured(env, db))) return;
+  let page = 1;
+  try {
+    const raw = (await getSetting(db, ST_MATERIALS_IMPORT_PAGE_KEY, "1")).trim();
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 1) page = Math.floor(n);
+  } catch {
+    page = 1;
+  }
+
+  const maxPages = 2;
+  let inserted = 0;
+  let skipped = 0;
+  let nextPage = page;
+  for (let i = 0; i < maxPages; i++) {
+    const r = await syncStMaterialsInsertOnlyPage(env, db, { page, pageSize: 50 });
+    if (r.needsBaseline) {
+      console.log("ST materials cron skipped: need baseline date (no last-import timestamp)");
+      return;
+    }
+    if (r.missingPricebookView || r.status === 403) {
+      console.log("ST materials cron skipped: Pricebook View missing (403)");
+      try {
+        await setSetting(
+          db,
+          "st_last_status",
+          `${new Date().toISOString()} | fail | materials cron 403 Pricebook View missing`
+        );
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (!r.ok) {
+      console.log(`ST materials cron skip page ${page}: ${r.status} ${r.error || ""}`);
+      try {
+        await setSetting(
+          db,
+          "st_last_status",
+          `${new Date().toISOString()} | fail | materials cron ${r.status}: ${String(r.error || "").slice(0, 180)}`
+        );
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    inserted += r.inserted;
+    skipped += r.skipped;
+    if (!r.hasMore) {
+      nextPage = 1;
+      break;
+    }
+    nextPage = page + 1;
+    page = nextPage;
+  }
+  try {
+    await setSetting(db, ST_MATERIALS_IMPORT_PAGE_KEY, String(nextPage));
+    await setSetting(
+      db,
+      "st_last_status",
+      `${new Date().toISOString()} | ok | materials cron insert_only createdOnOrAfter +${inserted} skip ${skipped} next_page=${nextPage}`
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+
+
+export const ST_MATERIALS_LAST_REFRESH_KEY = "st_materials_last_refresh";
+const ST_MATERIALS_REFRESH_PAGE_KEY = "st_materials_refresh_page";
+
+export type StMaterialsNameRefreshPageResult = {
+  ok: boolean;
+  status: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  fetched: number;
+  mapped: number;
+  updated: number;
+  skipped: number;
+  unmatched: number;
+  error?: string;
+  missingPricebookView?: boolean;
+  needsBaseline?: boolean;
+  since?: string;
+};
+
+/** Last name/description refresh ISO. Stored setting, else last-import freeze / MAX(parts.created_at). */
+export async function resolveMaterialsLastRefreshIso(db: D1Database): Promise<string | null> {
+  const stored = (await getSetting(db, ST_MATERIALS_LAST_REFRESH_KEY, "")).trim();
+  if (stored) {
+    const iso = d1DateToIso(stored);
+    if (iso) return iso;
+  }
+  return resolveMaterialsLastImportIso(db);
+}
+
+async function freezeMaterialsRefreshSince(db: D1Database, since: string): Promise<void> {
+  const stored = (await getSetting(db, ST_MATERIALS_LAST_REFRESH_KEY, "")).trim();
+  if (!stored) {
+    await setSetting(db, ST_MATERIALS_LAST_REFRESH_KEY, since);
+  }
+}
+
+async function advanceMaterialsLastRefresh(db: D1Database): Promise<void> {
+  await setSetting(db, ST_MATERIALS_LAST_REFRESH_KEY, new Date().toISOString());
+  await setSetting(db, ST_MATERIALS_REFRESH_PAGE_KEY, "1");
+}
+
+/**
+ * One page of name/description refresh for EXISTING parts.
+ * GET uses modifiedOnOrAfter (official Pricebook materials list param, RFC3339).
+ * Narrow UPDATE name + description_text only. Never writes price or cost.
+ * New SKUs stay on createdOnOrAfter insert_only pull. Equipment is not fetched.
+ */
+export async function refreshStMaterialNamesPage(
+  env: Env,
+  db: D1Database,
+  opts?: { page?: number; pageSize?: number; baseline?: string }
+): Promise<StMaterialsNameRefreshPageResult> {
+  const page = Math.max(1, Math.floor(Number(opts?.page) || 1));
+  const pageSize = Math.min(
+    100,
+    Math.max(1, Math.floor(Number(opts?.pageSize) || ST_MATERIALS_PAGE_SIZE))
+  );
+  const empty: StMaterialsNameRefreshPageResult = {
+    ok: false,
+    status: 0,
+    page,
+    pageSize,
+    hasMore: false,
+    fetched: 0,
+    mapped: 0,
+    updated: 0,
+    skipped: 0,
+    unmatched: 0,
+  };
+
+  const tenantId = await stTenantId(env, db);
+  if (!tenantId) {
+    return { ...empty, status: 503, error: "ServiceTitan not configured" };
+  }
+
+  let since = await resolveMaterialsLastRefreshIso(db);
+  const named = opts?.baseline ? d1DateToIso(String(opts.baseline)) : "";
+  if (!since && named) since = named;
+  if (!since) {
+    return {
+      ...empty,
+      status: 409,
+      needsBaseline: true,
+      error:
+        "Need a baseline date for name refresh (last import/refresh). Will not walk the whole pricebook.",
+    };
+  }
+  try {
+    await freezeMaterialsRefreshSince(db, since);
+  } catch {
+    /* freeze optional; GET still uses since */
+  }
+
+  const qs = new URLSearchParams({
+    modifiedOnOrAfter: since,
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  const path = `/pricebook/v2/tenant/${encodeURIComponent(tenantId)}/materials?${qs.toString()}`;
+  let got: { ok: boolean; status: number; json: unknown; text: string };
+  try {
+    got = await stApiGet(env, db, path);
+  } catch (e) {
+    return {
+      ...empty,
+      status: 500,
+      since,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  if (got.status === 403) {
+    return {
+      ...empty,
+      status: 403,
+      since,
+      missingPricebookView: true,
+      error:
+        "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin.",
+    };
+  }
+  if (!got.ok) {
+    return {
+      ...empty,
+      status: got.status,
+      since,
+      error: `Materials API ${got.status}: ${String(got.text || "").slice(0, 180)}`,
+    };
+  }
+
+  const body = (got.json && typeof got.json === "object" ? got.json : {}) as {
+    data?: unknown;
+    hasMore?: boolean;
+  };
+  const data = Array.isArray(body.data) ? body.data : [];
+  const hasMore = Boolean(body.hasMore);
+
+  const mapped: Array<{
+    code: string;
+    name: string;
+    description_text: string | null;
+    external_st_id: string | number | null;
+  }> = [];
+  for (const item of data) {
+    if (!item || typeof item !== "object") continue;
+    const row = mapStMaterialApiToPartImportRow(item as Record<string, unknown>);
+    if (!row || !String(row.name || "").trim()) continue;
+    mapped.push({
+      code: String(row.code || "").trim(),
+      name: String(row.name).trim(),
+      description_text: row.description_text != null ? String(row.description_text) : null,
+      external_st_id: row.external_st_id ?? null,
+    });
+  }
+
+  if (!mapped.length) {
+    if (!hasMore) {
+      try {
+        await advanceMaterialsLastRefresh(db);
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      ok: true,
+      status: got.status,
+      page,
+      pageSize,
+      hasMore,
+      fetched: data.length,
+      mapped: 0,
+      updated: 0,
+      skipped: 0,
+      unmatched: 0,
+      since,
+    };
+  }
+
+  const result = await refreshPartNamesDescriptions(db, mapped);
+  if (!hasMore) {
+    try {
+      await advanceMaterialsLastRefresh(db);
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    ok: true,
+    status: got.status,
+    page,
+    pageSize,
+    hasMore,
+    fetched: data.length,
+    mapped: mapped.length,
+    updated: result.updated,
+    skipped: result.skipped,
+    unmatched: result.unmatched,
+    since,
+  };
 }
 
 async function cacheImageBlob(

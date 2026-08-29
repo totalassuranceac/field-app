@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
-import { api, can } from "../api";
+import { api, can, ApiError } from "../api";
 import { useAuth } from "../auth";
 import {
   parseStPricebookFromSheetJson,
@@ -318,6 +318,8 @@ export function InventoryPage() {
   const [truckStockBusy, setTruckStockBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [syncImagesBusy, setSyncImagesBusy] = useState(false);
+  const [pullStBusy, setPullStBusy] = useState(false);
+  const [refreshStBusy, setRefreshStBusy] = useState(false);
   const [sectionName, setSectionName] = useState("");
   const [sectionZone, setSectionZone] = useState<"main" | "overhead" | "attic" | "other">("main");
   const [sectionBusy, setSectionBusy] = useState(false);
@@ -1446,6 +1448,195 @@ export function InventoryPage() {
       );
     } finally {
       setSyncImagesBusy(false);
+    }
+  }
+
+  /**
+   * Pull new ST materials into the catalog without xlsx.
+   * insert_only: never overwrites live prices. Equipment is not imported.
+   * Photos stay a separate Sync photos step.
+   */
+  async function onPullStMaterials() {
+    if (!canManage) return;
+    setPullStBusy(true);
+    setError("");
+    setOk("Pulling new parts from ServiceTitan...");
+    let page = 1;
+    let inserted = 0;
+    let skipped = 0;
+    const pageSize = 50;
+    const maxPages = 200;
+    try {
+      for (let n = 0; n < maxPages; n++) {
+        setOk(
+          `Pulling ServiceTitan materials... page ${page}` +
+            (inserted || skipped ? ` (+${inserted} new, ${skipped} already in catalog)` : "")
+        );
+        type SyncRes = {
+          ok?: boolean;
+          inserted?: number;
+          skipped?: number;
+          hasMore?: boolean;
+          page?: number;
+          error?: string;
+          missing_pricebook_view?: boolean;
+          needs_baseline?: boolean;
+        };
+        let res: SyncRes;
+        try {
+          res = await api<SyncRes>("/inventory/sync-st-materials", {
+            method: "POST",
+            body: JSON.stringify({ page, pageSize }),
+            timeoutMs: 45_000,
+          });
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 403) {
+            setError(
+              "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+            );
+            setOk("");
+            return;
+          }
+          if (err instanceof ApiError && err.status === 409) {
+            setError(
+              err.message ||
+                "Need a baseline date (last xlsx import). Incremental pull will not dump the whole pricebook."
+            );
+            setOk("");
+            return;
+          }
+          throw err;
+        }
+        if (res.needs_baseline) {
+          setError(
+            res.error ||
+              "Need a baseline date (last xlsx import). Incremental pull will not dump the whole pricebook."
+          );
+          setOk("");
+          return;
+        }
+        if (res.missing_pricebook_view) {
+          setError(
+            "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+          );
+          setOk("");
+          return;
+        }
+        inserted += res.inserted || 0;
+        skipped += res.skipped || 0;
+        if (!res.hasMore) break;
+        page = (res.page || page) + 1;
+      }
+      setOk(
+        `ServiceTitan pull finished: +${inserted} new parts, ${skipped} skipped (already in catalog). Prices were not changed. Use Sync photos from ServiceTitan for images.`
+      );
+      await searchParts(q);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setError(
+          "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+        );
+        setOk("");
+      } else {
+        setError(err instanceof Error ? err.message : "ServiceTitan materials pull failed");
+      }
+    } finally {
+      setPullStBusy(false);
+    }
+  }
+
+
+  async function onRefreshStNames() {
+    if (!canManage) return;
+    setRefreshStBusy(true);
+    setError("");
+    setOk("Refreshing names from ServiceTitan...");
+    let page = 1;
+    let updated = 0;
+    let skipped = 0;
+    let unmatched = 0;
+    const pageSize = 50;
+    const maxPages = 200;
+    try {
+      for (let n = 0; n < maxPages; n++) {
+        setOk(
+          `Refreshing names from ServiceTitan... page ${page}` +
+            (updated || skipped || unmatched
+              ? ` (${updated} names updated, ${unmatched} not in catalog)`
+              : "")
+        );
+        type RefreshRes = {
+          ok?: boolean;
+          updated?: number;
+          skipped?: number;
+          unmatched?: number;
+          hasMore?: boolean;
+          page?: number;
+          error?: string;
+          missing_pricebook_view?: boolean;
+          needs_baseline?: boolean;
+        };
+        let res: RefreshRes;
+        try {
+          res = await api<RefreshRes>("/inventory/refresh-st-material-names", {
+            method: "POST",
+            body: JSON.stringify({ page, pageSize }),
+            timeoutMs: 45_000,
+          });
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 403) {
+            setError(
+              "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+            );
+            setOk("");
+            return;
+          }
+          if (err instanceof ApiError && err.status === 409) {
+            setError(
+              err.message ||
+                "Need a baseline date (last import/refresh). Name refresh will not dump the whole pricebook."
+            );
+            setOk("");
+            return;
+          }
+          throw err;
+        }
+        if (res.needs_baseline) {
+          setError(
+            res.error ||
+              "Need a baseline date (last import/refresh). Name refresh will not dump the whole pricebook."
+          );
+          setOk("");
+          return;
+        }
+        if (res.missing_pricebook_view) {
+          setError(
+            "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+          );
+          setOk("");
+          return;
+        }
+        updated += res.updated || 0;
+        skipped += res.skipped || 0;
+        unmatched += res.unmatched || 0;
+        if (!res.hasMore) break;
+        page = (res.page || page) + 1;
+      }
+      setOk(
+        `Name refresh finished: ${updated} updated, ${unmatched} not in catalog (skipped). Prices were not changed.`
+      );
+      await searchParts(q);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setError(
+          "Pricebook View missing. Enable Pricebook View on the ServiceTitan app, then Test connection in Admin."
+        );
+        setOk("");
+      } else {
+        setError(err instanceof Error ? err.message : "ServiceTitan name refresh failed");
+      }
+    } finally {
+      setRefreshStBusy(false);
     }
   }
 
@@ -3379,7 +3570,7 @@ export function InventoryPage() {
                     type="file"
                     accept=".xlsx,.xls,.csv"
                     hidden
-                    disabled={parseBusy || importBusy}
+                    disabled={parseBusy || importBusy || pullStBusy || refreshStBusy}
                     onChange={(e) => {
                       const f = e.target.files?.[0];
                       e.target.value = "";
@@ -3400,7 +3591,7 @@ export function InventoryPage() {
                 <button
                   className="btn"
                   type="button"
-                  disabled={!importFile || parseBusy || importBusy}
+                  disabled={!importFile || parseBusy || importBusy || pullStBusy || refreshStBusy}
                   onClick={() => void onBuildPreview()}
                 >
                   {parseBusy ? "Reading Materials sheet…" : "2. Load for review"}
@@ -3408,7 +3599,7 @@ export function InventoryPage() {
                 <button
                   className="btn secondary"
                   type="button"
-                  disabled={importBusy || summary.parts === 0}
+                  disabled={importBusy || pullStBusy || refreshStBusy || summary.parts === 0}
                   onClick={() => void onExportCatalog()}
                 >
                   Export for ServiceTitan (parts + vendors)
@@ -3416,12 +3607,31 @@ export function InventoryPage() {
                 <button
                   className="btn secondary"
                   type="button"
-                  disabled={importBusy || syncImagesBusy || summary.parts === 0}
+                  disabled={importBusy || pullStBusy || refreshStBusy || syncImagesBusy || summary.parts === 0}
                   onClick={() => void onSyncImagesFromSt()}
                   title="Pulls missing photos from ServiceTitan and stores them permanently in the app."
                 >
                   {syncImagesBusy ? "Syncing all photos…" : "Sync photos from ServiceTitan"}
                 </button>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={importBusy || parseBusy || pullStBusy || refreshStBusy || syncImagesBusy}
+                  onClick={() => void onPullStMaterials()}
+                  title="Fetches new ServiceTitan materials (insert only). Never overwrites prices. Equipment is not imported."
+                >
+                  {pullStBusy ? "Pulling from ServiceTitan..." : "Pull new parts from ServiceTitan"}
+                </button>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={importBusy || parseBusy || pullStBusy || refreshStBusy || syncImagesBusy}
+                  onClick={() => void onRefreshStNames()}
+                  title="Updates name and description on existing parts from ServiceTitan. Does not change prices. Uses modified-since last refresh/import, not the full book."
+                >
+                  {refreshStBusy ? "Refreshing names..." : "Refresh names from ServiceTitan"}
+                </button>
+
                 {previewReady && (
                   <button
                     className="btn secondary"

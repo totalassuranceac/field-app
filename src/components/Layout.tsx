@@ -1,6 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { api, can, isViewer, roleLabel, usesAdminShell, type Role } from "../api";
+import {
+  api,
+  can,
+  canOpenStudio,
+  isViewer,
+  roleLabel,
+  usesAdminShell,
+  type Role,
+} from "../api";
 import { useAuth } from "../auth";
 import {
   canFavoritePath,
@@ -24,6 +32,8 @@ type NavItem = {
   /** Show badge even when 0 (e.g. warehouse vendor-run counter) */
   badgeAlways?: boolean;
   badgeLabel?: string;
+  /** Official A mark before the label (Studio door) */
+  markA?: boolean;
 };
 
 function NavBadge({
@@ -62,7 +72,12 @@ function NavGroup({ title, items }: { title: string; items: NavItem[] }) {
           end={l.to === "/"}
           className={({ isActive }) => (isActive ? "active" : undefined)}
         >
-          <span>{l.label}</span>
+          <span className={l.markA ? "nav-label-with-mark" : undefined}>
+            {l.markA ? (
+              <img src="/logo-mark.png" alt="" className="nav-mark-a" width={18} height={18} />
+            ) : null}
+            {l.label}
+          </span>
           {l.badge != null && (
             <NavBadge count={l.badge} always={l.badgeAlways} label={l.badgeLabel} />
           )}
@@ -118,7 +133,12 @@ function NavCategory({
               end={l.to === "/"}
               className={({ isActive }) => (isActive ? "active" : undefined)}
             >
-              <span>{l.label}</span>
+              <span className={l.markA ? "nav-label-with-mark" : undefined}>
+                {l.markA ? (
+                  <img src="/logo-mark.png" alt="" className="nav-mark-a" width={18} height={18} />
+                ) : null}
+                {l.label}
+              </span>
               {l.badge != null && (
                 <NavBadge count={l.badge} always={l.badgeAlways} label={l.badgeLabel} />
               )}
@@ -171,7 +191,9 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/reviews") ||
     pathname.startsWith("/notifications") ||
     pathname.startsWith("/settings") ||
-    pathname.startsWith("/warehouse-cameras")
+    pathname.startsWith("/warehouse-cameras") ||
+    pathname.startsWith("/studio") ||
+    pathname.startsWith("/tv")
   ) {
     return "company";
   }
@@ -661,7 +683,8 @@ export function Layout({ children }: { children: ReactNode }) {
     {
       to: "/tool-loan-ledger",
       label: "Tool loan payroll",
-      show: user.role === "admin" || user.role === "office" || user.role === "supervisor",
+      show:
+        user?.role === "admin" || user?.role === "office" || user?.role === "supervisor",
     },
     { to: "/feedback", label: "App feedback", show: true },
     { to: "/howto", label: "How-to guides", show: true },
@@ -676,6 +699,12 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/tv",
       label: "TV board",
       show: adminShell || isOffice || isMechanic,
+    },
+    {
+      to: "/studio",
+      label: "Studio",
+      markA: true,
+      show: canOpenStudio(user),
     },
     {
       to: "/roles",

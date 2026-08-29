@@ -417,6 +417,8 @@ export const ALL_PERMISSIONS = [
   "viewCompanyAssets",
   "manageCompanyAssets",
   "viewLiveMap",
+  /** Open live Studio (ta-ads) — office/admin in can(); named extras via canOpenStudio() */
+  "openStudio",
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -533,8 +535,60 @@ export function can(user: User | null, action: string): boolean {
     manageCompanyAssets: ["admin", "warehouse"],
     /** Fleet GPS map — not for field techs (privacy / focus) */
     viewLiveMap: ["admin", "office", "mechanic", "warehouse", "supervisor", "viewer"],
+    /** Studio door — office only here; admin already short-circuits. Named extras use canOpenStudio(). */
+    openStudio: ["admin", "office"],
   };
   return (map[action] || []).includes(r);
+}
+
+/** Live Studio app (separate worker). Do not vendor ad-cloud into Field App. */
+export const STUDIO_LIVE_URL = "https://ta-ads.totalassurance.workers.dev";
+
+/**
+ * People who may open Studio even if their role is not office/admin
+ * (e.g. Adam supervisor, Eric). Technicians/installers are not included
+ * unless explicitly named here.
+ */
+const STUDIO_NAME_HINTS = [
+  "chris marroquin",
+  "kelsie",
+  "bianca",
+  "eric",
+  "adam bosquez",
+  "chris miller",
+];
+
+function normStudioName(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[.,'"_/\\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Who may see / open the Studio door.
+ * - admin + office (not warehouse-as-office)
+ * - named allow-list above
+ * - not viewer, field techs, mechanics, warehouse, or other installers
+ */
+export function canOpenStudio(user: User | null | undefined): boolean {
+  if (!user) return false;
+  // Warehouse is a distinct public role — never Studio
+  if (user.role === "warehouse" || user.is_warehouse) return false;
+  if (user.role === "admin" || user.role === "office") return true;
+  // Do not use can() here — viewer inherits browse perms and must stay out
+  const n = normStudioName(user.display_name || "");
+  if (!n) return false;
+  return STUDIO_NAME_HINTS.some((hint) => {
+    if (n === hint) return true;
+    if (!hint.includes(" ") && n.split(" ")[0] === hint) return true;
+    if (hint.includes(" ") && (n === hint || n.startsWith(hint + " ") || n.endsWith(" " + hint))) {
+      return true;
+    }
+    return false;
+  });
 }
 
 /** Permission matrix for role simulation / admin testing */

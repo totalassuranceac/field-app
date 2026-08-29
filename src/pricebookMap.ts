@@ -462,3 +462,176 @@ export function partsToStMaterialsExportRows(parts: ExportPart[]): Record<string
     return row;
   });
 }
+
+/** ServiceTitan Pricebook Materials API object (JSON), not an Excel row. */
+export type StMaterialApiJson = {
+  id?: number | string | null;
+  code?: string | null;
+  displayName?: string | null;
+  description?: string | null;
+  cost?: number | null;
+  price?: number | null;
+  unitOfMeasure?: string | null;
+  isInventory?: boolean | number | null;
+  active?: boolean | number | null;
+  categories?: unknown;
+  images?: unknown;
+  assets?: unknown;
+  defaultAssetUrl?: unknown;
+  vendors?: unknown;
+  vendorParts?: unknown;
+  primaryVendor?: unknown;
+};
+
+function categoryFromStMaterialApi(categories: unknown): string | null {
+  if (!categories) return null;
+  if (typeof categories === "string" && categories.trim()) return categories.trim();
+  if (!Array.isArray(categories)) {
+    if (typeof categories === "object") {
+      const n = (categories as Record<string, unknown>).name ?? (categories as Record<string, unknown>).Name;
+      if (typeof n === "string" && n.trim()) return n.trim();
+    }
+    return null;
+  }
+  const names: string[] = [];
+  for (const c of categories) {
+    if (typeof c === "string" && c.trim()) names.push(c.trim());
+    else if (c && typeof c === "object") {
+      const n = (c as Record<string, unknown>).name ?? (c as Record<string, unknown>).Name;
+      if (typeof n === "string" && n.trim()) names.push(n.trim());
+    }
+  }
+  return names.length ? names.join(" / ") : null;
+}
+
+function imageFromStMaterialApi(m: Record<string, unknown>): string | null {
+  const excelish = firstStImagePath(m);
+  if (excelish) return excelish;
+  const candidates: unknown[] = [m.defaultAssetUrl, m.image, m.imageUrl];
+  if (Array.isArray(m.images)) candidates.push(...m.images);
+  if (Array.isArray(m.assets)) candidates.push(...(m.assets as unknown[]));
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) {
+      const s = c.trim();
+      if (
+        /^https?:\/\//i.test(s) ||
+        s.startsWith("Images/") ||
+        s.startsWith("Pricebook/") ||
+        /\.(png|jpe?g|webp|gif)$/i.test(s)
+      ) {
+        return s;
+      }
+    }
+    if (c && typeof c === "object") {
+      const o = c as Record<string, unknown>;
+      for (const k of ["url", "Url", "href", "path", "alias", "fileName", "FileName"]) {
+        const v = o[k];
+        if (typeof v === "string" && v.trim()) {
+          const s = v.trim();
+          if (
+            /^https?:\/\//i.test(s) ||
+            s.startsWith("Images/") ||
+            s.startsWith("Pricebook/") ||
+            /\.(png|jpe?g|webp|gif)$/i.test(s)
+          ) {
+            return s;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function vendorsFromStMaterialApi(
+  vendors: unknown,
+  vendorParts: unknown,
+  primaryVendor: unknown
+): { primary: string | null; vendors: VendorQuote[] } {
+  const out: VendorQuote[] = [];
+  const blocks = [
+    ...(Array.isArray(vendors) ? vendors : []),
+    ...(Array.isArray(vendorParts) ? vendorParts : []),
+  ];
+  for (const raw of blocks) {
+    if (!raw || typeof raw !== "object") continue;
+    const o = raw as Record<string, unknown>;
+    const vendor_name = String(o.vendorName ?? o.name ?? o.vendor ?? "").trim();
+    if (!vendor_name) continue;
+    let vendor_part_number: string | null = null;
+    if (o.vendorPartNumber != null && String(o.vendorPartNumber).trim()) {
+      vendor_part_number = String(o.vendorPartNumber).trim();
+    } else if (o.vendorPart != null && String(o.vendorPart).trim()) {
+      vendor_part_number = String(o.vendorPart).trim();
+    }
+    const cost = asNum(o.cost);
+    const available = asBool(o.active, true);
+    const is_primary = asBool(o.primaryVendor ?? o.isPrimary ?? o.primary, false);
+    const notes = o.memo != null && String(o.memo).trim() ? String(o.memo).trim() : null;
+    out.push({ vendor_name, vendor_part_number, cost, available, is_primary, notes });
+  }
+  let primary: string | null = null;
+  if (typeof primaryVendor === "string" && primaryVendor.trim()) {
+    primary = primaryVendor.trim();
+  } else if (primaryVendor && typeof primaryVendor === "object") {
+    const o = primaryVendor as Record<string, unknown>;
+    const n = String(o.vendorName ?? o.name ?? "").trim();
+    if (n) primary = n;
+  }
+  if (!primary) {
+    const flagged = out.find((v) => v.is_primary);
+    if (flagged) primary = flagged.vendor_name;
+  }
+  if (!primary) {
+    const available = out.filter((v) => v.available && v.cost != null);
+    available.sort((a, b) => (a.cost ?? 0) - (b.cost ?? 0));
+    if (available[0]) primary = available[0].vendor_name;
+  }
+  if (primary) {
+    for (const v of out) v.is_primary = v.vendor_name === primary;
+  }
+  return { primary, vendors: out };
+}
+
+/**
+ * Map one ServiceTitan Materials API object to a catalog import row.
+ * Uses displayName (API), not Excel column Name.
+ */
+export function mapStMaterialApiToPartImportRow(
+  raw: StMaterialApiJson | Record<string, unknown> | null | undefined
+): ImportRow | null {
+  if (!raw || typeof raw !== "object") return null;
+  const m = raw as Record<string, unknown>;
+  const code = String(m.code ?? "").trim();
+  const name = String(m.displayName ?? "").trim();
+  if (!code || !name) return null;
+  const { primary, vendors } = vendorsFromStMaterialApi(m.vendors, m.vendorParts, m.primaryVendor);
+  const costFromCol = asNum(m.cost);
+  const primaryQuote = vendors.find((v) => v.is_primary);
+  const cost = costFromCol != null ? costFromCol : primaryQuote?.cost ?? null;
+  return {
+    external_st_id:
+      m.id != null && String(m.id).trim() !== "" ? (m.id as string | number) : null,
+    code,
+    name,
+    description_text: stripHtml(m.description != null ? String(m.description) : null),
+    category: categoryFromStMaterialApi(m.categories),
+    cost,
+    price: asNum(m.price),
+    unit_of_measure:
+      m.unitOfMeasure != null && String(m.unitOfMeasure).trim()
+        ? String(m.unitOfMeasure).trim()
+        : null,
+    is_inventory: asBool(m.isInventory, true),
+    active: asBool(m.active, true),
+    primary_vendor: primary,
+    image_url: imageFromStMaterialApi(m),
+    vendors,
+  };
+}
+
+/** Match Excel import: prefer IsInventory=1; if none, keep all mapped Materials rows. Does not skip Active=0. */
+export function filterStMaterialsLikeExcel(rows: ImportRow[]): ImportRow[] {
+  const inv = rows.filter((r) => r.is_inventory === true || r.is_inventory === 1);
+  return inv.length ? inv : rows;
+}

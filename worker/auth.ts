@@ -245,6 +245,12 @@ export const ROLE_PERMS = {
     "supervisor",
   ] as Role[],
   manageCompanyAssets: ["admin", "warehouse"] as Role[],
+  /**
+   * Studio door (live ta-ads app). Office + admin only in ROLE_PERMS.
+   * Named extras (Kelsie, Adam, …) are checked in the UI via canOpenStudio —
+   * there is no Field App API that proxies Studio votes.
+   */
+  openStudio: ["admin", "office"] as Role[],
 };
 
 function normName(s: string): string {
