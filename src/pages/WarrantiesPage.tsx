@@ -75,7 +75,7 @@ interface Warranty {
 
 const STATUS_LABEL: Record<string, string> = {
   dropped_off: "File",
-  claim_submitted: "Hold · waiting credit",
+  claim_submitted: "Hold · waiting on vendor",
   return_to_vendor: "Return to vendor",
   delivered: "Return · delivered",
   approved: "Approved",
@@ -618,7 +618,9 @@ export function WarrantiesPage() {
     }
     const st = normalizeStatus(String(w.status));
     if (st === "claim_submitted") {
-      setError("Hold = waiting credit — do not scrap. Wait for credit or move to Return.");
+      setError(
+        "Hold = waiting on the vendor — do not scrap. If they ask for a return for credit, tap Return to vendor."
+      );
       return;
     }
     if (st === "return_to_vendor" || st === "delivered") {
@@ -790,11 +792,12 @@ export function WarrantiesPage() {
         <div>
           <h1>Warranties</h1>
           <p>
-            Piles: <strong>File</strong> (file the claim) · <strong>Hold</strong> (waiting credit
-            — do not scrap) · <strong>Return</strong> (Johnstone / Solar / send-back) ·{" "}
+            Piles: <strong>File</strong> (file the claim) · <strong>Hold</strong> (waiting on
+            vendor — do not scrap) · <strong>Return</strong> (Johnstone / Solar / send-back) ·{" "}
             <strong>Parked</strong> (do not file) · <strong>Rejected</strong>. Badge / Home count ={" "}
             File only
-            {attentionCount > 0 ? ` · ${attentionCount} to file` : ""}.
+            {attentionCount > 0 ? ` · ${attentionCount} to file` : ""}. ACES = email Victoria (never
+            portal); Goodman/Daikin = Warranty Express; Lennox = LennoxPros; Ferguson = Ferguson.com.
           </p>
         </div>
       </div>
@@ -1210,9 +1213,9 @@ export function WarrantiesPage() {
             }
             if (st === "claim_submitted") {
               const wd = w.working_days_since_submit ?? 0;
-              if (wd >= 3) return ` · ${wd} working days — waiting credit, do not scrap`;
+              if (wd >= 3) return ` · ${wd} working days — waiting on vendor, do not scrap`;
               if (wd > 0) return ` · Hold ${wd} working day${wd === 1 ? "" : "s"} — do not scrap`;
-              return " · Hold — waiting credit, do not scrap";
+              return " · Hold — waiting on vendor, do not scrap";
             }
             return "";
           })();
@@ -1484,7 +1487,7 @@ export function WarrantiesPage() {
                   {!parked && st === "claim_submitted" && (
                     <>
                       <span className="muted warranty-hold-banner">
-                        Waiting credit — do not scrap
+                        Waiting on vendor — do not scrap
                       </span>
                       <button
                         type="button"
