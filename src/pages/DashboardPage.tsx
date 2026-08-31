@@ -530,8 +530,8 @@ export function DashboardPage() {
         {
           key: "warranties",
           value: s.warranties,
-          label: "Warranties need action",
-          hint: "Dropped off to claim, or submitted 3+ working days (approve/reject)",
+          label: "Warranties to file",
+          hint: "File pile — dropped off, not parked",
           to: "/warranties",
           tone: toneForCount(s.warranties, 1, 5),
           weight: 9,
@@ -590,13 +590,22 @@ export function DashboardPage() {
           weight: 10,
         },
         {
+          key: "warranties",
+          value: s.warranties,
+          label: "Warranties to file",
+          hint: "File pile — dropped off, not parked",
+          to: "/warranties",
+          tone: toneForCount(s.warranties, 1, 5),
+          weight: 9,
+        },
+        {
           key: "stale",
           value: s.stale_issues,
           label: "Unscheduled 3+ days",
           hint: "Open tickets needing a shop date",
           to: "/issues?tab=needs",
           tone: toneForCount(s.stale_issues, 1, 2),
-          weight: 9,
+          weight: 8,
         },
         {
           key: "weekly",
@@ -617,7 +626,7 @@ export function DashboardPage() {
               : "Trackers & dash cams",
           to: "/live",
           tone: toneForCount(s.tracking, 1, 2),
-          weight: 8,
+          weight: 6,
         },
         {
           key: "yard",
@@ -626,7 +635,7 @@ export function DashboardPage() {
           hint: "Reg / insurance",
           to: "/yard",
           tone: toneForCount(s.expiring, 1, 3),
-          weight: 6,
+          weight: 5,
         },
       ];
     }
@@ -663,8 +672,8 @@ export function DashboardPage() {
       {
         key: "warranties",
         value: s.warranties,
-        label: "Warranties need action",
-        hint: "Dropped off to claim, or submitted 3+ working days (approve/reject)",
+        label: "Warranties to file",
+        hint: "File pile — dropped off, not parked",
         to: "/warranties",
         tone: toneForCount(s.warranties, 1, 5),
         weight: 13,

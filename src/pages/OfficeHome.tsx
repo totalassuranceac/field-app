@@ -39,9 +39,19 @@ export function OfficeHome() {
     Promise.all([
       api<{ issues: SchedIssue[] }>("/issues?report=schedule"),
       api<{ unread: number }>("/notifications").catch(() => ({ unread: 0 })),
-      api<{ warranties?: unknown[] }>("/warranties?status=open").catch(() => ({
-        warranties: [],
-      })),
+      api<{ file_count?: number; attention_count?: number; warranties?: unknown[] }>(
+        "/warranties?status=file"
+      ).catch(
+        (): {
+          file_count: number;
+          attention_count: number;
+          warranties: unknown[];
+        } => ({
+          file_count: 0,
+          attention_count: 0,
+          warranties: [],
+        })
+      ),
       api<{ waiting?: number }>("/inventory/vendor-runs/count").catch(() => ({
         waiting: 0,
       })),
@@ -50,7 +60,13 @@ export function OfficeHome() {
       .then(([iss, n, w, vr, h]) => {
         setIssues(iss.issues || []);
         setUnread(n.unread || 0);
-        setWarranties((w.warranties || []).length);
+        setWarranties(
+          typeof w.file_count === "number"
+            ? w.file_count
+            : typeof w.attention_count === "number"
+              ? w.attention_count
+              : (w.warranties || []).length
+        );
         setVendorWaiting(vr.waiting || 0);
         setHandbookPending(!!h.pending);
       })
@@ -139,9 +155,9 @@ export function OfficeHome() {
             📦
           </span>
           <span>
-            <strong>Open warranties</strong>
+            <strong>Warranties to file</strong>
             <span className="office-action-hint">
-              {warranties ? `${warranties} open` : "None waiting"}
+              {warranties ? `${warranties} on File pile` : "File pile clear"}
             </span>
           </span>
         </Link>

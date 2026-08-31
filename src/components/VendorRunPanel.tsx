@@ -182,9 +182,13 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [vendorNames, setVendorNames] = useState<string[]>([]);
 
-  const isOfficeEntry = user?.role === "admin" || user?.role === "office";
   const canEditAny =
     user?.role === "admin" || user?.role === "office" || user?.role === "warehouse";
+
+  function resetContactToSelf() {
+    setContactName((user?.display_name || "").trim());
+    setContactUserId(user?.id != null && user.id > 0 ? String(user.id) : "");
+  }
 
   const defaultSource = useMemo(() => {
     const r = user?.role;
@@ -315,9 +319,14 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusTicketId]);
 
+  // Default contact to the logged-in user (Adam / Chris Miller / everyone)
   useEffect(() => {
-    if (!isOfficeEntry) return;
-    // Employees list is available to office; users list is admin-only
+    resetContactToSelf();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.display_name]);
+
+  // Employee dropdown for everyone; free-text still works if this fails
+  useEffect(() => {
     void api<{ employees?: Array<{ id: number; name: string; active?: number }> }>(
       "/employees"
     )
@@ -334,7 +343,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       .catch(() => {
         /* free-text contact still works */
       });
-  }, [isOfficeEntry]);
+  }, []);
 
   function scrollToList() {
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -509,9 +518,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         const hit = staff.find((s) => s.id === eid);
         if (hit) contact = hit.display_name;
       }
-      if (isOfficeEntry && !contact) {
-        throw new Error("Select who this is for (contact) so warehouse knows who to ask.");
-      }
+      // Always fall back to the logged-in user — never block supervisors/office
+      if (!contact) contact = (user?.display_name || "").trim();
       const ready = readyDate.trim() || localTodayIso();
       const r = await api<{ ready_to_pick?: boolean; needed_for_date?: string }>(
         "/inventory/part-pickups",
@@ -522,6 +530,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             part_description: desc,
             job_address: addr,
             contact_name: contact || undefined,
+            contact_user_id: eid && eid > 0 ? eid : user?.id || undefined,
             needed_for_date: ready,
             source: defaultSource,
           }),
@@ -536,8 +545,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       setVendor("");
       setPartDescription("");
       setJobAddress("");
-      setContactUserId("");
-      setContactName("");
+      resetContactToSelf();
       setReadyDate(localTodayIso());
       setShowForm(false);
       await load();
@@ -1056,9 +1064,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         <form className="card vendor-run-form" onSubmit={submitTicket}>
           <p className="muted vendor-run-form-hint">
             Tell warehouse where to get the part, what it is, and where it needs to go.
-            {isOfficeEntry
-              ? " As office/admin, also pick who to contact if we need more info."
-              : ""}
+            Warehouse needs a name to call — it starts as you; pick someone else if it is
+            not your part.
           </p>
           <label>
             Store / vendor *{" "}
@@ -1114,46 +1121,45 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               stays on the list but driver is not sent today.
             </span>
           </label>
-          {isOfficeEntry && (
-            <>
-              <label>
-                Contact person *{" "}
-                <span className="muted">(who to call if we need more info)</span>
-                <select
-                  value={contactUserId}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    setContactUserId(id);
-                    if (id) {
-                      const hit = staff.find((s) => String(s.id) === id);
-                      if (hit) setContactName(hit.display_name);
-                    } else {
-                      setContactName("");
-                    }
-                  }}
-                  required={!contactName.trim()}
-                >
-                  <option value="">Select employee…</option>
-                  {staff.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.display_name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Or type contact name
-                <input
-                  value={contactName}
-                  onChange={(e) => {
-                    setContactName(e.target.value);
-                    if (e.target.value.trim()) setContactUserId("");
-                  }}
-                  placeholder="If not in the list above"
-                />
-              </label>
-            </>
-          )}
+          <label>
+            Contact person{" "}
+            <span className="muted">(who to call if we need more info)</span>
+            <select
+              value={
+                staff.some((s) => String(s.id) === contactUserId) ? contactUserId : ""
+              }
+              onChange={(e) => {
+                const id = e.target.value;
+                setContactUserId(id);
+                if (id) {
+                  const hit = staff.find((s) => String(s.id) === id);
+                  if (hit) setContactName(hit.display_name);
+                }
+              }}
+            >
+              <option value="">
+                {contactName.trim()
+                  ? `Current: ${contactName.trim()}`
+                  : "Select employee…"}
+              </option>
+              {staff.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Or type contact name
+            <input
+              value={contactName}
+              onChange={(e) => {
+                setContactName(e.target.value);
+                if (e.target.value.trim()) setContactUserId("");
+              }}
+              placeholder="Starts as you — change if this is for someone else"
+            />
+          </label>
           <button className="btn" type="submit" disabled={busy}>
             {busy ? "Saving…" : "Submit pickup request"}
           </button>

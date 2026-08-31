@@ -55,10 +55,18 @@ export function NotificationBell() {
     try {
       const [n, w] = await Promise.all([
         api<{ unread: number; notifications: PreviewNote[] }>("/notifications"),
-        api<{ open_count: number }>("/warranties?status=open").catch(() => ({ open_count: 0 })),
+        api<{ file_count?: number; attention_count?: number; open_count?: number }>(
+          "/warranties?status=file"
+        ).catch(
+          (): { file_count: number; attention_count: number } => ({
+            file_count: 0,
+            attention_count: 0,
+          })
+        ),
       ]);
       setNotifUnread(n.unread || 0);
-      setWarrantyOpen(w.open_count || 0);
+      // File pile only (dropped_off − parked) — not Hold / all-open
+      setWarrantyOpen(w.file_count ?? w.attention_count ?? 0);
       // Hide legacy chat alerts — messaging UI was removed
       setPreview(
         (n.notifications || [])
@@ -160,7 +168,7 @@ export function NotificationBell() {
             </div>
             <div className="notif-panel-links">
               <Link to="/warranties" className="notif-panel-link" onClick={() => setOpen("closed")}>
-                Warranties{warrantyOpen ? ` · ${warrantyOpen} open` : ""}
+                Warranties{warrantyOpen ? ` · ${warrantyOpen} to file` : ""}
               </Link>
               <Link
                 to="/notifications"

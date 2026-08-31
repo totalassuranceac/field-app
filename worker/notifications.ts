@@ -201,6 +201,21 @@ export async function coreFleetNotifyIds(db: D1Database): Promise<number[]> {
   return fallback;
 }
 
+/** Chris Marroquin (Operations Manager) — warranty Inbox always includes him. */
+export async function chrisMarroquinUserIds(db: D1Database): Promise<number[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id FROM users
+       WHERE active = 1
+         AND (
+           lower(IFNULL(username, '')) IN ('chrismarroquin', 'chris.marroquin', 'cmarroquin')
+           OR lower(IFNULL(display_name, '')) LIKE 'chris marroquin%'
+         )`
+    )
+    .all<{ id: number }>();
+  return [...new Set((rows.results || []).map((r) => r.id))];
+}
+
 /** User ids linked to employee ids (active logins only). */
 export async function userIdsForEmployees(
   db: D1Database,

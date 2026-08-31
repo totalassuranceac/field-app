@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError, OfflineQueuedError } from "../api";
 import { useAuth } from "../auth";
@@ -17,11 +17,10 @@ import {
 } from "../warrantyPartSuggestions";
 
 /**
- * Flow:
- * Dropped off → Claim submitted → (optional) Return to vendor [→ Delivered]
- * → Approved | Rejected (credit decision only — closes the log)
- * OR → Not a warranty — sent to job (closes when it was never a warranty claim)
- * Submitted claims stay quiet for 3 working days, then need approve/reject follow-up.
+ * Shop piles:
+ * File (dropped_off, not parked) → Hold (claim_submitted, waiting credit)
+ * Return (return_to_vendor / delivered) · Parked · Rejected
+ * Solar Supply closeout = invoice deleted (Approved $0). Never scrap Solar.
  */
 type WStatus =
   | "dropped_off"
@@ -31,6 +30,8 @@ type WStatus =
   | "approved"
   | "rejected"
   | "not_warranty";
+
+type PileFilter = "file" | "hold" | "return" | "parked" | "rejected";
 
 interface Warranty {
   id: number;
@@ -53,9 +54,16 @@ interface Warranty {
   processed_by_name?: string | null;
   dropoff_photo_key?: string | null;
   nameplate_photo_key?: string | null;
+  old_compressor_photo_key?: string | null;
+  new_compressor_photo_key?: string | null;
+  old_compressor_serial?: string | null;
+  new_compressor_serial?: string | null;
+  compressor_seals_ok?: number | null;
   rma_number?: string | null;
   credit_amount?: number | null;
   tracking_number?: string | null;
+  parked?: number | null;
+  parked_reason?: string | null;
   days_open: number;
   working_days_since_submit?: number;
   needs_attention?: boolean;
@@ -66,10 +74,10 @@ interface Warranty {
 }
 
 const STATUS_LABEL: Record<string, string> = {
-  dropped_off: "Dropped off",
-  claim_submitted: "Claim submitted",
+  dropped_off: "File",
+  claim_submitted: "Hold · waiting credit",
   return_to_vendor: "Return to vendor",
-  delivered: "Delivered",
+  delivered: "Return · delivered",
   approved: "Approved",
   rejected: "Rejected",
   not_warranty: "Removed · not a claim",
@@ -78,6 +86,27 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Rejected",
   sent_to_job: "Removed · not a claim",
 };
+
+function normVendor(s: string | null | undefined): string {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.,'"_/\\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSolarSupply(name: string | null | undefined): boolean {
+  const n = normVendor(name);
+  if (!n) return false;
+  return n === "solar" || n === "solar supply" || n.startsWith("solar supply") || /\bsolar\s+supply\b/.test(n);
+}
+
+function isJohnstone(name: string | null | undefined): boolean {
+  const n = normVendor(name);
+  if (!n) return false;
+  return n === "johnstone" || n.startsWith("johnstone ") || /\bjohnstone\b/.test(n);
+}
 
 const OPEN_STATUSES: WStatus[] = [
   "dropped_off",
@@ -161,11 +190,15 @@ export function WarrantiesPage() {
 
   const [list, setList] = useState<Warranty[]>([]);
   const [attentionCount, setAttentionCount] = useState(0);
-  const [filter, setFilter] = useState<"open" | "all" | "vendor" | "decided">("open");
+  const [filter, setFilter] = useState<PileFilter>("file");
   const [searchQ, setSearchQ] = useState("");
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Process roles: form collapsed so File list is visible without long scroll */
+  const [showDropoffForm, setShowDropoffForm] = useState(() => !canProcess);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxLabel, setLightboxLabel] = useState("");
   /** Per-claim vendor credit form draft */
   const [vendorDraft, setVendorDraft] = useState<
     Record<
@@ -215,38 +248,19 @@ export function WarrantiesPage() {
 
   async function load() {
     const params = new URLSearchParams();
-    if (filter === "open") params.set("status", "open");
-    else if (filter === "decided") params.set("status", "decided");
-    else if (filter === "vendor") params.set("status", "vendor");
+    params.set("status", filter);
     if (searchQ.trim()) params.set("q", searchQ.trim());
     const qs = params.toString();
     const d = await api<{
       warranties: Warranty[];
       attention_count?: number;
+      file_count?: number;
       open_count?: number;
     }>(`/warranties${qs ? `?${qs}` : ""}`);
     setList(d.warranties || []);
-    if (typeof d.attention_count === "number") setAttentionCount(d.attention_count);
+    if (typeof d.file_count === "number") setAttentionCount(d.file_count);
+    else if (typeof d.attention_count === "number") setAttentionCount(d.attention_count);
   }
-
-  const sections = useMemo(() => {
-    const dropped: Warranty[] = [];
-    const submitted: Warranty[] = [];
-    const vendor: Warranty[] = [];
-    const approved: Warranty[] = [];
-    const rejected: Warranty[] = [];
-    const other: Warranty[] = [];
-    for (const w of list) {
-      const st = normalizeStatus(String(w.status));
-      if (st === "dropped_off") dropped.push(w);
-      else if (st === "claim_submitted") submitted.push(w);
-      else if (st === "return_to_vendor" || st === "delivered") vendor.push(w);
-      else if (st === "approved") approved.push(w);
-      else if (st === "rejected") rejected.push(w);
-      else other.push(w);
-    }
-    return { dropped, submitted, vendor, approved, rejected, other };
-  }, [list]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -598,14 +612,103 @@ export function WarrantiesPage() {
    * No reason required; just leaves the open list.
    */
   async function markNotWarranty(w: Warranty) {
+    if (isSolarSupply(w.vendor_name)) {
+      setError("Never scrap Solar Supply parts — use invoice deleted on Return.");
+      return;
+    }
+    const st = normalizeStatus(String(w.status));
+    if (st === "claim_submitted") {
+      setError("Hold = waiting credit — do not scrap. Wait for credit or move to Return.");
+      return;
+    }
+    if (st === "return_to_vendor" || st === "delivered") {
+      setError("Return pile — do not scrap. Solar uses invoice deleted; Johnstone is counter return only.");
+      return;
+    }
+    if (st === "approved" && (w.credit_amount == null || !Number.isFinite(Number(w.credit_amount)))) {
+      setError("Enter credit $ on the card before completing an approved claim.");
+      return;
+    }
     if (
       !window.confirm(
-        `Remove ${w.log_number} from open warranties?\n\nUse this when it is not a warranty claim (back to shelves, another job, etc.). It will not show as Approved or Rejected.`
+        `Remove ${w.log_number} from open warranties?\n\nOnly after Approved with credit (not returns / not Solar).`
       )
     ) {
       return;
     }
     await setStatus(w.id, "not_warranty");
+  }
+
+  async function parkClaim(w: Warranty) {
+    const why = window.prompt(
+      `Park ${w.log_number}?\n\nWhy? (required — e.g. new purchase, do not file)`
+    );
+    if (why == null) return;
+    if (why.trim().length < 3) {
+      setError("Park needs a short why-note.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ parked: true, parked_reason: why.trim() }),
+      });
+      setOk(`Parked ${w.log_number} — off File badge`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not park");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unparkClaim(w: Warranty) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ parked: false }),
+      });
+      setOk(`Unparked ${w.log_number} — back on File when status is dropped off`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not unpark");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function solarInvoiceDeleted(w: Warranty) {
+    if (!isSolarSupply(w.vendor_name)) return;
+    if (
+      !window.confirm(
+        `${w.log_number}: Solar received the return and deleted the invoice?\n\nThis sets Approved with credit $0. Never scrap Solar parts.`
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ solar_invoice_deleted: true }),
+      });
+      setOk(`${w.log_number} · Solar invoice deleted (Approved $0)`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not close Solar return");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openLightbox(src: string, label: string) {
+    setLightboxSrc(src);
+    setLightboxLabel(label);
   }
 
   async function saveVendorDetails(w: Warranty) {
@@ -687,14 +790,26 @@ export function WarrantiesPage() {
         <div>
           <h1>Warranties</h1>
           <p>
-            Stages: <strong>Dropped off</strong> → <strong>Claim submitted</strong> →{" "}
-            <strong>Approved / Rejected</strong>. Submitted claims stay quiet for{" "}
-            <strong>3 working days</strong>, then need approve/reject. Dashboard focus only counts
-            dropped-off parts plus aging submitted claims
-            {attentionCount > 0 ? ` · ${attentionCount} need attention now` : ""}.
+            Piles: <strong>File</strong> (file the claim) · <strong>Hold</strong> (waiting credit
+            — do not scrap) · <strong>Return</strong> (Johnstone / Solar / send-back) ·{" "}
+            <strong>Parked</strong> (do not file) · <strong>Rejected</strong>. Badge / Home count ={" "}
+            File only
+            {attentionCount > 0 ? ` · ${attentionCount} to file` : ""}.
           </p>
         </div>
       </div>
+      {lightboxSrc ? (
+        <div
+          className="warranty-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightboxLabel || "Photo"}
+          onClick={() => setLightboxSrc(null)}
+        >
+          <img src={lightboxSrc} alt={lightboxLabel || "Warranty photo"} />
+          <span className="warranty-lightbox-hint">Tap to close</span>
+        </div>
+      ) : null}
       {error && <div className="error inv-flash">{error}</div>}
       {ok && !writeOnBox && <div className="success inv-flash">{ok}</div>}
 
@@ -731,6 +846,19 @@ export function WarrantiesPage() {
         </div>
       )}
 
+      {canProcess ? (
+        <div className="warranty-dropoff-toggle no-print">
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={() => setShowDropoffForm((v) => !v)}
+          >
+            {showDropoffForm ? "Hide drop-off form" : "New drop-off"}
+          </button>
+        </div>
+      ) : null}
+
+      {(showDropoffForm || !canProcess) && (
       <form className="card warranty-form" onSubmit={submitDropoff}>
         <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Log warranty part drop-off</h2>
 
@@ -950,8 +1078,14 @@ export function WarrantiesPage() {
                 <input
                   value={vendor}
                   onChange={(e) => setVendor(e.target.value)}
-                  placeholder="e.g. Johnstone"
+                  placeholder="e.g. Johnstone, Solar Supply, ACES"
                 />
+                {isJohnstone(vendor) || isSolarSupply(vendor) ? (
+                  <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 500 }}>
+                    Defaults to <strong>Return</strong> pile (not File)
+                    {isSolarSupply(vendor) ? " · Solar closeout = invoice deleted" : ""}.
+                  </span>
+                ) : null}
               </label>
               <label className="span-2">
                 Notes
@@ -1014,14 +1148,16 @@ export function WarrantiesPage() {
                 : "Drop off & notify warehouse"}
         </button>
       </form>
+      )}
 
       <div className="warranty-filters no-print">
         {(
           [
-            ["open", "Open (by stage)"],
-            ["vendor", "Waiting on vendor"],
-            ["all", "All"],
-            ["decided", "Approved / Rejected"],
+            ["file", "File"],
+            ["hold", "Hold"],
+            ["return", "Return"],
+            ["parked", "Parked"],
+            ["rejected", "Rejected"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -1031,6 +1167,7 @@ export function WarrantiesPage() {
             onClick={() => setFilter(id)}
           >
             {label}
+            {id === "file" && attentionCount > 0 ? ` (${attentionCount})` : ""}
           </button>
         ))}
         <input
@@ -1051,6 +1188,8 @@ export function WarrantiesPage() {
       {(() => {
         function renderWarrantyItem(w: Warranty) {
           const st = normalizeStatus(String(w.status));
+          const parked = !!w.parked;
+          const solar = isSolarSupply(w.vendor_name);
           const tone =
             st === "approved"
               ? "done"
@@ -1064,25 +1203,34 @@ export function WarrantiesPage() {
                       ? "overdue"
                       : undefined;
           const ageLabel = (() => {
+            if (parked) return w.parked_reason ? ` · parked: ${w.parked_reason}` : " · parked";
             if (!isOpenStatus(st)) return "";
             if (st === "dropped_off") {
               return ` · ${w.days_open}d${w.urgent ? "!" : w.overdue ? " aging" : ""}`;
             }
-            const wd = w.working_days_since_submit ?? 0;
-            if (wd >= 3) return ` · ${wd} working days since submit — needs approval`;
-            if (wd > 0) return ` · submitted ${wd} working day${wd === 1 ? "" : "s"} ago`;
-            return " · submitted (quiet until 3 working days)";
+            if (st === "claim_submitted") {
+              const wd = w.working_days_since_submit ?? 0;
+              if (wd >= 3) return ` · ${wd} working days — waiting credit, do not scrap`;
+              if (wd > 0) return ` · Hold ${wd} working day${wd === 1 ? "" : "s"} — do not scrap`;
+              return " · Hold — waiting credit, do not scrap";
+            }
+            return "";
           })();
+          const canScrapComplete =
+            st === "approved" &&
+            w.credit_amount != null &&
+            Number.isFinite(Number(w.credit_amount)) &&
+            !solar;
           return (
             <LogItem
               key={w.id}
               tone={tone}
-              defaultOpen={false}
+              defaultOpen={filter === "file"}
               summary={
                 <>
                   <strong className="warranty-log">{w.log_number}</strong>
                   <span className={`log-item-badge warranty-status-${st}`}>
-                    {STATUS_LABEL[st] || st}
+                    {parked ? "Parked" : STATUS_LABEL[st] || st}
                   </span>
                   <span className="log-item-meta">
                     {w.part_name}
@@ -1165,41 +1313,48 @@ export function WarrantiesPage() {
                 )}
               </div>
               <div className="warranty-photos-row">
-                {w.nameplate_photo_key ? (
-                  <div className="warranty-dropoff-photo">
-                    <a
-                      href={`/api/uploads/${encodeURIComponent(w.nameplate_photo_key)}`}
-                      target="_blank"
-                      rel="noreferrer"
+                {([
+                  [w.nameplate_photo_key, "Unit nameplate"],
+                  [w.dropoff_photo_key, "Drop-off location"],
+                  [w.old_compressor_photo_key, "Old compressor S/N"],
+                  [w.new_compressor_photo_key, "New compressor S/N"],
+                ] as const).map(([key, label]) =>
+                  key ? (
+                    <button
+                      key={label}
+                      type="button"
+                      className="warranty-dropoff-photo warranty-photo-btn"
+                      onClick={() =>
+                        openLightbox(`/api/uploads/${encodeURIComponent(key)}`, label)
+                      }
                     >
                       <img
-                        src={`/api/uploads/${encodeURIComponent(w.nameplate_photo_key)}`}
-                        alt={`Nameplate for ${w.part_name}`}
+                        src={`/api/uploads/${encodeURIComponent(key)}`}
+                        alt={`${label} for ${w.part_name}`}
                       />
-                    </a>
-                    <span className="muted" style={{ fontSize: "0.75rem" }}>
-                      Unit nameplate · tap to enlarge
-                    </span>
-                  </div>
-                ) : null}
-                {w.dropoff_photo_key ? (
-                  <div className="warranty-dropoff-photo">
-                    <a
-                      href={`/api/uploads/${encodeURIComponent(w.dropoff_photo_key)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
-                        src={`/api/uploads/${encodeURIComponent(w.dropoff_photo_key)}`}
-                        alt={`Where ${w.part_name} was left`}
-                      />
-                    </a>
-                    <span className="muted" style={{ fontSize: "0.75rem" }}>
-                      Drop-off location · tap to enlarge
-                    </span>
-                  </div>
-                ) : null}
+                      <span className="muted" style={{ fontSize: "0.75rem" }}>
+                        {label} · tap to enlarge
+                      </span>
+                    </button>
+                  ) : null
+                )}
               </div>
+              {(w.old_compressor_serial || w.new_compressor_serial || w.compressor_seals_ok) && (
+                <div className="muted" style={{ fontSize: "0.82rem" }}>
+                  {w.compressor_seals_ok ? "Compressor seals confirmed" : null}
+                  {w.old_compressor_serial
+                    ? ` · Old S/N ${w.old_compressor_serial}`
+                    : null}
+                  {w.new_compressor_serial
+                    ? ` · New S/N ${w.new_compressor_serial}`
+                    : null}
+                </div>
+              )}
+              {parked && w.parked_reason ? (
+                <div className="muted" style={{ fontSize: "0.85rem" }}>
+                  <strong>Parked:</strong> {w.parked_reason}
+                </div>
+              ) : null}
               <div className="muted">
                 Dropped off {w.dropped_off_at?.replace("T", " ").slice(0, 16)}
                 {w.dropped_off_by_name ? ` by ${w.dropped_off_by_name}` : ""}
@@ -1286,43 +1441,59 @@ export function WarrantiesPage() {
                   {w.credit_amount != null ? ` · Credit $${Number(w.credit_amount).toFixed(2)}` : ""}
                 </div>
               )}
-              {canProcess && isOpenStatus(st) && (
+              {canProcess && (
                 <div className="log-item-actions warranty-actions">
-                  {st === "dropped_off" && (
+                  {parked ? (
                     <button
                       type="button"
                       className="btn secondary"
                       disabled={busy}
-                      onClick={() => void setStatus(w.id, "claim_submitted")}
+                      onClick={() => void unparkClaim(w)}
                     >
-                      Claim submitted
+                      Unpark
                     </button>
-                  )}
-                  {(st === "dropped_off" || st === "claim_submitted") && (
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      disabled={busy}
-                      onClick={() => void setStatus(w.id, "return_to_vendor")}
-                    >
-                      Return to vendor
-                    </button>
-                  )}
-                  {st === "return_to_vendor" && (
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      disabled={busy}
-                      onClick={() => void setStatus(w.id, "delivered")}
-                    >
-                      Delivered
-                    </button>
-                  )}
-                  {/* Credit outcome closes the claim — after claim or vendor return */}
-                  {(st === "claim_submitted" ||
-                    st === "return_to_vendor" ||
-                    st === "delivered") && (
+                  ) : null}
+                  {!parked && st === "dropped_off" && (
                     <>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={busy}
+                        onClick={() => void setStatus(w.id, "claim_submitted")}
+                      >
+                        Claim submitted
+                      </button>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={busy}
+                        onClick={() => void setStatus(w.id, "return_to_vendor")}
+                      >
+                        Return to vendor
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={busy}
+                        onClick={() => void parkClaim(w)}
+                      >
+                        Park
+                      </button>
+                    </>
+                  )}
+                  {!parked && st === "claim_submitted" && (
+                    <>
+                      <span className="muted warranty-hold-banner">
+                        Waiting credit — do not scrap
+                      </span>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={busy}
+                        onClick={() => void setStatus(w.id, "return_to_vendor")}
+                      >
+                        Return to vendor
+                      </button>
                       <button
                         type="button"
                         className="btn secondary"
@@ -1341,119 +1512,78 @@ export function WarrantiesPage() {
                       </button>
                     </>
                   )}
-                  {/* Not a claim outcome — shelves, another job, etc. No reason required. */}
-                  <button
-                    type="button"
-                    className="btn ghost warranty-not-warranty-btn"
-                    disabled={busy}
-                    title="Take this off the open warranty list (not approved/rejected — no reason required)"
-                    onClick={() => void markNotWarranty(w)}
-                  >
-                    Remove from open list
-                  </button>
+                  {!parked && (st === "return_to_vendor" || st === "delivered") && (
+                    <>
+                      {st === "return_to_vendor" && (
+                        <button
+                          type="button"
+                          className="btn secondary"
+                          disabled={busy}
+                          onClick={() => void setStatus(w.id, "delivered")}
+                        >
+                          Delivered
+                        </button>
+                      )}
+                      {solar ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => void solarInvoiceDeleted(w)}
+                        >
+                          Solar received return — invoice deleted
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={() => void setStatus(w.id, "approved")}
+                          >
+                            Approved
+                          </button>
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={() => void setStatus(w.id, "rejected")}
+                          >
+                            Rejected
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+                  {canScrapComplete ? (
+                    <button
+                      type="button"
+                      className="btn ghost warranty-not-warranty-btn"
+                      disabled={busy}
+                      title="Complete after Approved with credit (not Solar / not returns)"
+                      onClick={() => void markNotWarranty(w)}
+                    >
+                      Complete / scrap
+                    </button>
+                  ) : null}
                 </div>
               )}
             </LogItem>
           );
         }
 
-        function section(
-          title: string,
-          hint: string,
-          rows: Warranty[],
-          opts?: { emptyOk?: boolean }
-        ): ReactNode {
-          if (!rows.length && !opts?.emptyOk) return null;
-          return (
-            <section className="warranty-stage" key={title}>
-              <div className="warranty-stage-head">
-                <h2 className="warranty-stage-title">
-                  {title}
-                  <span className="warranty-stage-count">{rows.length}</span>
-                </h2>
-                <p className="muted warranty-stage-hint">{hint}</p>
-              </div>
-              {rows.length ? (
-                <LogList className="warranty-list">{rows.map(renderWarrantyItem)}</LogList>
-              ) : (
-                <p className="muted warranty-stage-empty">None</p>
-              )}
-            </section>
-          );
-        }
-
-        if (!list.length) {
-          return (
-            <LogList className="warranty-list" empty="No warranties in this filter.">
-              {[]}
-            </LogList>
-          );
-        }
-
-        if (filter === "open" && !searchQ.trim()) {
-          return (
-            <div className="warranty-stages">
-              {section(
-                "1 · Dropped off",
-                "Parts at the shop — file the vendor claim, then mark Claim submitted.",
-                sections.dropped,
-                { emptyOk: true }
-              )}
-              {section(
-                "2 · Claim submitted",
-                "Your part is done until 3 working days pass — then approve or reject the credit.",
-                sections.submitted,
-                { emptyOk: true }
-              )}
-              {section(
-                "3 · Waiting on vendor",
-                "Returned / delivered to vendor — still open until approved or rejected.",
-                sections.vendor,
-                { emptyOk: true }
-              )}
-            </div>
-          );
-        }
-
-        if (filter === "decided" && !searchQ.trim()) {
-          return (
-            <div className="warranty-stages">
-              {section("Approved", "Credit approved — closed.", sections.approved, {
-                emptyOk: true,
-              })}
-              {section("Rejected", "Claim rejected — closed.", sections.rejected, {
-                emptyOk: true,
-              })}
-              {section(
-                "Removed · not a claim",
-                "Taken off the open list (shelves / another job).",
-                sections.other,
-                { emptyOk: true }
-              )}
-            </div>
-          );
-        }
-
-        if (filter === "all" && !searchQ.trim()) {
-          return (
-            <div className="warranty-stages">
-              {section("Dropped off", "Needs claim filed.", sections.dropped)}
-              {section(
-                "Claim submitted",
-                "Quiet until 3 working days, then approval.",
-                sections.submitted
-              )}
-              {section("Waiting on vendor", "Return / delivered.", sections.vendor)}
-              {section("Approved", "Closed.", sections.approved)}
-              {section("Rejected", "Closed.", sections.rejected)}
-              {section("Other closed", "Not a warranty claim.", sections.other)}
-            </div>
-          );
-        }
-
-        // Vendor tab or search — flat list
+        const emptyMsg =
+          filter === "file"
+            ? "File pile clear — nothing waiting to file."
+            : filter === "hold"
+              ? "No claims waiting on credit."
+              : filter === "return"
+                ? "No returns in progress."
+                : filter === "parked"
+                  ? "Nothing parked."
+                  : "No rejected claims.";
         return (
-          <LogList className="warranty-list" empty="No warranties in this filter.">
+          <LogList className="warranty-list" empty={emptyMsg}>
             {list.map(renderWarrantyItem)}
           </LogList>
         );

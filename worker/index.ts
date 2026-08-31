@@ -30,6 +30,7 @@ import { catalogEntry } from "./issueCatalog";
 import {
   ensureOilChangeScheduled,
   markNotificationRead,
+  chrisMarroquinUserIds,
   coreFleetNotifyIds,
   notifyAndSms,
   notifyOpsActionItems,
@@ -41,6 +42,11 @@ import {
   userIdsForIssue,
   usersByRoles,
 } from "./notifications";
+import {
+  countWarrantyFilePile,
+  isSolarSupplyVendor,
+  vendorDefaultsToReturn,
+} from "./warrantyPiles";
 import {
   applyTwilioStatusToLog,
   fetchTwilioMessageStatus,
@@ -6134,39 +6140,29 @@ const WARRANTY_SUBMITTED_PIPELINE = new Set([
 ]);
 
 /**
- * Focus count: dropped-off parts still need a claim filed.
- * Submitted claims are quiet until 3 working days after submit, then they need approve/reject.
+ * Per-row Hold aging flag (UI). File badge uses countWarrantyFilePile instead —
+ * aged claim_submitted must NOT inflate the File / Home warranty badge.
  */
 function warrantyNeedsAttention(row: {
   status: string;
   claim_submitted_at?: string | null;
   dropped_off_at?: string | null;
+  parked?: number | null;
 }): boolean {
   const st = String(row.status || "");
-  if (st === "dropped_off") return true;
+  if (st === "dropped_off") return !row.parked;
   if (!WARRANTY_SUBMITTED_PIPELINE.has(st)) return false;
+  // Hold aging only — never counts toward File badge
+  if (st !== "claim_submitted") return false;
   const since =
     warrantyWorkingDaysSince(row.claim_submitted_at) ||
     warrantyWorkingDaysSince(row.dropped_off_at);
   return since >= 3;
 }
 
+/** @deprecated name kept for call sites — now File pile only (dropped_off − parked). */
 async function countWarrantyNeedsAttention(db: D1Database): Promise<number> {
-  try {
-    const rows = await db
-      .prepare(
-        `SELECT status, claim_submitted_at, dropped_off_at FROM warranty_claims
-         WHERE status IN ${WARRANTY_OPEN_STATUSES}`
-      )
-      .all<{
-        status: string;
-        claim_submitted_at: string | null;
-        dropped_off_at: string | null;
-      }>();
-    return (rows.results || []).filter(warrantyNeedsAttention).length;
-  } catch {
-    return 0;
-  }
+  return countWarrantyFilePile(db);
 }
 
 /** Normalize equipment serial for duplicate matching (ignore spaces/dashes/case). */
@@ -6276,14 +6272,24 @@ api.get("/warranties", async (c) => {
     // Text query searches ALL statuses so typing "005" finds W0726-005 even if approved.
     // Without q, honor open / vendor / decided tabs.
     if (!q) {
-      if (status === "open") {
-        sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
-      } else if (status === "dropped" || status === "dropped_off") {
-        sql += ` WHERE w.status = 'dropped_off'`;
-      } else if (status === "submitted" || status === "claim_submitted") {
-        sql += ` WHERE w.status IN ('claim_submitted','return_to_vendor','delivered')`;
-      } else if (status === "vendor" || status === "vendor_waiting" || status === "waiting_vendor") {
+      if (status === "file" || status === "dropped" || status === "dropped_off") {
+        // File pile = unsubmitted, not parked
+        sql += ` WHERE w.status = 'dropped_off' AND IFNULL(w.parked, 0) = 0`;
+      } else if (status === "hold" || status === "submitted" || status === "claim_submitted") {
+        sql += ` WHERE w.status = 'claim_submitted'`;
+      } else if (
+        status === "return" ||
+        status === "vendor" ||
+        status === "vendor_waiting" ||
+        status === "waiting_vendor"
+      ) {
         sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
+      } else if (status === "parked") {
+        sql += ` WHERE IFNULL(w.parked, 0) = 1`;
+      } else if (status === "rejected") {
+        sql += ` WHERE w.status = 'rejected'`;
+      } else if (status === "open") {
+        sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
       } else if (status === "decided" || status === "closed") {
         sql += ` WHERE w.status IN ('approved','rejected','not_warranty')`;
       } else if (status) {
@@ -6351,26 +6357,29 @@ api.get("/warranties", async (c) => {
       const workingSinceSubmit = WARRANTY_SUBMITTED_PIPELINE.has(st)
         ? warrantyWorkingDaysSince(submittedAt) || warrantyWorkingDaysSince(String(r.dropped_off_at))
         : 0;
+      const parked = Number(r.parked || 0) ? 1 : 0;
       const needsAttention = warrantyNeedsAttention({
         status: st,
         claim_submitted_at: submittedAt,
         dropped_off_at: r.dropped_off_at ? String(r.dropped_off_at) : null,
+        parked,
       });
-      // Dropped off: age from drop-off. Submitted pipeline: quiet until 3 working days, then approval aging.
+      // File aging from drop-off. Hold: quiet until 3 working days (UI only — not File badge).
       const overdue =
-        st === "dropped_off"
+        st === "dropped_off" && !parked
           ? days >= 7
-          : WARRANTY_SUBMITTED_PIPELINE.has(st)
+          : st === "claim_submitted"
             ? workingSinceSubmit >= 3
             : false;
       const urgent =
-        st === "dropped_off"
+        st === "dropped_off" && !parked
           ? days >= 14
-          : WARRANTY_SUBMITTED_PIPELINE.has(st)
+          : st === "claim_submitted"
             ? workingSinceSubmit >= 5
             : false;
       return {
         ...r,
+        parked,
         days_open: days,
         working_days_since_submit: workingSinceSubmit,
         needs_attention: needsAttention,
@@ -6378,23 +6387,39 @@ api.get("/warranties", async (c) => {
         urgent,
       };
     });
-    const openCount = list.filter((r: { status: string }) => isOpenW(String(r.status))).length;
-    const attentionCount = list.filter(
-      (r: { needs_attention?: boolean }) => r.needs_attention
-    ).length;
+    const fileCount = await countWarrantyFilePile(c.env.DB);
+    const openCount = list.filter((r: { status: string; parked?: number }) => {
+      const st = String(r.status);
+      if (st === "dropped_off") return !r.parked;
+      return isOpenW(st);
+    }).length;
+    // attention_count = File pile globally (bell / Home), not aged Hold
     return c.json({
       warranties: list,
       open_count: openCount,
-      attention_count: attentionCount,
+      attention_count: fileCount,
+      file_count: fileCount,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (/no such table/i.test(msg)) return c.json({ warranties: [], open_count: 0, attention_count: 0 });
+    if (/no such table/i.test(msg)) {
+      return c.json({ warranties: [], open_count: 0, attention_count: 0, file_count: 0 });
+    }
+    if (/no such column.*parked/i.test(msg)) {
+      return c.json({
+        warranties: [],
+        open_count: 0,
+        attention_count: 0,
+        file_count: 0,
+        error: "Run migration 079_warranty_parked.sql on D1",
+      }, 500);
+    }
     if (/no such column.*claim_submitted_by/i.test(msg)) {
       return c.json({
         warranties: [],
         open_count: 0,
         attention_count: 0,
+        file_count: 0,
         error: "Run migration 074_warranty_claim_submitted_by.sql on D1",
       }, 500);
     }
@@ -6786,6 +6811,24 @@ api.post("/warranties", async (c) => {
     }
     const id = r.meta.last_row_id;
 
+    // Johnstone / Solar Supply → Return pile (never File)
+    let landedReturn = false;
+    if (vendorDefaultsToReturn(vendorName)) {
+      try {
+        await c.env.DB.prepare(
+          `UPDATE warranty_claims
+           SET status = 'return_to_vendor', needs_vendor_return = 1, updated_at = datetime('now')
+           WHERE id = ?`
+        )
+          .bind(id)
+          .run();
+        landedReturn = true;
+        needsVendorReturn = true;
+      } catch {
+        /* keep dropped_off if update fails */
+      }
+    }
+
     // Learn nameplate OCR corrections (model / serial)
     if (ocrFeedback?.ocr && ocrFeedback?.final) {
       try {
@@ -6803,17 +6846,39 @@ api.post("/warranties", async (c) => {
       }
     }
 
-    const targets = await usersByRoles(c.env.DB, ["admin", "warehouse"]);
+    // Inbox: all warehouse + Chris Marroquin (Operations Manager)
+    const whIds = await usersByRoles(c.env.DB, ["warehouse"]);
+    const chrisIds = await chrisMarroquinUserIds(c.env.DB);
+    const targets = [...new Set([...whIds, ...chrisIds])];
+    const pileNote = landedReturn
+      ? isSolarSupplyVendor(vendorName)
+        ? " · RETURN pile (Solar Supply)"
+        : " · RETURN pile (Johnstone)"
+      : needsVendorReturn
+        ? " · NEEDS VENDOR RETURN"
+        : " · FILE pile";
     await notifyUsers(
       c.env.DB,
       targets,
       "warranty_dropoff",
       `Warranty drop-off ${logNumber}`,
       `WRITE ON BOX: ${logNumber} · ${partName} · Model ${modelNumber} · S/N ${serialNumber} · by ${user.display_name}` +
-        (needsVendorReturn ? " · NEEDS VENDOR RETURN" : "") +
+        pileNote +
         " · photo attached",
       { type: "warranty", id }
     );
+    // Best-effort SMS to Chris's cell only — Inbox is source of truth if A2P fails
+    if (smsConfigured(c.env)) {
+      try {
+        await sendSms(
+          c.env,
+          "3617791182",
+          shortSms(`TA warranty ${logNumber}: ${partName} by ${user.display_name}${pileNote}`)
+        );
+      } catch {
+        /* A2P / Twilio failure — Inbox only */
+      }
+    }
     await writeAudit(
       c.env.DB,
       user,
@@ -6850,6 +6915,11 @@ api.patch("/warranties/:id", async (c) => {
     rma_number?: string | null;
     credit_amount?: number | string | null;
     tracking_number?: string | null;
+    /** Park / Unpark File pile (required why-note when parking). */
+    parked?: boolean;
+    parked_reason?: string | null;
+    /** Solar Supply only: return received → Approved $0, invoice deleted. */
+    solar_invoice_deleted?: boolean;
   }>();
   const before = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`)
     .bind(id)
@@ -6860,6 +6930,8 @@ api.patch("/warranties/:id", async (c) => {
       notes: string | null;
       dropped_off_by_user_id: number | null;
       part_name: string;
+      vendor_name: string | null;
+      parked?: number | null;
     }>();
   if (!before) return c.json({ error: "Not found" }, 404);
 
@@ -6925,7 +6997,74 @@ api.patch("/warranties/:id", async (c) => {
     vals.push(n);
   }
 
+  // Park / Unpark — flag only; must not badge as File
+  if (body.parked !== undefined && canProcess) {
+    if (body.parked) {
+      const why = (body.parked_reason || body.append_note || "").toString().trim();
+      if (why.length < 3) {
+        return c.json(
+          { error: "Park requires a why-note (e.g. new purchase — do not file)." },
+          400
+        );
+      }
+      sets.push("parked = 1");
+      sets.push("parked_reason = ?");
+      vals.push(why);
+      sets.push("parked_at = datetime('now')");
+      sets.push("parked_by_user_id = ?");
+      vals.push(user.id);
+      // Also stamp note history
+      if (body.append_note === undefined) {
+        const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+        const who = (user.display_name || "Office").trim();
+        const block = `[${stamp} · ${who}]\nParked: ${why}`;
+        const prior = (before.notes || "").trim();
+        sets.push("notes = ?");
+        vals.push(prior ? `${prior}\n\n${block}` : block);
+      }
+    } else {
+      sets.push("parked = 0");
+      sets.push("parked_reason = NULL");
+      sets.push("parked_at = NULL");
+      sets.push("parked_by_user_id = NULL");
+    }
+  }
+
+  // Solar Supply: part received → invoice deleted (Approved $0). Never scrap. Not for Johnstone.
+  if (body.solar_invoice_deleted && canProcess) {
+    const vendor = before.vendor_name;
+    if (!isSolarSupplyVendor(vendor)) {
+      return c.json(
+        { error: "Invoice-deleted closeout is only for Solar Supply returns." },
+        400
+      );
+    }
+    const st = before.status;
+    if (st !== "return_to_vendor" && st !== "delivered") {
+      return c.json(
+        { error: "Solar invoice-deleted is only for Return-pile cards." },
+        400
+      );
+    }
+    sets.push("status = 'approved'");
+    sets.push("credit_amount = 0");
+    sets.push("processed_at = datetime('now')");
+    sets.push("processed_by_user_id = ?");
+    vals.push(user.id);
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const who = (user.display_name || "Office").trim();
+    const block = `[${stamp} · ${who}]\ninvoice deleted`;
+    const prior = (before.notes || "").trim();
+    if (body.append_note === undefined) {
+      sets.push("notes = ?");
+      vals.push(prior ? `${prior}\n\n${block}` : block);
+    }
+  }
+
   let newStatus = before.status;
+  if (body.solar_invoice_deleted && canProcess && isSolarSupplyVendor(before.vendor_name)) {
+    newStatus = "approved";
+  }
   if (body.status && canProcess) {
     // Normalize legacy client values only (return_to_vendor is a real open status)
     let next = body.status;
@@ -7002,6 +7141,21 @@ api.patch("/warranties/:id", async (c) => {
       );
     }
     throw e;
+  }
+
+  // Claim submitted → Hold pile: Inbox Chris (waiting credit — do not scrap)
+  if (newStatus === "claim_submitted" && before.status !== "claim_submitted") {
+    const chrisIds = await chrisMarroquinUserIds(c.env.DB);
+    if (chrisIds.length) {
+      await notifyUsers(
+        c.env.DB,
+        chrisIds,
+        "warranty_claim_submitted",
+        `Warranty ${before.log_number} · claim submitted (Hold)`,
+        `${before.part_name} · Waiting credit — do not scrap · by ${user.display_name}`,
+        { type: "warranty", id }
+      );
+    }
   }
 
   // Notify the tech who dropped it off — in-app + personal SMS (not all employees)
@@ -12165,14 +12319,15 @@ api.get("/inventory/part-pickups", async (c) => {
 
 /**
  * Create a pickup ticket — part description + address.
- * Office/admin may set contact_name (who to ask about the item) — stored in purchase_order.
+ * Optional contact_name (who to ask about the item) — stored in purchase_order.
+ * Blank contact always defaults to the logged-in user (every role).
  */
 api.post("/inventory/part-pickups", async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
     part_description?: string;
     job_address?: string;
-    /** Who to contact for questions (office/admin entry) */
+    /** Who to contact for questions */
     contact_name?: string | null;
     contact_user_id?: number | null;
     vendor_name?: string;
@@ -12215,7 +12370,6 @@ api.post("/inventory/part-pickups", async (c) => {
     );
   }
 
-  const isOfficeEntry = user.role === "admin" || user.role === "office" || user.role === "supervisor";
   let contactName = (body.contact_name || "").trim() || null;
   const contactUserId =
     body.contact_user_id != null && Number(body.contact_user_id) > 0
@@ -12229,17 +12383,7 @@ api.post("/inventory/part-pickups", async (c) => {
       .first<{ display_name: string }>();
     contactName = cu?.display_name?.trim() || null;
   }
-  // Office/admin logging for someone else — require a contact so warehouse knows who to call
-  if (isOfficeEntry && !contactName) {
-    return c.json(
-      {
-        error:
-          "Select who this is for (contact person) so warehouse knows who to ask about the part.",
-      },
-      400
-    );
-  }
-  // Field techs logging themselves — contact defaults to them
+  // Any role — blank contact defaults to the logged-in user (warehouse always has a name)
   if (!contactName) contactName = user.display_name || null;
 
   // Ready date: default today (pick now). Future date = stays on list but not on today's run.
