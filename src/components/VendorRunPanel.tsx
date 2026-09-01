@@ -3,7 +3,13 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
-type LineStatus = "pending" | "picked" | "not_ready" | "partial" | "cancelled";
+type LineStatus =
+  | "pending"
+  | "picked"
+  | "not_ready"
+  | "partial"
+  | "cancelled"
+  | "voided";
 
 interface TicketLine {
   id: number;
@@ -18,6 +24,10 @@ interface TicketLine {
   resolved_at?: string | null;
   resolved_by_user_id?: number | null;
   resolved_by_name?: string | null;
+  voided_reason?: string | null;
+  voided_at?: string | null;
+  voided_by_user_id?: number | null;
+  voided_by_name?: string | null;
 }
 
 interface Ticket {
@@ -96,10 +106,22 @@ interface StaffOption {
   role?: string;
 }
 
+/** Open Return-pile warranty to take back on the same vendor trip. */
+interface WarrantyReturnItem {
+  id: number;
+  log_number: string;
+  part_name: string;
+  service_address?: string | null;
+  street?: string;
+  vendor_name: string;
+  status: string;
+}
+
 interface VendorGroup {
   vendor_name: string;
   waiting: number;
   tickets: Ticket[];
+  warranty_returns?: WarrantyReturnItem[];
 }
 
 const LINE_STATUSES: { value: LineStatus; label: string }[] = [
@@ -107,6 +129,7 @@ const LINE_STATUSES: { value: LineStatus; label: string }[] = [
   { value: "not_ready", label: "Not ready" },
   { value: "partial", label: "Partial" },
   { value: "cancelled", label: "Not needed" },
+  { value: "voided", label: "Voided" },
   { value: "pending", label: "Still pending" },
 ];
 
@@ -126,6 +149,22 @@ function askNotNeededReason(label: string): string | null {
     const reason = raw.trim();
     if (reason.length >= 3) return reason;
     window.alert("Please type a short reason (at least a few words).");
+    draft = raw;
+  }
+}
+
+/** Void = leave the pickup queue (not delete). Reason required. */
+function askVoidReason(label: string): string | null {
+  let draft = "";
+  for (;;) {
+    const raw = window.prompt(
+      `Void this pickup item?\n\n${label}\n\nReason required — e.g. duplicate request, already on truck, entered by mistake.\n(This is not delete — it leaves the Waiting queue.)`,
+      draft
+    );
+    if (raw === null) return null;
+    const reason = raw.trim();
+    if (reason.length >= 3) return reason;
+    window.alert("Void cannot save with a blank reason. Type at least a few words.");
     draft = raw;
   }
 }
@@ -353,6 +392,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
    * All open vendor stops for the "Stops needed" / parts list.
    * Includes future-ready items (e.g. Carrier arrives later) so warehouse always sees them.
    * Ready-today lines sort first within each company.
+   * Also includes Return-pile warranties for the same vendor (take failed part back on that trip).
    */
   const runSheet = useMemo(() => {
     return groups
@@ -429,24 +469,27 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
           (s, l) => s + (typeof l.qty === "number" && Number.isFinite(l.qty) ? l.qty : 0),
           0
         );
+        const warrantyReturns = g.warranty_returns || [];
         return {
           vendor_name: g.vendor_name,
           waiting: lines.length,
           laterCount: laterLines.length,
           readyCount: readyLines.length,
           lines,
+          warrantyReturns,
           pieceCount,
           readyPieceCount,
-          allLater: lines.length > 0 && readyLines.length === 0,
+          allLater: lines.length > 0 && readyLines.length === 0 && warrantyReturns.length === 0,
         };
       })
-      .filter((g) => g.lines.length > 0)
+      .filter((g) => g.lines.length > 0 || g.warrantyReturns.length > 0)
       // Ready-today stops first, then later-only vendors (still listed)
       .sort(
         (a, b) =>
           Number(a.allLater) - Number(b.allLater) ||
           b.readyPieceCount - a.readyPieceCount ||
           b.pieceCount - a.pieceCount ||
+          b.warrantyReturns.length - a.warrantyReturns.length ||
           a.vendor_name.localeCompare(b.vendor_name)
       );
   }, [groups]);
@@ -586,6 +629,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   ) {
     const patchLine = (line: TicketLine): TicketLine => {
       if (line.id !== lineId) return line;
+      const nowIso = new Date().toISOString().slice(0, 19).replace("T", " ");
       return {
         ...line,
         status,
@@ -596,12 +640,20 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               : line.qty_requested
             : status === "partial"
               ? qtyReceived ?? line.qty_received
-              : status === "pending" || status === "not_ready" || status === "cancelled"
-                ? status === "cancelled"
-                  ? line.qty_received
-                  : null
+              : status === "pending" ||
+                  status === "not_ready" ||
+                  status === "cancelled" ||
+                  status === "voided"
+                ? null
                 : line.qty_received,
         notes: notes != null && notes !== "" ? notes : line.notes,
+        voided_reason: status === "voided" ? notes || line.voided_reason : line.voided_reason,
+        voided_at: status === "voided" ? nowIso : line.voided_at,
+        voided_by_name:
+          status === "voided" ? user?.display_name || line.voided_by_name : line.voided_by_name,
+        resolved_at: status === "pending" ? null : nowIso,
+        resolved_by_name:
+          status === "pending" ? null : user?.display_name || line.resolved_by_name,
       };
     };
     const openish = (s: string) => ["pending", "not_ready", "partial"].includes(s);
@@ -622,7 +674,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             const picked_lines = lines.filter((l) => l.status === "picked").length;
             let ticketStatus = t.status;
             if (lines.length && open_lines === 0) {
-              ticketStatus = lines.every((l) => l.status === "cancelled")
+              ticketStatus = lines.every(
+                (l) => l.status === "cancelled" || l.status === "voided"
+              )
                 ? "cancelled"
                 : "done";
             } else if (picked_lines > 0 || lines.some((l) => l.status === "partial")) {
@@ -667,7 +721,11 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
 
     setWaiting((w) => {
       // Recompute from groups after patch is messy in one step — load() will correct
-      return Math.max(0, w - (status === "picked" || status === "cancelled" ? 1 : 0));
+      return Math.max(
+        0,
+        w -
+          (status === "picked" || status === "cancelled" || status === "voided" ? 1 : 0)
+      );
     });
   }
 
@@ -717,7 +775,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               ? "Marked partial pickup — you’ll get a reminder to record where you placed the parts when back at the office."
               : status === "cancelled"
                 ? "Marked not needed — off the pickup list."
-                : "Updated."
+                : status === "voided"
+                  ? "Voided — left the pickup queue (not deleted)."
+                  : "Updated."
       );
       window.dispatchEvent(new CustomEvent("vendor-runs-changed"));
       if (status === "picked" || status === "partial") {
@@ -840,8 +900,13 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               {runSheetLaterStops > 0
                 ? ` · ${runSheetLaterStops} with later arrival`
                 : ""}
+              {runSheet.some((g) => g.warrantyReturns.length > 0)
+                ? ` · ${runSheet.reduce((s, g) => s + g.warrantyReturns.length, 0)} warranty return${
+                    runSheet.reduce((s, g) => s + g.warrantyReturns.length, 0) === 1 ? "" : "s"
+                  }`
+                : ""}
               {" "}
-              — all open pickups (later arrivals marked)
+              — pickups + take-backs on the same trip
             </p>
           </button>
           <div className="vendor-run-chips" role="list">
@@ -851,20 +916,35 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                 type="button"
                 className={`vendor-run-chip${
                   runSheetFocus === g.vendor_name || expanded[g.vendor_name] ? " is-open" : ""
-                }${g.allLater ? " is-later" : ""}`}
+                }${g.allLater ? " is-later" : ""}${
+                  g.warrantyReturns.length > 0 ? " has-warranty-return" : ""
+                }`}
                 onClick={() => openRunSheet(g.vendor_name)}
                 title={
                   g.allLater
                     ? `${g.vendor_name}: arrives later (still needs pickup)`
                     : `${g.pieceCount} piece(s) at ${g.vendor_name}${
                         g.laterCount ? ` · ${g.laterCount} later` : ""
+                      }${
+                        g.warrantyReturns.length
+                          ? ` · ${g.warrantyReturns.length} take back to vendor`
+                          : ""
                       }`
                 }
               >
                 <span className="vendor-run-chip-name">{g.vendor_name}</span>
                 <span className="vendor-run-chip-n">
-                  {g.pieceCount > 0 ? g.pieceCount : g.waiting}
+                  {g.pieceCount > 0
+                    ? g.pieceCount
+                    : g.waiting > 0
+                      ? g.waiting
+                      : g.warrantyReturns.length}
                 </span>
+                {g.warrantyReturns.length > 0 ? (
+                  <span className="vendor-run-chip-return">
+                    {g.warrantyReturns.length} return
+                  </span>
+                ) : null}
                 {g.allLater ? (
                   <span className="vendor-run-chip-later">later</span>
                 ) : g.laterCount > 0 ? (
@@ -906,8 +986,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                   )}
                 </p>
                 <p className="muted vendor-run-sheet-sub">
-                  Qty × part by company — ready today first; later arrivals stay listed so nothing
-                  is missed
+                  Qty × part by company — ready today first; warranty returns listed as take-backs
+                  on the same stop
                 </p>
               </div>
               <button type="button" className="btn secondary btn-sm" onClick={closeRunSheet}>
@@ -935,7 +1015,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                         }}
                       >
                         <span className="vendor-run-sheet-toc-name">{g.vendor_name}</span>
-                        <span className="vendor-run-sheet-toc-n">{g.pieceCount || g.lines.length}</span>
+                        <span className="vendor-run-sheet-toc-n">
+                          {(g.pieceCount || g.lines.length) + g.warrantyReturns.length}
+                        </span>
                       </a>
                     ))}
                   </nav>
@@ -957,12 +1039,47 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                       <span className="vendor-run-sheet-tally">
                         {g.pieceCount > 0
                           ? `${g.pieceCount} pc${g.pieceCount === 1 ? "" : "s"}`
-                          : `${g.lines.length} line${g.lines.length === 1 ? "" : "s"}`}
+                          : g.lines.length > 0
+                            ? `${g.lines.length} line${g.lines.length === 1 ? "" : "s"}`
+                            : null}
+                        {g.warrantyReturns.length > 0
+                          ? `${g.lines.length || g.pieceCount ? " · " : ""}${
+                              g.warrantyReturns.length
+                            } take back`
+                          : ""}
                         {g.laterCount > 0 && g.readyCount > 0
                           ? ` · ${g.laterCount} later`
                           : ""}
                       </span>
                     </header>
+                    {g.warrantyReturns.length > 0 ? (
+                      <ul className="vendor-run-sheet-parts vendor-run-sheet-warranty-returns">
+                        {g.warrantyReturns.map((w) => (
+                          <li
+                            key={`wr-${w.id}`}
+                            className="vendor-run-sheet-part is-warranty-return"
+                          >
+                            <span className="vendor-run-sheet-qty" title="Warranty return">
+                              ↩
+                            </span>
+                            <span className="vendor-run-sheet-detail">
+                              <strong className="vendor-run-sheet-name">
+                                {w.log_number}
+                                {w.street ? ` · ${w.street}` : ""}
+                              </strong>
+                              <span className="vendor-run-sheet-takeback">
+                                Take back to vendor
+                              </span>
+                              <span className="muted vendor-run-sheet-meta">
+                                {w.part_name || "Warranty part"}
+                                {w.status === "delivered" ? " · marked delivered" : ""}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {g.lines.length > 0 ? (
                     <ul className="vendor-run-sheet-parts">
                       {g.lines.map((l) => (
                         <li
@@ -1019,6 +1136,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                         </li>
                       ))}
                     </ul>
+                    ) : null}
                   </section>
                 ))}
 
@@ -1452,35 +1570,58 @@ function TicketCard({
                 </span>
               </li>
               {t.lines
-                .filter((l) => l.status !== "pending" || l.resolved_at || l.resolved_by_name)
+                .filter(
+                  (l) =>
+                    l.status !== "pending" ||
+                    l.resolved_at ||
+                    l.resolved_by_name ||
+                    l.voided_at
+                )
                 .map((l) => {
-                  const who = l.resolved_by_name || "Someone";
-                  const when = formatStamp(l.resolved_at);
+                  const who =
+                    l.status === "voided"
+                      ? l.voided_by_name || l.resolved_by_name || "Someone"
+                      : l.resolved_by_name || "Someone";
+                  const when = formatStamp(
+                    l.status === "voided" ? l.voided_at || l.resolved_at : l.resolved_at
+                  );
                   const what =
                     l.status === "picked"
                       ? "Picked up"
                       : l.status === "cancelled"
                         ? "Marked not needed"
-                        : l.status === "not_ready"
-                          ? "Marked not ready"
-                          : l.status === "partial"
-                            ? "Partial pickup"
-                            : statusLabel(l.status);
+                        : l.status === "voided"
+                          ? "Voided"
+                          : l.status === "not_ready"
+                            ? "Marked not ready"
+                            : l.status === "partial"
+                              ? "Partial pickup"
+                              : statusLabel(l.status);
                   const part =
                     (l.part_name || l.part_code || "").trim() || `Line ${l.line_no}`;
                   return (
-                    <li key={`act-${l.id}-${l.status}-${l.resolved_at || ""}`}>
+                    <li key={`act-${l.id}-${l.status}-${l.resolved_at || l.voided_at || ""}`}>
                       <span className="pp-activity-when">{when || "—"}</span>
                       <span className="pp-activity-what">
                         {what} by <strong>{who}</strong>
                         {l.qty_received != null ? ` · qty ${l.qty_received}` : ""}
                         {` · ${part}`}
                         {l.status === "cancelled" && l.notes ? ` · ${l.notes}` : ""}
+                        {l.status === "voided" && (l.voided_reason || l.notes)
+                          ? ` · ${l.voided_reason || l.notes}`
+                          : ""}
                       </span>
                     </li>
                   );
                 })}
-              {!t.lines.some((l) => l.status === "picked" || l.status === "cancelled" || l.status === "not_ready" || l.status === "partial") && (
+              {!t.lines.some(
+                (l) =>
+                  l.status === "picked" ||
+                  l.status === "cancelled" ||
+                  l.status === "voided" ||
+                  l.status === "not_ready" ||
+                  l.status === "partial"
+              ) && (
                 <li className="pp-activity-pending">
                   <span className="pp-activity-when">Now</span>
                   <span className="pp-activity-what muted">Waiting for warehouse pickup</span>
@@ -1565,7 +1706,10 @@ function TicketCard({
               </li>
             )}
             {t.lines.map((line) => {
-              const locked = line.status === "picked" || line.status === "cancelled";
+              const locked =
+                line.status === "picked" ||
+                line.status === "cancelled" ||
+                line.status === "voided";
               const label =
                 (line.part_name || line.part_code || "").trim() || `Line #${line.line_no}`;
               return (
@@ -1575,15 +1719,37 @@ function TicketCard({
                       {statusLabel(line.status)}
                       {line.qty_received != null ? ` · ${line.qty_received}` : ""}
                     </span>
-                    {locked && (line.resolved_by_name || line.resolved_at) ? (
+                    {locked &&
+                    (line.voided_by_name ||
+                      line.resolved_by_name ||
+                      line.voided_at ||
+                      line.resolved_at) ? (
                       <span className="muted pp-line-who">
-                        {line.resolved_by_name || "Someone"}
-                        {line.resolved_at ? ` · ${formatStamp(line.resolved_at)}` : ""}
+                        {line.status === "voided"
+                          ? line.voided_by_name || line.resolved_by_name || "Someone"
+                          : line.resolved_by_name || "Someone"}
+                        {line.status === "voided"
+                          ? line.voided_at
+                            ? ` · ${formatStamp(line.voided_at)}`
+                            : line.resolved_at
+                              ? ` · ${formatStamp(line.resolved_at)}`
+                              : ""
+                          : line.resolved_at
+                            ? ` · ${formatStamp(line.resolved_at)}`
+                            : ""}
                       </span>
                     ) : null}
                   </div>
                   {line.status === "cancelled" && line.notes ? (
                     <p className="pp-cancel-reason muted">Why: {line.notes}</p>
+                  ) : null}
+                  {line.status === "voided" ? (
+                    <p className="pp-void-reason muted">
+                      Voided
+                      {line.voided_reason || line.notes
+                        ? ` — ${line.voided_reason || line.notes}`
+                        : ""}
+                    </p>
                   ) : null}
                   {!locked && (
                     <div className="pp-line-actions">
@@ -1637,6 +1803,19 @@ function TicketCard({
                               Partial
                             </button>
                           </span>
+                          <button
+                            type="button"
+                            className="btn secondary btn-sm pp-void-btn"
+                            disabled={busy || resolvingId === line.id}
+                            title="Void leaves the pickup queue — reason required (not delete)"
+                            onClick={() => {
+                              const reason = askVoidReason(label);
+                              if (!reason) return;
+                              void onResolve(line.id, "voided", null, reason);
+                            }}
+                          >
+                            Void
+                          </button>
                         </>
                       )}
                       {canNotNeeded && (

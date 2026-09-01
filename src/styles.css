@@ -11720,40 +11720,52 @@ tr.row-low td {
   color: var(--muted);
 }
 
-/* Warranty part type-ahead + compressor checklist */
+/* Warranty part type-ahead — in document flow under the field (never overlays form) */
 .warranty-part-suggest-wrap {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 .warranty-part-suggest {
   list-style: none;
-  margin: 0.25rem 0 0;
-  padding: 0.25rem;
-  position: absolute;
-  z-index: 20;
-  left: 0;
-  right: 0;
-  background: var(--card, #fff);
-  border: 1px solid var(--line, #d8e0ea);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  max-height: 12rem;
-  overflow: auto;
+  margin: 0;
+  padding: 0.2rem 0 0;
+  position: static; /* push form down — do not cover fields below */
+  z-index: auto;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  max-height: none;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 .warranty-part-suggest-item {
   display: block;
   width: 100%;
   text-align: left;
-  border: 0;
-  background: transparent;
-  padding: 0.55rem 0.65rem;
-  border-radius: 8px;
+  border: 1px solid var(--line, #d8e0ea);
+  background: var(--card, #fff);
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
   font: inherit;
   color: inherit;
   cursor: pointer;
+  min-height: 2.5rem;
 }
 .warranty-part-suggest-item:hover,
 .warranty-part-suggest-item:focus {
   background: color-mix(in srgb, var(--accent, #2b6cb0) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent, #2b6cb0) 35%, var(--line, #d8e0ea));
+}
+.warranty-part-suggest-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
 }
 .warranty-compressor-box {
   margin-top: 0.85rem;
@@ -15317,7 +15329,7 @@ svg {
 
 .vendor-run-sheet-body {
   overflow: auto;
-  padding: 0.55rem 0.85rem 1rem;
+  padding: 0.55rem 0.85rem 1.35rem;
   flex: 1 1 auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -15330,11 +15342,10 @@ svg {
   margin: 0 0 0.85rem;
   padding: 0.15rem 0 0.55rem;
   border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: color-mix(in srgb, var(--surface, #1a2538) 96%, transparent);
-  backdrop-filter: blur(6px);
+  /* Not sticky — was floating over in-sheet Picked up buttons */
+  position: static;
+  z-index: auto;
+  background: transparent;
 }
 
 .vendor-run-sheet-toc-chip {
@@ -15510,9 +15521,10 @@ svg {
   font-weight: 750;
 }
 
-.vendor-run-summary {  position: sticky;
-  top: 0.35rem;
-  z-index: 5;
+.vendor-run-summary {
+  /* Not sticky — sticky strip was covering Picked up / form tap targets while scrolling */
+  position: static;
+  z-index: auto;
   margin-bottom: 0.75rem;
   padding: 0.65rem 0.75rem;
   background: var(--bg-elevated, #1e293b);
@@ -16027,13 +16039,14 @@ svg {
 
 .pp-ticket-row {
   display: flex;
-  align-items: center;
-  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.35rem 0.45rem;
   min-height: 2.35rem;
 }
 
 .pp-ticket-head {
-  flex: 1;
+  flex: 1 1 12rem;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -16046,6 +16059,8 @@ svg {
   line-height: 1.2;
   padding: 0.22rem 0.05rem;
   cursor: pointer;
+  position: relative;
+  z-index: 0;
 }
 
 .pp-ticket-main {
@@ -16102,19 +16117,24 @@ svg {
 }
 
 .pp-ticket-quick-actions {
-  flex-shrink: 0;
+  flex: 1 1 100%;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.15rem 0;
+  gap: 0.35rem;
+  padding: 0.15rem 0 0.25rem;
+  position: relative;
+  z-index: 2; /* above sticky summary — never sit under floating chrome */
+  pointer-events: auto;
 }
 
 .pp-ticket-quick-actions .btn-sm {
-  min-height: 1.85rem;
-  padding: 0.18rem 0.55rem;
-  font-size: 0.76rem;
+  min-height: 2.5rem;
+  min-width: 5.5rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.82rem;
   font-weight: 750;
   white-space: nowrap;
+  touch-action: manipulation;
 }
 
 .parts-dropoff-from-pickup {
@@ -16363,12 +16383,41 @@ svg {
   background: color-mix(in srgb, #ef4444 10%, var(--surface)) !important;
 }
 
+.pp-void-btn {
+  border-color: color-mix(in srgb, #a855f7 45%, var(--line)) !important;
+  color: #e9d5ff !important;
+  font-weight: 750;
+  background: color-mix(in srgb, #7c3aed 12%, var(--surface)) !important;
+  min-height: 2.5rem;
+}
+
+.pp-void-reason {
+  margin: 0.2rem 0 0.15rem;
+  font-size: 0.82rem;
+  line-height: 1.3;
+}
+
+.pp-status-pill.st-voided {
+  border-color: color-mix(in srgb, #a855f7 50%, var(--line));
+  color: #d8b4fe;
+}
+
 .vendor-run-sheet-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
-  margin-top: 0.35rem;
+  margin-top: 0.45rem;
   align-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.vendor-run-sheet-actions .btn-sm {
+  min-height: 2.5rem;
+  min-width: 5.5rem;
+  padding: 0.4rem 0.75rem;
+  font-weight: 750;
+  touch-action: manipulation;
 }
 
 /* Parts drop-off at shop — grouped by vendor for warehouse box labeling */
@@ -18337,7 +18386,7 @@ svg {
   text-align: right;
 }
 
-/* Warranty piles � lightbox + photo buttons */
+/* Warranty piles � lightbox + photo buttons */
 .warranty-lightbox {
   position: fixed;
   inset: 0;
@@ -18385,4 +18434,45 @@ svg {
   font-size: 0.85rem;
   font-weight: 600;
   margin-bottom: 0.25rem;
+}
+
+.warranty-closed-credit {
+  font-size: 1rem;
+  margin: 0.35rem 0 0.15rem;
+}
+
+/* Pickup run sheet — warranty Return-pile take-backs on the same vendor stop */
+.vendor-run-chip-return {
+  display: inline-block;
+  margin-left: 0.25rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.01em;
+  color: #fde68a;
+  background: color-mix(in srgb, #b45309 35%, var(--surface));
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, var(--line));
+}
+.vendor-run-chip.has-warranty-return {
+  border-color: color-mix(in srgb, #f59e0b 50%, var(--line));
+}
+.vendor-run-sheet-warranty-returns {
+  margin-bottom: 0.45rem;
+}
+.vendor-run-sheet-part.is-warranty-return {
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--line));
+  background: color-mix(in srgb, #b45309 12%, var(--surface));
+}
+.vendor-run-sheet-part.is-warranty-return .vendor-run-sheet-qty {
+  color: #fbbf24;
+  font-weight: 800;
+}
+.vendor-run-sheet-takeback {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.88rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #fcd34d;
 }

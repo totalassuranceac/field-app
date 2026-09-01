@@ -276,6 +276,8 @@ function requireRoles(roles: Role[]) {
   };
 }
 
+
+
 // ---------- Auth ----------
 app.get("/api/health", (c) =>
   c.json({
@@ -3539,6 +3541,20 @@ function canonicalizePartsStoreName(raw: string): string | null {
   if (k === "amazon" || k.startsWith("amazon ")) return "Amazon";
   if (k === "home depot" || k === "homedepot") return "Home Depot";
   if (k === "lowes" || k === "lowe s") return "Lowe's";
+  // ACES handles American Standard / Trane warranty returns in this shop
+  if (
+    k === "aces" ||
+    k.startsWith("aces ") ||
+    k === "ace" ||
+    k.includes("american standard") ||
+    k === "am standard" ||
+    k === "amstd" ||
+    k === "trane" ||
+    k.startsWith("trane ")
+  ) {
+    return "ACES";
+  }
+  if (k === "solar" || k === "solar supply" || k.startsWith("solar supply")) return "Solar Supply";
 
   // Soft title-case when the user typed all-lower or ALL CAPS (keeps intentional MixedCase)
   if (n === n.toLowerCase() || n === n.toUpperCase()) {
@@ -3549,6 +3565,14 @@ function canonicalizePartsStoreName(raw: string): string | null {
       .join(" ");
   }
   return n;
+}
+
+/** Street / short address for driver run sheet (first line-ish). */
+function shortServiceStreet(addr: string | null | undefined): string {
+  const raw = String(addr || "").trim();
+  if (!raw) return "";
+  const first = raw.split(/[\n,]/)[0]?.trim() || raw;
+  return first.slice(0, 80);
 }
 
 /**
@@ -6286,12 +6310,11 @@ api.get("/warranties", async (c) => {
         sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
       } else if (status === "parked") {
         sql += ` WHERE IFNULL(w.parked, 0) = 1`;
-      } else if (status === "rejected") {
-        sql += ` WHERE w.status = 'rejected'`;
+      } else if (status === "closed" || status === "rejected" || status === "decided") {
+        // Closed pile: done claims only (approved + rejected; legacy processed = approved)
+        sql += ` WHERE w.status IN ('approved','rejected','processed')`;
       } else if (status === "open") {
         sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
-      } else if (status === "decided" || status === "closed") {
-        sql += ` WHERE w.status IN ('approved','rejected','not_warranty')`;
       } else if (status) {
         const mapped =
           status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
@@ -6325,19 +6348,33 @@ api.get("/warranties", async (c) => {
       binds.push(like, like, like, like, like, like, like, like, like, like, like);
       if (compact && compact !== q) binds.push(`%${compact}%`);
     }
-    sql += ` ORDER BY
-      CASE w.status
-        WHEN 'dropped_off' THEN 0
-        WHEN 'claim_submitted' THEN 1
-        WHEN 'return_to_vendor' THEN 2
-        WHEN 'delivered' THEN 3
-        WHEN 'approved' THEN 4
-        WHEN 'rejected' THEN 5
-        WHEN 'not_warranty' THEN 6
-        ELSE 7
-      END,
-      w.dropped_off_at ASC
-      LIMIT 200`;
+    // Closed tab: Approved first, then Rejected. Other piles keep File→Hold→Return order.
+    if (status === "closed" || status === "rejected" || status === "decided") {
+      sql += ` ORDER BY
+        CASE w.status
+          WHEN 'approved' THEN 0
+          WHEN 'processed' THEN 0
+          WHEN 'rejected' THEN 1
+          ELSE 2
+        END,
+        w.processed_at DESC,
+        w.dropped_off_at DESC
+        LIMIT 200`;
+    } else {
+      sql += ` ORDER BY
+        CASE w.status
+          WHEN 'dropped_off' THEN 0
+          WHEN 'claim_submitted' THEN 1
+          WHEN 'return_to_vendor' THEN 2
+          WHEN 'delivered' THEN 3
+          WHEN 'approved' THEN 4
+          WHEN 'rejected' THEN 5
+          WHEN 'not_warranty' THEN 6
+          ELSE 7
+        END,
+        w.dropped_off_at ASC
+        LIMIT 200`;
+    }
     const rows = await c.env.DB.prepare(sql)
       .bind(...binds)
       .all();
@@ -12060,12 +12097,13 @@ async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): 
     ["pending", "not_ready", "partial"].includes(l.status)
   ).length;
   const picked = list.filter((l) => l.status === "picked").length;
-  const allCancelled =
-    list.length > 0 && list.every((l) => l.status === "cancelled");
+  const allDropped =
+    list.length > 0 &&
+    list.every((l) => l.status === "cancelled" || l.status === "voided");
   let status = "open";
   if (pending === 0) {
-    // All closed — fully cancelled tickets vs finished pickups
-    status = allCancelled ? "cancelled" : "done";
+    // All closed — fully cancelled/voided tickets vs finished pickups
+    status = allDropped ? "cancelled" : "done";
   } else if (picked > 0 || list.some((l) => l.status === "partial")) {
     status = "partial";
   }
@@ -12153,15 +12191,31 @@ api.get("/inventory/part-pickups", async (c) => {
       const tid = Number((t as { id: number }).id);
       const needed = (t as { needed_for_date?: string | null }).needed_for_date || null;
       const ready_to_pick = !needed || needed <= today;
-      let lines = await c.env.DB.prepare(
-        `SELECT l.*, ru.display_name as resolved_by_name
-         FROM part_pickup_ticket_lines l
-         LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
-         WHERE l.ticket_id = ?
-         ORDER BY l.line_no ASC, l.id ASC`
-      )
-        .bind(tid)
-        .all();
+      let lines: { results?: Record<string, unknown>[] } = { results: [] };
+      try {
+        lines = await c.env.DB.prepare(
+          `SELECT l.*, ru.display_name as resolved_by_name,
+                  vu.display_name as voided_by_name
+           FROM part_pickup_ticket_lines l
+           LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+           LEFT JOIN users vu ON vu.id = l.voided_by_user_id
+           WHERE l.ticket_id = ?
+           ORDER BY l.line_no ASC, l.id ASC`
+        )
+          .bind(tid)
+          .all();
+      } catch {
+        // Pre-080: no voided_by_user_id column
+        lines = await c.env.DB.prepare(
+          `SELECT l.*, ru.display_name as resolved_by_name
+           FROM part_pickup_ticket_lines l
+           LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+           WHERE l.ticket_id = ?
+           ORDER BY l.line_no ASC, l.id ASC`
+        )
+          .bind(tid)
+          .all();
+      }
       // Heal open tickets that somehow have zero lines — otherwise warehouse has no "Picked up" button
       const ticketStatus = String((t as { status?: string }).status || "");
       if (
@@ -12179,15 +12233,29 @@ api.get("/inventory/part-pickups", async (c) => {
           )
             .bind(tid, fallbackName.slice(0, 200))
             .run();
-          lines = await c.env.DB.prepare(
-            `SELECT l.*, ru.display_name as resolved_by_name
-             FROM part_pickup_ticket_lines l
-             LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
-             WHERE l.ticket_id = ?
-             ORDER BY l.line_no ASC, l.id ASC`
-          )
-            .bind(tid)
-            .all();
+          try {
+            lines = await c.env.DB.prepare(
+              `SELECT l.*, ru.display_name as resolved_by_name,
+                      vu.display_name as voided_by_name
+               FROM part_pickup_ticket_lines l
+               LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+               LEFT JOIN users vu ON vu.id = l.voided_by_user_id
+               WHERE l.ticket_id = ?
+               ORDER BY l.line_no ASC, l.id ASC`
+            )
+              .bind(tid)
+              .all();
+          } catch {
+            lines = await c.env.DB.prepare(
+              `SELECT l.*, ru.display_name as resolved_by_name
+               FROM part_pickup_ticket_lines l
+               LEFT JOIN users ru ON ru.id = l.resolved_by_user_id
+               WHERE l.ticket_id = ?
+               ORDER BY l.line_no ASC, l.id ASC`
+            )
+              .bind(tid)
+              .all();
+          }
         } catch {
           /* ignore heal failure */
         }
@@ -12267,6 +12335,128 @@ api.get("/inventory/part-pickups", async (c) => {
       }
     }
     const historyMode = status === "done" || status === "history";
+    type WarrantyReturnRow = {
+      id: number;
+      log_number: string;
+      part_name: string;
+      service_address: string | null;
+      street: string;
+      vendor_name: string;
+      status: string;
+      needs_vendor_return: number;
+    };
+
+    /** Open Return-pile warranties to take back on the same vendor trip. */
+    const warrantyReturnsByKey = new Map<string, WarrantyReturnRow[]>();
+    if (!historyMode) {
+      try {
+        const wr = await c.env.DB.prepare(
+          `SELECT id, log_number, part_name, service_address, vendor_name, status,
+                  IFNULL(needs_vendor_return, 0) as needs_vendor_return
+           FROM warranty_claims
+           WHERE (
+             status IN ('return_to_vendor', 'delivered')
+             OR (
+               IFNULL(needs_vendor_return, 0) = 1
+               AND status IN ('dropped_off', 'claim_submitted', 'return_to_vendor', 'delivered')
+             )
+           )
+           AND IFNULL(parked, 0) = 0
+           ORDER BY dropped_off_at ASC
+           LIMIT 200`
+        ).all<{
+          id: number;
+          log_number: string;
+          part_name: string;
+          service_address: string | null;
+          vendor_name: string | null;
+          status: string;
+          needs_vendor_return: number;
+        }>();
+        for (const row of wr.results || []) {
+          const rawVendor = String(row.vendor_name || "").trim();
+          // Skip unknown vendor — cannot place on a trip stop
+          if (!rawVendor) continue;
+          // Johnstone/Solar "still waiting" via needs_vendor_return; others only on Return pile
+          const st = String(row.status || "");
+          const onReturnPile = st === "return_to_vendor" || st === "delivered";
+          const johnstoneOrSolarWaiting =
+            Number(row.needs_vendor_return) === 1 && vendorDefaultsToReturn(rawVendor);
+          if (!onReturnPile && !johnstoneOrSolarWaiting) continue;
+
+          const display = canonicalizePartsStoreName(rawVendor) || rawVendor;
+          const key = vendorNameKey(display) || vendorNameKey(rawVendor) || "unknown";
+          const item: WarrantyReturnRow = {
+            id: Number(row.id),
+            log_number: String(row.log_number),
+            part_name: String(row.part_name || "Warranty part"),
+            service_address: row.service_address || null,
+            street: shortServiceStreet(row.service_address),
+            vendor_name: display,
+            status: st,
+            needs_vendor_return: Number(row.needs_vendor_return) || 0,
+          };
+          const listForVendor = warrantyReturnsByKey.get(key) || [];
+          listForVendor.push(item);
+          warrantyReturnsByKey.set(key, listForVendor);
+          // Ensure a vendor chip exists even when there is no pickup ticket
+          if (!byVendor.has(key)) {
+            byVendor.set(key, { vendor_name: display, tickets: [] });
+          } else {
+            const g = byVendor.get(key)!;
+            g.vendor_name = preferVendorSpelling(g.vendor_name, display);
+          }
+        }
+      } catch (e) {
+        // parked column missing (pre-079) — retry without parked filter
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/no such column.*parked/i.test(msg)) {
+          try {
+            const wr = await c.env.DB.prepare(
+              `SELECT id, log_number, part_name, service_address, vendor_name, status,
+                      IFNULL(needs_vendor_return, 0) as needs_vendor_return
+               FROM warranty_claims
+               WHERE status IN ('return_to_vendor', 'delivered')
+               ORDER BY dropped_off_at ASC
+               LIMIT 200`
+            ).all<{
+              id: number;
+              log_number: string;
+              part_name: string;
+              service_address: string | null;
+              vendor_name: string | null;
+              status: string;
+              needs_vendor_return: number;
+            }>();
+            for (const row of wr.results || []) {
+              const rawVendor = String(row.vendor_name || "").trim();
+              if (!rawVendor) continue;
+              const display = canonicalizePartsStoreName(rawVendor) || rawVendor;
+              const key = vendorNameKey(display) || vendorNameKey(rawVendor) || "unknown";
+              const item: WarrantyReturnRow = {
+                id: Number(row.id),
+                log_number: String(row.log_number),
+                part_name: String(row.part_name || "Warranty part"),
+                service_address: row.service_address || null,
+                street: shortServiceStreet(row.service_address),
+                vendor_name: display,
+                status: String(row.status || ""),
+                needs_vendor_return: Number(row.needs_vendor_return) || 0,
+              };
+              const listForVendor = warrantyReturnsByKey.get(key) || [];
+              listForVendor.push(item);
+              warrantyReturnsByKey.set(key, listForVendor);
+              if (!byVendor.has(key)) {
+                byVendor.set(key, { vendor_name: display, tickets: [] });
+              }
+            }
+          } catch {
+            /* warranties optional for pickup sheet */
+          }
+        }
+      }
+    }
+
     const vendors = [...byVendor.values()]
       .map((g) => {
         const tickets = [...g.tickets].sort((a, b) => {
@@ -12278,6 +12468,11 @@ api.get("/inventory/part-pickups", async (c) => {
           return Number((b as { id: number }).id) - Number((a as { id: number }).id);
         });
         const latestMs = tickets.reduce((m, t) => Math.max(m, ticketActivityMs(t)), 0);
+        const vKey =
+          vendorNameKey(canonicalizePartsStoreName(g.vendor_name) || g.vendor_name) ||
+          vendorNameKey(g.vendor_name) ||
+          "unknown";
+        const warranty_returns = warrantyReturnsByKey.get(vKey) || [];
         return {
           vendor_name: g.vendor_name,
           waiting: tickets.reduce(
@@ -12285,9 +12480,11 @@ api.get("/inventory/part-pickups", async (c) => {
             0
           ),
           tickets,
+          warranty_returns,
           _latestMs: latestMs,
         };
       })
+      .filter((g) => historyMode || g.tickets.length > 0 || (g.warranty_returns?.length || 0) > 0)
       .sort((a, b) => {
         if (historyMode) return (b._latestMs || 0) - (a._latestMs || 0);
         return a.vendor_name.localeCompare(b.vendor_name, undefined, { sensitivity: "base" });
@@ -12636,9 +12833,14 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     receive_stock?: boolean;
   }>();
   const status = String(body.status || "").trim();
-  if (!["picked", "not_ready", "partial", "cancelled", "pending"].includes(status)) {
+  if (
+    !["picked", "not_ready", "partial", "cancelled", "voided", "pending"].includes(status)
+  ) {
     return c.json(
-      { error: "Status must be picked, not_ready, partial, cancelled, or pending" },
+      {
+        error:
+          "Status must be picked, not_ready, partial, cancelled, voided, or pending",
+      },
       400
     );
   }
@@ -12646,16 +12848,25 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     return c.json(
       {
         error:
-          "Field can mark parts as Not needed only. Warehouse marks picked / not ready at the counter.",
+          "Field can mark parts as Not needed only. Warehouse marks picked / not ready / void at the counter.",
       },
       403
     );
+  }
+  if (status === "voided" && !canCounter) {
+    return c.json({ error: "Only warehouse / office can void a pickup item" }, 403);
   }
 
   const notesIn = body.notes != null ? String(body.notes).trim() : "";
   if (status === "cancelled" && notesIn.length < 3) {
     return c.json(
       { error: "Explain why this part is not needed (job cancelled, wrong part, etc.)" },
+      400
+    );
+  }
+  if (status === "voided" && notesIn.length < 3) {
+    return c.json(
+      { error: "Void requires a reason — cannot void with a blank reason." },
       400
     );
   }
@@ -12693,29 +12904,67 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       }
       qtyRecv = Number(body.qty_received);
       if (qtyRecv < 0) return c.json({ error: "Received qty cannot be negative" }, 400);
-    } else if (status === "pending" || status === "not_ready" || status === "cancelled") {
+    } else if (
+      status === "pending" ||
+      status === "not_ready" ||
+      status === "cancelled" ||
+      status === "voided"
+    ) {
       qtyRecv = null;
     }
 
-    await c.env.DB.prepare(
-      `UPDATE part_pickup_ticket_lines SET
-         status = ?,
-         qty_received = ?,
-         notes = COALESCE(?, notes),
-         resolved_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
-         resolved_by_user_id = CASE WHEN ? = 'pending' THEN NULL ELSE ? END
-       WHERE id = ?`
-    )
-      .bind(
-        status,
-        qtyRecv,
-        notesIn || null,
-        status,
-        status,
-        user.id,
-        lineId
+    try {
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_ticket_lines SET
+           status = ?,
+           qty_received = ?,
+           notes = COALESCE(?, notes),
+           resolved_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+           resolved_by_user_id = CASE WHEN ? = 'pending' THEN NULL ELSE ? END,
+           voided_reason = CASE WHEN ? = 'voided' THEN ? ELSE voided_reason END,
+           voided_at = CASE WHEN ? = 'voided' THEN datetime('now') ELSE voided_at END,
+           voided_by_user_id = CASE WHEN ? = 'voided' THEN ? ELSE voided_by_user_id END
+         WHERE id = ?`
       )
-      .run();
+        .bind(
+          status,
+          qtyRecv,
+          notesIn || null,
+          status,
+          status,
+          user.id,
+          status,
+          notesIn || null,
+          status,
+          status,
+          user.id,
+          lineId
+        )
+        .run();
+    } catch (colErr) {
+      const msg = colErr instanceof Error ? colErr.message : String(colErr);
+      if (status === "voided" && /no such column|CHECK|constraint/i.test(msg)) {
+        return c.json(
+          {
+            error:
+              "Run migration 080_part_pickup_voided.sql on D1 before voiding pickup items.",
+          },
+          500
+        );
+      }
+      // Fallback without void columns (pre-080)
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_ticket_lines SET
+           status = ?,
+           qty_received = ?,
+           notes = COALESCE(?, notes),
+           resolved_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+           resolved_by_user_id = CASE WHEN ? = 'pending' THEN NULL ELSE ? END
+         WHERE id = ?`
+      )
+        .bind(status, qtyRecv, notesIn || null, status, status, user.id, lineId)
+        .run();
+    }
 
     // Optional stock receive when fully or partially picked and catalog-linked
     if (
@@ -12753,13 +13002,15 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     const statusLabel =
       status === "cancelled"
         ? "Not needed"
-        : status === "not_ready"
-          ? "Not ready"
-          : status === "picked"
-            ? "Picked up"
-            : status === "partial"
-              ? "Partial"
-              : status.replace("_", " ");
+        : status === "voided"
+          ? "Voided"
+          : status === "not_ready"
+            ? "Not ready"
+            : status === "picked"
+              ? "Picked up"
+              : status === "partial"
+                ? "Partial"
+                : status.replace("_", " ");
 
     await writeAudit(
       c.env.DB,

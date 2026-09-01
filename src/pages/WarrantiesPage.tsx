@@ -19,7 +19,7 @@ import {
 /**
  * Shop piles:
  * File (dropped_off, not parked) → Hold (claim_submitted, waiting credit)
- * Return (return_to_vendor / delivered) · Parked · Rejected
+ * Return (return_to_vendor / delivered) · Parked · Closed (approved + rejected)
  * Solar Supply closeout = invoice deleted (Approved $0). Never scrap Solar.
  */
 type WStatus =
@@ -31,7 +31,7 @@ type WStatus =
   | "rejected"
   | "not_warranty";
 
-type PileFilter = "file" | "hold" | "return" | "parked" | "rejected";
+type PileFilter = "file" | "hold" | "return" | "parked" | "closed";
 
 interface Warranty {
   id: number;
@@ -239,7 +239,7 @@ export function WarrantiesPage() {
     return [...new Set(names)];
   }, [list]);
   const partSuggestions = useMemo(
-    () => suggestWarrantyParts(partName, learnedPartNames, 6),
+    () => suggestWarrantyParts(partName, learnedPartNames, 8),
     [partName, learnedPartNames]
   );
   const [ocrHints, setOcrHints] = useState<OcrHints | null>(null);
@@ -794,8 +794,8 @@ export function WarrantiesPage() {
           <p>
             Piles: <strong>File</strong> (file the claim) · <strong>Hold</strong> (waiting on
             vendor — do not scrap) · <strong>Return</strong> (Johnstone / Solar / send-back) ·{" "}
-            <strong>Parked</strong> (do not file) · <strong>Rejected</strong>. Badge / Home count ={" "}
-            File only
+            <strong>Parked</strong> (do not file) · <strong>Closed</strong> (approved + rejected).
+            Badge / Home count = File only
             {attentionCount > 0 ? ` · ${attentionCount} to file` : ""}. ACES = email Victoria (never
             portal); Goodman/Daikin = Warranty Express; Lennox = LennoxPros; Ferguson = Ferguson.com.
           </p>
@@ -949,29 +949,36 @@ export function WarrantiesPage() {
                     setPartSuggestOpen(true);
                   }}
                   onFocus={() => setPartSuggestOpen(true)}
-                  onBlur={() => window.setTimeout(() => setPartSuggestOpen(false), 180)}
+                  onBlur={() => window.setTimeout(() => setPartSuggestOpen(false), 200)}
                   required
-                  placeholder="Start typing — e.g. comp → Compressor"
+                  placeholder="Keep typing — e.g. motor → Blower motor"
                   autoComplete="off"
+                  aria-autocomplete="list"
+                  aria-expanded={partSuggestOpen && partSuggestions.length > 0}
                 />
                 {partSuggestOpen && partSuggestions.length > 0 ? (
-                  <ul className="warranty-part-suggest" role="listbox">
-                    {partSuggestions.map((s) => (
-                      <li key={s}>
-                        <button
-                          type="button"
-                          className="warranty-part-suggest-item"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setPartName(s);
-                            setPartSuggestOpen(false);
-                          }}
-                        >
-                          {s}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    <p className="warranty-part-suggest-hint">
+                      Suggestions — tap one or keep typing (not required)
+                    </p>
+                    <ul className="warranty-part-suggest" role="listbox">
+                      {partSuggestions.map((s) => (
+                        <li key={s} role="option">
+                          <button
+                            type="button"
+                            className="warranty-part-suggest-item"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setPartName(s);
+                              setPartSuggestOpen(false);
+                            }}
+                          >
+                            {s}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 ) : null}
               </label>
               <label>
@@ -1160,7 +1167,7 @@ export function WarrantiesPage() {
             ["hold", "Hold"],
             ["return", "Return"],
             ["parked", "Parked"],
-            ["rejected", "Rejected"],
+            ["closed", "Closed"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -1441,9 +1448,19 @@ export function WarrantiesPage() {
                 <div className="muted" style={{ fontSize: "0.82rem" }}>
                   {w.rma_number ? `RMA ${w.rma_number}` : ""}
                   {w.tracking_number ? ` · Track ${w.tracking_number}` : ""}
-                  {w.credit_amount != null ? ` · Credit $${Number(w.credit_amount).toFixed(2)}` : ""}
+                  {w.credit_amount != null ? (
+                    <>
+                      {" · "}
+                      <strong>Credit ${Number(w.credit_amount).toFixed(2)}</strong>
+                    </>
+                  ) : null}
                 </div>
               )}
+              {filter === "closed" && w.credit_amount != null ? (
+                <div className="warranty-closed-credit">
+                  Credit <strong>${Number(w.credit_amount).toFixed(2)}</strong>
+                </div>
+              ) : null}
               {canProcess && (
                 <div className="log-item-actions warranty-actions">
                   {parked ? (
@@ -1579,15 +1596,27 @@ export function WarrantiesPage() {
           filter === "file"
             ? "File pile clear — nothing waiting to file."
             : filter === "hold"
-              ? "No claims waiting on credit."
+              ? "No claims waiting on the vendor."
               : filter === "return"
                 ? "No returns in progress."
                 : filter === "parked"
                   ? "Nothing parked."
-                  : "No rejected claims.";
+                  : "No closed claims yet.";
+        // Closed: Approved first, then Rejected (server also sorts; keep client stable)
+        const rows =
+          filter === "closed"
+            ? [...list].sort((a, b) => {
+                const sa = normalizeStatus(String(a.status));
+                const sb = normalizeStatus(String(b.status));
+                const rank = (s: WStatus) => (s === "approved" ? 0 : s === "rejected" ? 1 : 2);
+                const d = rank(sa) - rank(sb);
+                if (d !== 0) return d;
+                return String(b.processed_at || "").localeCompare(String(a.processed_at || ""));
+              })
+            : list;
         return (
           <LogList className="warranty-list" empty={emptyMsg}>
-            {list.map(renderWarrantyItem)}
+            {rows.map(renderWarrantyItem)}
           </LogList>
         );
       })()}

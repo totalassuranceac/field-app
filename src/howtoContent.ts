@@ -524,7 +524,8 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     path: "/part-pickup",
     steps: [
       "Open Part pickup request under Warehouse.",
-      "Enter the store / vendor (Gemaire, Johnstone, etc.).",
+      "Enter the store / vendor (Gemaire, Johnstone, ACES, etc.).",
+      "On the pickup run sheet, each vendor also lists Return-pile warranties for that same store (log # · street · Take back to vendor) so the driver brings the failed part on that trip.",
       "Describe the part and the address it’s needed for.",
       "Office/admin: also pick the contact person if logging for someone else.",
       "Submit — warehouse sees open requests by store and marks them picked up.",
@@ -574,7 +575,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     roles: ["warehouse", "admin", "office", "mechanic"],
     path: "/warranties",
     steps: [
-      "Open Warranties — tabs are File | Hold | Return | Parked | Rejected (default File).",
+      "Open Warranties — tabs are File | Hold | Return | Parked | Closed (default File).",
       "File = dropped off, not parked — badge / Home count is this pile only.",
       "File the claim the vendor’s way (see Warranty filing by vendor), then tap Claim submitted → Hold.",
       "Hold = claim submitted, waiting on the vendor — do NOT scrap Hold parts (we can lose credit if they ask for a return).",

@@ -617,7 +617,8 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
     /* optional */
   }
 
-  // Vendor / store part pickup tickets still open (Waiting list)
+  // Vendor / store part pickup tickets still open (Waiting list).
+  // Weekday warehouse check: skip voided (and cancelled) — only pending/not_ready/partial.
   try {
     const tickets = await db
       .prepare(
