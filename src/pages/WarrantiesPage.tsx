@@ -108,6 +108,74 @@ function isJohnstone(name: string | null | undefined): boolean {
   return n === "johnstone" || n.startsWith("johnstone ") || /\bjohnstone\b/.test(n);
 }
 
+/** Short street for warehouse walk sheet. */
+function shortStreet(addr: string | null | undefined): string {
+  const raw = String(addr || "").trim();
+  if (!raw) return "—";
+  return (raw.split(/[\n,]/)[0] || raw).trim().slice(0, 60);
+}
+
+function notesSuggestReturn(notes: string | null | undefined): boolean {
+  const n = String(notes || "").toLowerCase();
+  if (!n) return false;
+  return (
+    /\breturn\b/.test(n) ||
+    /\bsend[\s-]?back\b/.test(n) ||
+    /\bsend it back\b/.test(n) ||
+    /\bdelivered for credit\b/.test(n) ||
+    /\btake back\b/.test(n) ||
+    /\bfor credit\b/.test(n)
+  );
+}
+
+/** Sort key so W0826-004 < W0826-014 < W0926-001 */
+function logNumberSortKey(log: string | null | undefined): string {
+  const raw = String(log || "").trim().toUpperCase();
+  const m = raw.match(/^W?(\d{2})(\d{2})-?(\d+)$/i) || raw.match(/^W(\d+)-(\d+)$/i);
+  if (m && m.length >= 4 && m[3] != null) {
+    // WMMYY-NNN style: year-month + seq
+    return `${m[1]}${m[2]}-${String(m[3]).padStart(4, "0")}`;
+  }
+  if (m && m.length >= 3) {
+    return `${String(m[1]).padStart(4, "0")}-${String(m[2]).padStart(4, "0")}`;
+  }
+  return raw;
+}
+
+/** Filed? No = File pile / not submitted. Yes = Hold or Closed (claim already in). */
+function filedLabel(w: Warranty): "Yes" | "No" {
+  const st = normalizeStatus(String(w.status));
+  if (st === "dropped_off") return "No";
+  if (st === "claim_submitted" || st === "approved" || st === "rejected") return "Yes";
+  // Return pile: past drop-off into send-back workflow
+  if (st === "return_to_vendor" || st === "delivered") return "Yes";
+  return "No";
+}
+
+/**
+ * Warehouse box action.
+ * SAVE = File only (not filed) / Parked.
+ * HOLD = claim submitted waiting credit, or rejected (filed, no toss).
+ * TOSS = approved (credit $ not required).
+ * RETURN = Return pile / Johnstone / Solar / send-back notes.
+ */
+function boxDisposition(w: Warranty): "TOSS" | "RETURN" | "SAVE" | "HOLD" {
+  const st = normalizeStatus(String(w.status));
+  const parked = !!w.parked;
+
+  // Return first — never toss send-backs
+  if (st === "return_to_vendor" || st === "delivered") return "RETURN";
+  if (isJohnstone(w.vendor_name) || isSolarSupply(w.vendor_name)) return "RETURN";
+  if (notesSuggestReturn(w.notes)) return "RETURN";
+
+  if (parked) return "SAVE";
+  if (st === "dropped_off") return "SAVE";
+  if (st === "claim_submitted") return "HOLD";
+  if (st === "rejected") return "HOLD";
+  if (st === "approved") return "TOSS";
+  return "SAVE";
+}
+
 const OPEN_STATUSES: WStatus[] = [
   "dropped_off",
   "claim_submitted",
@@ -245,6 +313,9 @@ export function WarrantiesPage() {
   const [ocrHints, setOcrHints] = useState<OcrHints | null>(null);
   /** After drop-off: show log # to write on the box */
   const [writeOnBox, setWriteOnBox] = useState<string | null>(null);
+  /** Print sheet: last 10 Closed claims for warehouse box pull */
+  const [processedPrintRows, setProcessedPrintRows] = useState<Warranty[]>([]);
+  const [processedPrintBusy, setProcessedPrintBusy] = useState(false);
 
   async function load() {
     const params = new URLSearchParams();
@@ -786,9 +857,75 @@ export function WarrantiesPage() {
     }
   }
 
+  async function printWarehouseList() {
+    setProcessedPrintBusy(true);
+    setError("");
+    try {
+      const [openRes, closedRes] = await Promise.all([
+        api<{ warranties: Warranty[] }>("/warranties?status=open"),
+        api<{ warranties: Warranty[] }>("/warranties?status=closed"),
+      ]);
+
+      // File + Hold + Return (exclude Parked — stay on shelf intentionally)
+      const openRows = (openRes.warranties || []).filter((w) => {
+        if (w.parked) return false;
+        const st = normalizeStatus(String(w.status));
+        return (
+          st === "dropped_off" ||
+          st === "claim_submitted" ||
+          st === "return_to_vendor" ||
+          st === "delivered"
+        );
+      });
+
+      // Newest Closed first, cap 10 so the sheet stays short
+      const closedRows = (closedRes.warranties || [])
+        .filter((w) => {
+          const st = normalizeStatus(String(w.status));
+          return st === "approved" || st === "rejected";
+        })
+        .sort((a, b) =>
+          String(b.processed_at || "").localeCompare(String(a.processed_at || ""))
+        )
+        .slice(0, 10);
+
+      const byId = new Map<number, Warranty>();
+      for (const w of [...openRows, ...closedRows]) byId.set(w.id, w);
+      const sheet = [...byId.values()].sort((a, b) =>
+        logNumberSortKey(a.log_number).localeCompare(logNumberSortKey(b.log_number))
+      );
+
+      if (!sheet.length) {
+        setError("No warranty boxes to print (File / Hold / Return / recent Closed).");
+        return;
+      }
+      setProcessedPrintRows(sheet);
+      document.body.classList.add("print-warranty-processed");
+      window.setTimeout(() => window.print(), 80);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load warranties for print");
+    } finally {
+      setProcessedPrintBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    function onAfterPrint() {
+      document.body.classList.remove("print-warranty-processed");
+    }
+    window.addEventListener("afterprint", onAfterPrint);
+    return () => {
+      window.removeEventListener("afterprint", onAfterPrint);
+      document.body.classList.remove("print-warranty-processed");
+    };
+  }, []);
+
+  const canPrintProcessed =
+    user?.role === "admin" || user?.role === "office" || user?.role === "warehouse";
+
   return (
     <div className="warranty-page">
-      <div className="page-header">
+      <div className="page-header no-print">
         <div>
           <h1>Warranties</h1>
           <p>
@@ -800,6 +937,19 @@ export function WarrantiesPage() {
             portal); Goodman/Daikin = Warranty Express; Lennox = LennoxPros; Ferguson = Ferguson.com.
           </p>
         </div>
+        {canPrintProcessed ? (
+          <div className="toolbar">
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={processedPrintBusy}
+              onClick={() => void printWarehouseList()}
+              title="Sorted warehouse walk sheet — File, Hold, Return + recent Closed"
+            >
+              {processedPrintBusy ? "Loading…" : "Print warehouse list"}
+            </button>
+          </div>
+        ) : null}
       </div>
       {lightboxSrc ? (
         <div
@@ -1235,7 +1385,7 @@ export function WarrantiesPage() {
             <LogItem
               key={w.id}
               tone={tone}
-              defaultOpen={filter === "file"}
+              defaultOpen={false}
               summary={
                 <>
                   <strong className="warranty-log">{w.log_number}</strong>
@@ -1615,11 +1765,66 @@ export function WarrantiesPage() {
               })
             : list;
         return (
-          <LogList className="warranty-list" empty={emptyMsg}>
+          <LogList className="warranty-list no-print" empty={emptyMsg}>
             {rows.map(renderWarrantyItem)}
           </LogList>
         );
       })()}
+
+      {/* Print-only: warehouse walk list sorted by log # */}
+      <div className="warranty-processed-print" aria-hidden={processedPrintRows.length === 0}>
+        <header className="warranty-processed-print-head">
+          <h1>Total Assurance — Warranty boxes</h1>
+          <p className="warranty-processed-print-meta">
+            Printed{" "}
+            {new Date().toLocaleString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </p>
+          <p className="warranty-processed-print-warn">
+            SAVE = not filed. HOLD = submitted, waiting credit. RETURN = send back. TOSS =
+            approved, box can go.
+          </p>
+        </header>
+        {!processedPrintRows.length ? (
+          <p className="muted">Nothing loaded for print.</p>
+        ) : (
+          <table className="warranty-processed-print-table">
+            <thead>
+              <tr>
+                <th>Log #</th>
+                <th>Street</th>
+                <th>Part</th>
+                <th>Vendor</th>
+                <th>Filed?</th>
+                <th>Box</th>
+              </tr>
+            </thead>
+            <tbody>
+              {processedPrintRows.map((w) => {
+                const action = boxDisposition(w);
+                return (
+                  <tr key={w.id} className={`warranty-box-action-${action.toLowerCase()}`}>
+                    <td className="warranty-print-log">{w.log_number}</td>
+                    <td>{shortStreet(w.service_address)}</td>
+                    <td>{w.part_name || "—"}</td>
+                    <td>{w.vendor_name?.trim() || "—"}</td>
+                    <td className="warranty-print-filed">{filedLabel(w)}</td>
+                    <td className="warranty-print-action">
+                      <strong>{action}</strong>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <p className="warranty-processed-print-legend">
+          Sorted by log # · File + Hold + Return + up to 10 newest Closed · Never TOSS File / HOLD /
+          Parked / Return / Johnstone / Solar
+        </p>
+      </div>
     </div>
   );
 }

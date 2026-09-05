@@ -20,6 +20,13 @@ type PersonSummary = {
   already_deducted_for_week?: boolean;
   week_deducted_amount?: number | null;
   week_deducted_at?: string | null;
+  /** Saved skip for this pay Friday (uncheck) — loan still open */
+  skipped_this_week?: boolean;
+};
+
+type PayrollSkipPerson = {
+  person_id: number;
+  display_name: string;
 };
 
 type SelectedWeekStatus = {
@@ -218,8 +225,12 @@ export function ToolLoanLedgerPage() {
   const [weekDeductAmounts, setWeekDeductAmounts] = useState<Record<number, string>>(
     {}
   );
-  /** When false, that person is skipped by the bulk button. */
+  /** When false, that person is skipped by the bulk button / removed from this Friday's report. */
   const [weekInclude, setWeekInclude] = useState<Record<number, boolean>>({});
+  /** Persisted skips for the selected pay Friday (person_id → name). */
+  const [weekSkips, setWeekSkips] = useState<PayrollSkipPerson[]>([]);
+  /** Session-only hide for roster $0 rows with no person_id (key → true means hidden). */
+  const [sessionHiddenKeys, setSessionHiddenKeys] = useState<Record<string, boolean>>({});
   const [selectedWeekStatus, setSelectedWeekStatus] = useState<SelectedWeekStatus | null>(
     null
   );
@@ -257,8 +268,12 @@ export function ToolLoanLedgerPage() {
           delete next[p.person_id];
           continue;
         }
-        // New people default to included; keep user's unchecks
-        if (prev[p.person_id] === undefined) next[p.person_id] = true;
+        // Saved skip or already deducted → stay unchecked; else new people default included
+        if (p.skipped_this_week || p.already_deducted_for_week) {
+          next[p.person_id] = false;
+        } else if (prev[p.person_id] === undefined) {
+          next[p.person_id] = true;
+        }
       }
       return next;
     });
@@ -292,6 +307,8 @@ export function ToolLoanLedgerPage() {
           open_count: number;
           total_owed: number;
           selected_week?: SelectedWeekStatus | null;
+          payroll_skips?: PayrollSkipPerson[];
+          payroll_skip_person_ids?: number[];
           error?: string;
         }>(
           `/tool-loan-ledger/summary?include_zero=1&week_of=${encodeURIComponent(payFriday)}`,
@@ -315,13 +332,22 @@ export function ToolLoanLedgerPage() {
       setTotalOwed(summary.total_owed || 0);
       setSelectedWeekStatus(summary.selected_week ?? null);
       setReport(owner);
+      const skips =
+        summary.payroll_skips ||
+        (summary.payroll_skip_person_ids || []).map((id) => {
+          const p = list.find((x) => x.person_id === id);
+          return { person_id: id, display_name: p?.display_name || `Person #${id}` };
+        });
+      setWeekSkips(skips);
       seedWeekAmounts(list);
-      // Auto-uncheck anyone already deducted for this pay Friday
+      // Honor saved skips + already deducted — do not reset manual unchecks on reload
       setWeekInclude((prev) => {
         const next = { ...prev };
+        const skipIdSet = new Set(skips.map((s) => s.person_id));
         for (const p of list) {
-          if (p.already_deducted_for_week) next[p.person_id] = false;
-          else if (prev[p.person_id] === undefined && p.balance > 0.009) {
+          if (p.already_deducted_for_week || skipIdSet.has(p.person_id) || p.skipped_this_week) {
+            next[p.person_id] = false;
+          } else if (prev[p.person_id] === undefined && p.balance > 0.009) {
             next[p.person_id] = true;
           }
         }
@@ -827,6 +853,11 @@ export function ToolLoanLedgerPage() {
     [people]
   );
 
+  const skipIdSet = useMemo(
+    () => new Set(weekSkips.map((s) => s.person_id)),
+    [weekSkips]
+  );
+
   const weekPayrollPreview = useMemo(() => {
     let count = 0;
     let total = 0;
@@ -837,7 +868,7 @@ export function ToolLoanLedgerPage() {
         already += 1;
         continue;
       }
-      if (weekInclude[p.person_id] === false) {
+      if (weekInclude[p.person_id] === false || skipIdSet.has(p.person_id)) {
         skipped += 1;
         continue;
       }
@@ -847,24 +878,122 @@ export function ToolLoanLedgerPage() {
       total += Math.min(n, p.balance);
     }
     return { count, total: Math.round(total * 100) / 100, skipped, already };
-  }, [payrollCandidates, weekDeductAmounts, weekInclude]);
+  }, [payrollCandidates, weekDeductAmounts, weekInclude, skipIdSet]);
 
   const allChecked =
-    payrollCandidates.length > 0 &&
-    payrollCandidates.every((p) => weekInclude[p.person_id] !== false);
+    payrollCandidates.filter((p) => !p.already_deducted_for_week).length > 0 &&
+    payrollCandidates
+      .filter((p) => !p.already_deducted_for_week)
+      .every((p) => weekInclude[p.person_id] !== false && !skipIdSet.has(p.person_id));
 
   function setPersonWeekAmount(personId: number, value: string) {
     setWeekDeductAmounts((prev) => ({ ...prev, [personId]: value }));
   }
 
-  function setPersonIncluded(personId: number, included: boolean) {
+  /**
+   * Check = on this Friday's deduction report.
+   * Uncheck with person_id = persist skip for this pay Friday only (loan stays open).
+   * Roster-only rows (no person_id) use hideRosterRow instead.
+   */
+  async function setPersonIncluded(personId: number | null | undefined, included: boolean) {
+    if (personId == null || !Number.isFinite(personId) || personId <= 0) return;
+    const payFriday = payrollWeekDate || upcomingPayFriday();
+    const person = people.find((p) => p.person_id === personId);
+    const name = person?.display_name || `Person #${personId}`;
+
+    // Optimistic UI
     setWeekInclude((prev) => ({ ...prev, [personId]: included }));
+    if (!included) {
+      setWeekSkips((prev) =>
+        prev.some((s) => s.person_id === personId)
+          ? prev
+          : [...prev, { person_id: personId, display_name: name }].sort((a, b) =>
+              a.display_name.localeCompare(b.display_name)
+            )
+      );
+    } else {
+      setWeekSkips((prev) => prev.filter((s) => s.person_id !== personId));
+    }
+
+    try {
+      if (!included) {
+        await api("/tool-loan-ledger/payroll-skips", {
+          method: "POST",
+          body: JSON.stringify({ person_id: personId, pay_friday: payFriday }),
+        });
+      } else {
+        await api(
+          `/tool-loan-ledger/payroll-skips?person_id=${personId}&pay_friday=${encodeURIComponent(payFriday)}`,
+          { method: "DELETE" }
+        );
+      }
+    } catch (e) {
+      // Roll back optimistic state
+      setWeekInclude((prev) => ({ ...prev, [personId]: !included }));
+      if (!included) {
+        setWeekSkips((prev) => prev.filter((s) => s.person_id !== personId));
+      } else if (person) {
+        setWeekSkips((prev) =>
+          prev.some((s) => s.person_id === personId)
+            ? prev
+            : [...prev, { person_id: personId, display_name: name }]
+        );
+      }
+      setError(e instanceof Error ? e.message : "Could not save skip for this Friday");
+    }
+  }
+
+  function hideRosterRow(rowKey: string, hide: boolean) {
+    setSessionHiddenKeys((prev) => {
+      const next = { ...prev };
+      if (hide) next[rowKey] = true;
+      else delete next[rowKey];
+      return next;
+    });
   }
 
   function setAllIncluded(included: boolean) {
     const next: Record<number, boolean> = {};
-    for (const p of payrollCandidates) next[p.person_id] = included;
+    for (const p of payrollCandidates) {
+      if (p.already_deducted_for_week) {
+        next[p.person_id] = false;
+        continue;
+      }
+      next[p.person_id] = included;
+    }
     setWeekInclude(next);
+    // Persist all skips / unskips for this Friday (best-effort batch)
+    const payFriday = payrollWeekDate || upcomingPayFriday();
+    void (async () => {
+      try {
+        if (!included) {
+          const skips: PayrollSkipPerson[] = [];
+          for (const p of payrollCandidates) {
+            if (p.already_deducted_for_week) continue;
+            await api("/tool-loan-ledger/payroll-skips", {
+              method: "POST",
+              body: JSON.stringify({ person_id: p.person_id, pay_friday: payFriday }),
+            });
+            skips.push({ person_id: p.person_id, display_name: p.display_name });
+          }
+          setWeekSkips(
+            skips.sort((a, b) => a.display_name.localeCompare(b.display_name))
+          );
+        } else {
+          for (const p of payrollCandidates) {
+            if (p.already_deducted_for_week) continue;
+            await api(
+              `/tool-loan-ledger/payroll-skips?person_id=${p.person_id}&pay_friday=${encodeURIComponent(payFriday)}`,
+              { method: "DELETE" }
+            );
+          }
+          setWeekSkips([]);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not update all skips");
+        void loadAll({ quiet: true });
+      }
+    })();
   }
 
   function clearWeekAmounts() {
@@ -1034,7 +1163,11 @@ export function ToolLoanLedgerPage() {
    */
   function printWeeklyReport() {
     setError("");
-    const url = "/api/tool-loan-ledger/owner-report-print";
+    const payFriday = payrollWeekDate || upcomingPayFriday();
+    const q = new URLSearchParams();
+    q.set("week_of", payFriday);
+    if (showZeroBalances) q.set("include_zero", "1");
+    const url = `/api/tool-loan-ledger/owner-report-print?${q.toString()}`;
     const w = window.open(url, "_blank");
     if (w == null) {
       setError("Pop-up blocked — allow pop-ups for this site, then try Print again.");
@@ -1191,6 +1324,14 @@ export function ToolLoanLedgerPage() {
     const peopleById = new Map(people.map((p) => [p.person_id, p]));
     const rows: PayrollTableRow[] = ownerLines
       .filter((l) => l.remaining_balance > 0.009 && l.status !== "former")
+      .filter((l) => {
+        const p = peopleById.get(l.person_id);
+        // Already deducted this Friday stays on the sheet with badge
+        if (p?.already_deducted_for_week) return true;
+        // Manual skip → off this Friday's deduction report (print + table)
+        if (skipIdSet.has(l.person_id) || weekInclude[l.person_id] === false) return false;
+        return true;
+      })
       .map((l) => {
         const p = peopleById.get(l.person_id);
         return {
@@ -1252,8 +1393,10 @@ export function ToolLoanLedgerPage() {
       if (p.balance > 0.009) continue;
       if (alreadyListed(p.display_name, p.user_id)) continue;
       markSeen(p.display_name, p.user_id);
+      const key = `p:${p.person_id}`;
+      if (sessionHiddenKeys[key]) continue;
       rows.push({
-        key: `p:${p.person_id}`,
+        key,
         person_id: p.person_id,
         user_id: p.user_id,
         display_name: p.display_name,
@@ -1267,8 +1410,10 @@ export function ToolLoanLedgerPage() {
     for (const e of activeEmployees) {
       if (alreadyListed(e.name, e.user_id)) continue;
       markSeen(e.name, e.user_id);
+      const key = e.user_id != null ? `u:${e.user_id}` : `e:${e.id}`;
+      if (sessionHiddenKeys[key]) continue;
       rows.push({
-        key: e.user_id != null ? `u:${e.user_id}` : `e:${e.id}`,
+        key,
         person_id: null,
         user_id: e.user_id,
         display_name: e.name,
@@ -1279,7 +1424,23 @@ export function ToolLoanLedgerPage() {
     }
 
     return rows.sort((a, b) => a.display_name.localeCompare(b.display_name));
-  }, [ownerLines, people, showZeroBalances, activeEmployees]);
+  }, [
+    ownerLines,
+    people,
+    showZeroBalances,
+    activeEmployees,
+    skipIdSet,
+    weekInclude,
+    sessionHiddenKeys,
+  ]);
+
+  /** Amount owed on the visible deduction sheet (excludes skipped this Friday). */
+  const visibleOwedTotal = useMemo(() => {
+    const sum = payrollTableRows
+      .filter((r) => r.balance > 0.009)
+      .reduce((s, r) => s + r.balance, 0);
+    return Math.round(sum * 100) / 100;
+  }, [payrollTableRows]);
 
   if (!isOffice) {
     return (
@@ -1342,6 +1503,8 @@ export function ToolLoanLedgerPage() {
                     setPayrollWeekDate(
                       upcomingPayFriday(new Date(raw + "T12:00:00"))
                     );
+                    // Roster $0 hides are session-only for the Friday being viewed
+                    setSessionHiddenKeys({});
                   }}
                   className="payroll-week-input"
                   aria-label="Pay Friday — paycheck date for deductions"
@@ -1379,7 +1542,7 @@ export function ToolLoanLedgerPage() {
           </div>
           <div className="owner-kpi">
             <span className="owner-kpi-label">Total amount owed</span>
-            <strong>{money(ownerTotals.remaining_balance || totalOwed)}</strong>
+            <strong>{money(visibleOwedTotal || ownerTotals.remaining_balance || totalOwed)}</strong>
           </div>
           <div className="owner-kpi owner-kpi-accent">
             <span className="owner-kpi-label">Total this week&apos;s deduction</span>
@@ -1469,16 +1632,19 @@ export function ToolLoanLedgerPage() {
                   row.person_id != null
                     ? people.find((p) => p.person_id === row.person_id)
                     : undefined;
-                const isZero = row.balance <= 0.009 || row.person_id == null;
-                const suggested = !isZero
+                const isZero = row.balance <= 0.009;
+                const isRosterOnly = row.person_id == null;
+                const suggested = !isZero && !isRosterOnly
                   ? person
                     ? suggestedWeekAmount(person)
                     : row.suggested
                   : 0;
                 const included =
                   !isZero &&
+                  !isRosterOnly &&
                   row.person_id != null &&
-                  weekInclude[row.person_id] !== false;
+                  weekInclude[row.person_id] !== false &&
+                  !skipIdSet.has(row.person_id);
                 const isSelected =
                   row.person_id != null
                     ? selectedId === row.person_id
@@ -1489,7 +1655,7 @@ export function ToolLoanLedgerPage() {
                     className={
                       isSelected
                         ? "is-selected"
-                        : isZero
+                        : isZero || isRosterOnly
                           ? "weekly-row-zero"
                           : !included
                             ? "weekly-row-skipped"
@@ -1497,20 +1663,36 @@ export function ToolLoanLedgerPage() {
                     }
                   >
                     <td className="weekly-include-col no-print">
-                      {isZero || row.person_id == null ? (
-                        <span className="muted">—</span>
+                      {isRosterOnly || (isZero && row.person_id == null) ? (
+                        <input
+                          type="checkbox"
+                          checked={!sessionHiddenKeys[row.key]}
+                          disabled={busy}
+                          onChange={(e) => hideRosterRow(row.key, !e.target.checked)}
+                          aria-label={`Show ${row.display_name} on this list`}
+                          title="Uncheck hides this $0 name for this session only"
+                        />
+                      ) : isZero ? (
+                        <input
+                          type="checkbox"
+                          checked={!sessionHiddenKeys[row.key]}
+                          disabled={busy}
+                          onChange={(e) => hideRosterRow(row.key, !e.target.checked)}
+                          aria-label={`Show ${row.display_name} on this list`}
+                          title="Uncheck hides this $0 name for this session only"
+                        />
                       ) : (
                         <input
                           type="checkbox"
                           checked={included && !person?.already_deducted_for_week}
                           disabled={busy || Boolean(person?.already_deducted_for_week)}
                           onChange={(e) =>
-                            setPersonIncluded(row.person_id!, e.target.checked)
+                            void setPersonIncluded(row.person_id, e.target.checked)
                           }
                           aria-label={
                             person?.already_deducted_for_week
                               ? `${row.display_name} already deducted this Friday`
-                              : `Include ${row.display_name} in bulk deduct`
+                              : `Include ${row.display_name} in this Friday's deduction`
                           }
                         />
                       )}
@@ -1557,17 +1739,15 @@ export function ToolLoanLedgerPage() {
                           last {formatShortWhen(person.last_payroll_date)}
                         </span>
                       ) : null}
-                      {isZero ? (
+                      {isZero || isRosterOnly ? (
                         <span className="weekly-skip-badge">$0</span>
-                      ) : !included && !person?.already_deducted_for_week ? (
-                        <span className="weekly-skip-badge">skip</span>
                       ) : null}
                     </td>
                     <td className="num weekly-balance">
                       <strong>{money(row.balance)}</strong>
                     </td>
                     <td className="num weekly-amount-cell owner-weekly-cell">
-                      {isZero || row.person_id == null ? (
+                      {isZero || isRosterOnly || row.person_id == null ? (
                         <span className="muted">—</span>
                       ) : (
                         <>
@@ -1624,14 +1804,14 @@ export function ToolLoanLedgerPage() {
                   <td>
                     <strong>
                       Totals ({weekPayrollPreview.count} selected
-                      {weekPayrollPreview.skipped > 0
-                        ? ` · ${weekPayrollPreview.skipped} skipped`
+                      {weekSkips.length > 0
+                        ? ` · ${weekSkips.length} skipped this Friday`
                         : ""}
                       )
                     </strong>
                   </td>
                   <td className="num">
-                    <strong>{money(ownerTotals.remaining_balance)}</strong>
+                    <strong>{money(visibleOwedTotal)}</strong>
                   </td>
                   <td className="num owner-weekly-cell">
                     <strong className="weekly-total-amt">{money(weekPayrollPreview.total)}</strong>
@@ -1641,6 +1821,31 @@ export function ToolLoanLedgerPage() {
             )}
           </table>
         </div>
+
+        {weekSkips.length > 0 ? (
+          <div className="payroll-skipped-strip no-print" role="region" aria-label="Skipped this week">
+            <div className="payroll-skipped-label">Skipped this week</div>
+            <p className="muted payroll-skipped-hint">
+              Off this pay Friday&apos;s sheet only — loan balance stays. Tap a name to put them
+              back. Next Friday they return automatically.
+            </p>
+            <ul className="payroll-skipped-list">
+              {weekSkips.map((s) => (
+                <li key={s.person_id}>
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm payroll-skipped-chip"
+                    disabled={busy}
+                    onClick={() => void setPersonIncluded(s.person_id, true)}
+                    title={`Put ${s.display_name} back on this Friday's deduction report`}
+                  >
+                    {s.display_name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
 
       {(detail || selectedOffLedger) && (

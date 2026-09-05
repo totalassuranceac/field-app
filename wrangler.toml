@@ -31,6 +31,11 @@ APP_NAME = "Field App"
 WORKSPACE_DOMAIN = ""
 GOOGLE_ALLOWED_EXTRA = ""
 
+# Optional Atlas warranty drop-off webhook (secrets — do not put values here):
+#   npx wrangler secret put ATLAS_WARRANTY_WEBHOOK_URL
+#   npx wrangler secret put ATLAS_WARRANTY_WEBHOOK_AUTH
+# Env keys: ATLAS_WARRANTY_WEBHOOK_URL, ATLAS_WARRANTY_WEBHOOK_AUTH (see worker/types.ts)
+
 # ~7–8am Central (13:00 UTC): same-day shop bring-in reminders + light ops nudges
 [triggers]
 crons = ["0 13 * * *"]

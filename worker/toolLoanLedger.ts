@@ -218,6 +218,34 @@ export async function ensureToolLoanLedgerTables(_db: D1Database): Promise<void>
   return;
 }
 
+/** Person IDs manually skipped for this pay Friday (migration 082). */
+export async function payrollSkipPersonIds(
+  db: D1Database,
+  payFriday: string
+): Promise<number[]> {
+  const friday = toPayFriday(payFriday);
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT person_id FROM tool_loan_payroll_skips WHERE pay_friday = ?`
+      )
+      .bind(friday)
+      .all<{ person_id: number }>();
+    return (rows.results || []).map((r) => Number(r.person_id)).filter((id) => id > 0);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such table/i.test(msg)) return [];
+    throw e;
+  }
+}
+
+export type PayrollSkipRow = {
+  person_id: number;
+  display_name: string;
+  pay_friday: string;
+  skipped_at: string | null;
+};
+
 type UserLite = { id: number; display_name: string; username: string | null };
 
 function matchUser(users: UserLite[], excelName: string): UserLite | null {
@@ -1143,6 +1171,146 @@ export function registerToolLoanLedger(api: App): void {
     return c.html(html);
   });
 
+  /** List people skipped for a pay Friday (uncheck = skip THIS paycheck only). */
+  api.get("/tool-loan-ledger/payroll-skips", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) return denied;
+    const payFriday = toPayFriday(
+      (c.req.query("pay_friday") || c.req.query("week_of") || "").slice(0, 10) || null
+    );
+    try {
+      const rows = await c.env.DB.prepare(
+        `SELECT s.person_id, s.pay_friday, s.skipped_at, p.display_name
+         FROM tool_loan_payroll_skips s
+         JOIN tool_loan_people p ON p.id = s.person_id
+         WHERE s.pay_friday = ?
+         ORDER BY lower(p.display_name)`
+      )
+        .bind(payFriday)
+        .all<PayrollSkipRow>();
+      return c.json({
+        pay_friday: payFriday,
+        skips: rows.results || [],
+        person_ids: (rows.results || []).map((r) => r.person_id),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such table/i.test(msg)) {
+        return c.json({
+          pay_friday: payFriday,
+          skips: [],
+          person_ids: [],
+          error: "Run migration 082_tool_loan_payroll_skips.sql on D1",
+        });
+      }
+      return c.json({ error: msg }, 500);
+    }
+  });
+
+  /** Persist skip for this pay Friday only — does not void loan or change balance. */
+  api.post("/tool-loan-ledger/payroll-skips", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) return denied;
+    const body = (await c.req.json()) as {
+      person_id?: number;
+      pay_friday?: string;
+      note?: string;
+    };
+    const personId = Number(body.person_id || 0);
+    const payFriday = toPayFriday(body.pay_friday || null);
+    if (!personId) return c.json({ error: "person_id required" }, 400);
+    try {
+      const person = await c.env.DB.prepare(
+        `SELECT id, display_name FROM tool_loan_people WHERE id = ?`
+      )
+        .bind(personId)
+        .first<{ id: number; display_name: string }>();
+      if (!person) return c.json({ error: "Person not found" }, 404);
+      await c.env.DB.prepare(
+        `INSERT INTO tool_loan_payroll_skips (person_id, pay_friday, skipped_by_user_id, skipped_at, note)
+         VALUES (?, ?, ?, datetime('now'), ?)
+         ON CONFLICT(person_id, pay_friday) DO UPDATE SET
+           skipped_by_user_id = excluded.skipped_by_user_id,
+           skipped_at = datetime('now'),
+           note = excluded.note`
+      )
+        .bind(personId, payFriday, user.id, body.note?.trim() || null)
+        .run();
+      await writeAudit(
+        c.env.DB,
+        user,
+        "create",
+        "tool_loan_payroll_skip",
+        personId,
+        `Skip payroll ${payFriday} · ${person.display_name}`
+      );
+      return c.json({
+        ok: true,
+        pay_friday: payFriday,
+        person_id: personId,
+        display_name: person.display_name,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such table/i.test(msg)) {
+        return c.json(
+          { error: "Run migration 082_tool_loan_payroll_skips.sql on D1" },
+          500
+        );
+      }
+      return c.json({ error: msg }, 500);
+    }
+  });
+
+  /** Put someone back on this Friday's deduction report. */
+  api.delete("/tool-loan-ledger/payroll-skips", async (c) => {
+    const user = c.get("user");
+    const denied = requireOffice(user);
+    if (denied) return denied;
+    const personId = Number(c.req.query("person_id") || "") || 0;
+    const payFriday = toPayFriday(
+      (c.req.query("pay_friday") || c.req.query("week_of") || "").slice(0, 10) || null
+    );
+    if (!personId) return c.json({ error: "person_id required" }, 400);
+    try {
+      const before = await c.env.DB.prepare(
+        `SELECT s.id, p.display_name
+         FROM tool_loan_payroll_skips s
+         JOIN tool_loan_people p ON p.id = s.person_id
+         WHERE s.person_id = ? AND s.pay_friday = ?`
+      )
+        .bind(personId, payFriday)
+        .first<{ id: number; display_name: string }>();
+      await c.env.DB.prepare(
+        `DELETE FROM tool_loan_payroll_skips WHERE person_id = ? AND pay_friday = ?`
+      )
+        .bind(personId, payFriday)
+        .run();
+      if (before) {
+        await writeAudit(
+          c.env.DB,
+          user,
+          "delete",
+          "tool_loan_payroll_skip",
+          personId,
+          `Unskip payroll ${payFriday} · ${before.display_name}`
+        );
+      }
+      return c.json({ ok: true, pay_friday: payFriday, person_id: personId });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such table/i.test(msg)) {
+        return c.json(
+          { error: "Run migration 082_tool_loan_payroll_skips.sql on D1" },
+          500
+        );
+      }
+      return c.json({ error: msg }, 500);
+    }
+  });
+
   api.post("/tool-loan-ledger/payments", async (c) => {
     const user = c.get("user");
     const denied = requireOffice(user);
@@ -1171,6 +1339,30 @@ export function registerToolLoanLedger(api: App): void {
         : rawDate || new Date().toISOString().slice(0, 10);
     if (!personId || amount == null || amount <= 0) {
       return c.json({ error: "person_id and positive amount required" }, 400);
+    }
+
+    // Manual skip for this pay Friday → do not post (loan stays; try again next Friday)
+    if (ptype === "payroll") {
+      try {
+        const skipped = await c.env.DB.prepare(
+          `SELECT id FROM tool_loan_payroll_skips WHERE person_id = ? AND pay_friday = ? LIMIT 1`
+        )
+          .bind(personId, date)
+          .first();
+        if (skipped) {
+          return c.json(
+            {
+              error: "skipped_this_friday",
+              message: `This employee is skipped for pay Friday ${date}. Unskip them on the payroll report to deduct.`,
+              pay_friday: date,
+            },
+            409
+          );
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!/no such table/i.test(msg)) throw e;
+      }
     }
 
     // Once per pay week: block if this person already has a payroll deduction

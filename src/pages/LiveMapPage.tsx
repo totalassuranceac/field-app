@@ -435,7 +435,7 @@ export function LiveMapPage() {
   useEffect(() => {
     if (!allowed || !mapReady) return;
     const id = window.setInterval(() => {
-      loadPositions(false);
+      loadPositions(true);
     }, 30_000);
     return () => window.clearInterval(id);
   }, [allowed, mapReady, loadPositions]);

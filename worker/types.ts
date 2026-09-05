@@ -44,6 +44,14 @@ export interface Env {
   STUDIO_SSO_SECRET?: string;
   /** Override live Studio URL (default https://ta-ads.totalassurance.workers.dev) */
   STUDIO_URL?: string;
+  /**
+   * Optional Atlas ping on new warranty drop-off (POST /warranties 201 only).
+   * Set via `wrangler secret put ATLAS_WARRANTY_WEBHOOK_URL` / `_AUTH`.
+   * Missing either = skip ping; drop-off still succeeds.
+   */
+  ATLAS_WARRANTY_WEBHOOK_URL?: string;
+  /** Full Authorization header value (e.g. "Bearer …" or raw token as Atlas expects). */
+  ATLAS_WARRANTY_WEBHOOK_AUTH?: string;
 }
 
 export interface UserRow {

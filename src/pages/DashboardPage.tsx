@@ -712,9 +712,9 @@ export function DashboardPage() {
         hint:
           s.not_reporting > 0
             ? `${s.not_reporting} not on map`
-            : stats?.expected_trackers
-              ? `${stats.live_matched ?? 0}/${stats.expected_trackers} live`
-              : "Tracking health",
+            : (s.stale_or_offline ?? 0) > 0
+              ? `${s.stale_or_offline} stale / offline`
+              : "Open live map",
         to: "/live",
         tone: toneForCount(s.tracking, 1, 2),
         weight: 11,

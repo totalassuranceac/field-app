@@ -289,7 +289,7 @@ function TvLiveMap({
   useEffect(() => {
     if (!mapReady) return;
     const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") void loadPositions(false);
+      if (document.visibilityState === "visible") void loadPositions(true);
     }, 30_000);
     return () => window.clearInterval(id);
   }, [mapReady, loadPositions]);

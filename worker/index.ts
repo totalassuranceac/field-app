@@ -135,11 +135,18 @@ import {
   ledgerBalanceForUserId,
   policyWeeklyDeduction,
   registerToolLoanLedger,
+  payrollSkipPersonIds,
   toPayFriday,
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
 import { buildZeroChargePayload } from "./zeroCharge";
 import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
+import {
+  invoiceLookupPrintHtml,
+  runInvoiceLookup,
+  type InvoiceLookupEquipment,
+  type InvoiceLookupSection,
+} from "./invoiceLookup";
 
 /**
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
@@ -6501,6 +6508,52 @@ async function saveWarrantyDropoffPhoto(env: Env, file: File): Promise<string> {
   return saveWarrantyPhoto(env, file, "warranty-dropoffs");
 }
 
+/**
+ * Fire-and-forget Atlas ping on new warranty create only.
+ * Never throws — missing secrets or network errors are ignored.
+ */
+function pingAtlasWarrantyDropoff(
+  env: Env,
+  payload: {
+    log_number: string;
+    id: number;
+    part_name: string;
+    vendor_name: string | null;
+    service_address: string | null;
+    customer_name: string | null;
+    model_number: string | null;
+    serial_number: string | null;
+    status: string;
+    dropped_off_by: string;
+    pile: "return" | "file";
+  }
+): Promise<void> {
+  const url = (env.ATLAS_WARRANTY_WEBHOOK_URL || "").trim();
+  const auth = (env.ATLAS_WARRANTY_WEBHOOK_AUTH || "").trim();
+  if (!url || !auth) return Promise.resolve();
+  return (async () => {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 8_000);
+      try {
+        await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: auth,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(t);
+      }
+    } catch {
+      /* Atlas down / timeout — drop-off already saved */
+    }
+  })();
+}
+
 api.post("/warranties", async (c) => {
   const user = c.get("user");
   const ct = c.req.header("content-type") || "";
@@ -6925,6 +6978,30 @@ api.post("/warranties", async (c) => {
       `Warranty ${logNumber} dropped off (model ${modelNumber} S/N ${serialNumber})`
     );
     const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first();
+    // Atlas ping — new create only; never block or fail the drop-off
+    const atlasStatus =
+      landedReturn
+        ? "return_to_vendor"
+        : String((row as { status?: string } | null)?.status || "dropped_off");
+    try {
+      c.executionCtx.waitUntil(
+        pingAtlasWarrantyDropoff(c.env, {
+          log_number: logNumber,
+          id,
+          part_name: partName,
+          vendor_name: vendorName,
+          service_address: serviceAddress,
+          customer_name: customerName,
+          model_number: modelNumber,
+          serial_number: serialNumber,
+          status: atlasStatus,
+          dropped_off_by: user.display_name,
+          pile: landedReturn ? "return" : "file",
+        })
+      );
+    } catch {
+      /* waitUntil unavailable in some test contexts — ignore */
+    }
     return c.json({
       ok: true,
       warranty: row,
@@ -11235,6 +11312,60 @@ api.get("/inventory/pickups", async (c) => {
  * Where did we buy a part for this job? Search by service address (or street fragment).
  * Pulls warranties + vendor-run will-calls + receipt notes so warehouse can find the vendor.
  */
+/** Office invoice lookup — address → model/serial (ST + local). Office/admin/supervisor. */
+api.get(
+  "/office/invoice-lookup",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    const q = (c.req.query("q") || "").trim();
+    if (q.length < 3) {
+      return c.json({ error: "Type at least 3 characters of the street address" }, 400);
+    }
+    try {
+      const payload = await runInvoiceLookup(c.env, c.env.DB, q);
+      return c.json(payload);
+    } catch (e) {
+      return c.json(
+        { error: e instanceof Error ? e.message : "Lookup failed" },
+        500
+      );
+    }
+  }
+);
+
+/** Printable HTML sheet for a selected invoice-lookup result. */
+api.post(
+  "/office/invoice-lookup/print",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    const user = c.get("user");
+    const body = (await c.req.json()) as {
+      address?: string;
+      customer_name?: string | null;
+      equipment?: InvoiceLookupEquipment[];
+      invoice_number?: string | null;
+      warranty_log?: string | null;
+      notes?: string | null;
+      source_label?: string | null;
+      section?: InvoiceLookupSection | null;
+    };
+    const address = String(body.address || "").trim();
+    if (!address) return c.json({ error: "address required" }, 400);
+    const html = invoiceLookupPrintHtml({
+      address,
+      customer_name: body.customer_name ?? null,
+      equipment: Array.isArray(body.equipment) ? body.equipment : [],
+      invoice_number: body.invoice_number ?? null,
+      warranty_log: body.warranty_log ?? null,
+      notes: body.notes ?? null,
+      source_label: body.source_label ?? null,
+      section: body.section ?? null,
+      printed_by: user.display_name || "Office",
+    });
+    return c.html(html);
+  }
+);
+
 api.get("/inventory/purchase-log", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
   const q = (c.req.query("q") || "").trim();
   if (q.length < 2) {
@@ -17028,6 +17159,27 @@ api.get("/tool-loan-ledger/summary", async (c) => {
       weekAlreadyTotal += Number(r.amount) || 0;
     }
 
+    const skipIds = await payrollSkipPersonIds(c.env.DB, weekOf);
+    const skipSet = new Set(skipIds);
+
+    // Names for the "Skipped this week" strip (open balances only)
+    let weekSkips: Array<{ person_id: number; display_name: string }> = [];
+    if (skipIds.length) {
+      try {
+        const ph = skipIds.map(() => "?").join(",");
+        const skipRows = await c.env.DB.prepare(
+          `SELECT id as person_id, display_name FROM tool_loan_people
+           WHERE id IN (${ph})
+           ORDER BY lower(display_name)`
+        )
+          .bind(...skipIds)
+          .all<{ person_id: number; display_name: string }>();
+        weekSkips = skipRows.results || [];
+      } catch {
+        weekSkips = [];
+      }
+    }
+
     const people = rows.map((r) => {
       const last = lastMap.get(r.person_id);
       const weekPay = alreadyForWeek.get(r.person_id);
@@ -17038,6 +17190,7 @@ api.get("/tool-loan-ledger/summary", async (c) => {
         already_deducted_for_week: Boolean(weekPay),
         week_deducted_amount: weekPay?.amount ?? null,
         week_deducted_at: weekPay?.applied_at ?? null,
+        skipped_this_week: skipSet.has(r.person_id) && !weekPay,
       };
     });
 
@@ -17045,6 +17198,8 @@ api.get("/tool-loan-ledger/summary", async (c) => {
       people,
       open_count: open.length,
       total_owed: Math.round(totalOwed * 100) / 100,
+      payroll_skips: weekSkips,
+      payroll_skip_person_ids: skipIds,
       last_payroll_run: lastRunFallback
         ? {
             payment_date: String(lastRunFallback.payment_date).slice(0, 10),
@@ -17115,10 +17270,19 @@ api.get("/tool-loan-ledger/owner-report-print", async (c) => {
   }
   try {
     const includeZero = c.req.query("include_zero") === "1";
-    const weekOf = (c.req.query("week_of") || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const weekOfRaw = (c.req.query("week_of") || new Date().toISOString().slice(0, 10)).slice(
+      0,
+      10
+    );
+    const weekOf = toPayFriday(weekOfRaw);
     // Payroll print: current employees only (hide former — e.g. Willie, Valdez)
     let rows = (await toolLoanBalanceRows(c.env.DB)).filter((r) => r.status !== "former");
     if (!includeZero) rows = rows.filter((r) => r.balance > 0.009);
+    // Honor manual skips for this pay Friday (same as on-screen deduction report)
+    const skipIds = new Set(await payrollSkipPersonIds(c.env.DB, weekOf));
+    if (skipIds.size) {
+      rows = rows.filter((r) => !skipIds.has(r.person_id));
+    }
 
     const money = (n: number) =>
       n.toLocaleString("en-US", { style: "currency", currency: "USD" });

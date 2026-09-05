@@ -26,6 +26,7 @@ export const FAVORITE_CATALOG: FavoriteRoute[] = [
   { path: "/dump-runs", label: "Dump runs", hint: "Dump tickets" },
   { path: "/assets", label: "Company assets", hint: "Gear & bottles" },
   { path: "/warranties", label: "Warranties", hint: "Claims & drop-offs" },
+  { path: "/invoice-lookup", label: "Invoice lookup", hint: "Address → model & serial" },
   { path: "/issues", label: "Shop board", hint: "Repairs" },
   { path: "/service", label: "Oil changes", hint: "Service due" },
   { path: "/parts-orders", label: "Order for shop", hint: "Shop orders" },
@@ -113,6 +114,8 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return true;
     case "/warranties":
       return true;
+    case "/invoice-lookup":
+      return adminShell || isOffice || isSupervisor;
     case "/issues":
       return true;
     case "/service":

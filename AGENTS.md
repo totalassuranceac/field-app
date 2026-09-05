@@ -48,9 +48,17 @@ More ops/backup: `SAVE-THIS.md`. Product overview: `README.md`.
 
 **Roles:** `admin`, `office`, `supervisor`, `warehouse` (stored as `office` + `is_warehouse=1`), `mechanic`, `driver` (field), `viewer`.
 
+
+## Parked vs unparked (2026-09-01)
+
+- Parked: loans, PTO, handbook. Do not un-park unless Chris says.
+- Unparked: Field App Safety. Private training, no rankings, topics with video, stamped history, one-tap PDF certs. Do not grill. Do not invent from a missing chat.
+- Nothing deploys without Chris. Do not deploy after every UI change.
+- Never git add -A. Commit only real files. Never commit .dev.vars. Briefing is the Slack canvas, not git log.
+
 ## Hard rules for this product
 
-1. **Deploy after UI/API changes** the user needs live: `npm run deploy`.
+1. **Deploy only when Chris says** the user needs live: `npm run deploy`.
 2. **UI changes:** verify in the browser when tools allow; otherwise say what you could not verify.
 3. **Do not** invent GitHub remotes / force-push; ask before destructive git/cloud ops.
 4. Prefer small, focused diffs — no drive-by refactors.
@@ -96,7 +104,7 @@ Full pasteable narrative for a new chat: `docs/PASTE-TO-GROK-BOT.md`.
 ### Owner preferences
 - Emergency camera find = clip list, not scrubbing quiet gaps.
 - Field must not see others on the map.
-- Prefer deploy when staff need the change live.
+- Deploy only when Chris says go; Safety unparked; loans/PTO/handbook parked.
 
 ## Permissions pattern
 

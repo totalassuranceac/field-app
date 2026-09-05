@@ -120,6 +120,9 @@ const StudioPage = lazy(() =>
 const FeedbackPage = lazy(() =>
   import("./pages/FeedbackPage").then((m) => ({ default: m.FeedbackPage }))
 );
+const InvoiceLookupPage = lazy(() =>
+  import("./pages/InvoiceLookupPage").then((m) => ({ default: m.InvoiceLookupPage }))
+);
 
 function PageFallback() {
   return (
@@ -296,6 +299,12 @@ export default function App() {
                     <Route
                       path="/warranties"
                       element={<LazyPage title="Warranties" Page={WarrantiesPage} />}
+                    />
+                    <Route
+                      path="/invoice-lookup"
+                      element={
+                        <LazyPage title="Invoice lookup" Page={InvoiceLookupPage} />
+                      }
                     />
                     <Route
                       path="/parts-receipts"

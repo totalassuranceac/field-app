@@ -2980,13 +2980,14 @@ button.parts-order-vendor-btn {
   margin-bottom: 0;
 }
 .pto-board-table-wrap {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow-x: visible;
+  max-width: 100%;
 }
 .pto-board-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
+  table-layout: auto;
 }
 .pto-board-table th,
 .pto-board-table td {
@@ -2994,6 +2995,7 @@ button.parts-order-vendor-btn {
   padding: 0.4rem 0.45rem;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
+  vertical-align: top;
 }
 .pto-board-table th {
   font-weight: 700;
@@ -3001,6 +3003,134 @@ button.parts-order-vendor-btn {
   text-transform: uppercase;
   letter-spacing: 0.02em;
   color: var(--muted);
+}
+/* Compact board: name + birthday wrap; Vac/Sick combined cells */
+.pto-board-table-fit {
+  font-size: 0.82rem;
+}
+.pto-board-table-fit th,
+.pto-board-table-fit td {
+  padding: 0.4rem 0.4rem;
+}
+.pto-board-name-cell {
+  white-space: normal;
+  min-width: 7.5rem;
+  max-width: 12rem;
+}
+.pto-board-bday {
+  font-size: 0.72rem;
+  margin-top: 0.12rem;
+  line-height: 1.25;
+}
+.pto-bank-cell {
+  white-space: normal;
+  min-width: 5.5rem;
+  line-height: 1.35;
+}
+.pto-bank-bal {
+  display: block;
+  font-weight: 650;
+}
+.pto-bank-used {
+  display: block;
+  font-size: 0.72rem;
+  margin-top: 0.1rem;
+}
+.pto-board-actions-col {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: var(--surface, #fff);
+  box-shadow: -6px 0 10px -8px rgba(15, 23, 42, 0.35);
+  white-space: nowrap;
+  min-width: 5.5rem;
+}
+.pto-board-table thead .pto-board-actions-col {
+  z-index: 3;
+  background: var(--surface, #fff);
+}
+.pto-row-over .pto-board-actions-col {
+  background: color-mix(in srgb, var(--danger, #b42318) 6%, var(--surface, #fff));
+}
+.pto-board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+/* Phone cards — table hidden below breakpoint */
+.pto-board-cards {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  gap: 0.55rem;
+}
+.pto-board-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface, #fff);
+  display: grid;
+  gap: 0.55rem;
+}
+.pto-board-card.is-over {
+  background: color-mix(in srgb, var(--danger, #b42318) 6%, var(--surface, #fff));
+  border-color: color-mix(in srgb, var(--danger, #b42318) 35%, var(--line));
+}
+.pto-board-card-meta {
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+  line-height: 1.35;
+}
+.pto-board-card-banks {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+.pto-board-card-label {
+  display: inline-block;
+  min-width: 4.5rem;
+  font-weight: 750;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin-right: 0.35rem;
+}
+.pto-board-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.pto-adjust-form-card {
+  scroll-margin-top: 1rem;
+}
+@media (max-width: 760px) {
+  .pto-board-desktop {
+    display: none;
+  }
+  .pto-board-cards {
+    display: grid;
+  }
+  .pto-board-table-wrap {
+    overflow-x: visible;
+  }
+}
+@media (min-width: 761px) {
+  .pto-board-cards {
+    display: none;
+  }
+  .pto-board-desktop {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Prefer fitting without scroll; sticky Adjust still helps if viewport is tight */
+  .pto-board-table-fit {
+    min-width: 0;
+  }
 }
 .pto-upcoming-list {
   list-style: none;
@@ -13037,6 +13167,36 @@ tr.row-low td {
   text-decoration: line-through;
   color: var(--muted, #94a3b8);
 }
+
+/* Skipped this pay Friday — screen only; not on print sheet */
+.payroll-skipped-strip {
+  margin-top: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 12px;
+  border: 1px dashed color-mix(in srgb, var(--warning, #c9a227) 55%, var(--line));
+  background: color-mix(in srgb, var(--warning, #c9a227) 10%, var(--surface));
+}
+.payroll-skipped-label {
+  font-weight: 800;
+  font-size: 0.92rem;
+  letter-spacing: 0.01em;
+}
+.payroll-skipped-hint {
+  margin: 0.25rem 0 0.55rem;
+  font-size: 0.82rem;
+}
+.payroll-skipped-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.payroll-skipped-chip {
+  font-weight: 650;
+}
+
 .weekly-skip-badge {
   display: inline-block;
   margin-left: 0.35rem;
@@ -18475,4 +18635,217 @@ svg {
   font-weight: 800;
   letter-spacing: 0.01em;
   color: #fcd34d;
+}
+
+/* ——— Warranty last-10 processed box walk sheet ——— */
+.warranty-processed-print {
+  display: none;
+}
+@media print {
+  body.print-warranty-processed .sidebar,
+  body.print-warranty-processed .topbar-mobile,
+  body.print-warranty-processed .nav-backdrop,
+  body.print-warranty-processed .warranty-page > *:not(.warranty-processed-print) {
+    display: none !important;
+  }
+  body.print-warranty-processed,
+  body.print-warranty-processed .app-shell,
+  body.print-warranty-processed .main,
+  body.print-warranty-processed .warranty-page {
+    background: #fff !important;
+    color: #111 !important;
+  }
+  body.print-warranty-processed .warranty-processed-print {
+    display: block !important;
+    padding: 0;
+    margin: 0;
+  }
+  body.print-warranty-processed .warranty-processed-print-head h1 {
+    margin: 0 0 0.35rem;
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
+  }
+  body.print-warranty-processed .warranty-processed-print-meta {
+    margin: 0 0 0.35rem;
+    font-size: 0.85rem;
+  }
+  body.print-warranty-processed .warranty-processed-print-warn {
+    margin: 0 0 0.55rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    border: 1.5px solid #111;
+    padding: 0.3rem 0.45rem;
+  }
+  body.print-warranty-processed .warranty-processed-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11pt;
+  }
+  body.print-warranty-processed .warranty-processed-print-table th,
+  body.print-warranty-processed .warranty-processed-print-table td {
+    border: 1px solid #333;
+    padding: 0.32rem 0.3rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  body.print-warranty-processed .warranty-processed-print-table th {
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: #eee !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body.print-warranty-processed .warranty-print-log {
+    font-weight: 800;
+    font-size: 12pt;
+    white-space: nowrap;
+  }
+  body.print-warranty-processed .warranty-print-filed {
+    font-weight: 750;
+    text-align: center;
+    white-space: nowrap;
+  }
+  body.print-warranty-processed .warranty-print-action {
+    font-size: 12pt;
+    font-weight: 900;
+    text-align: center;
+    white-space: nowrap;
+  }
+  body.print-warranty-processed .warranty-box-action-toss .warranty-print-action {
+    color: #111;
+  }
+  body.print-warranty-processed .warranty-box-action-return .warranty-print-action {
+    text-decoration: underline;
+  }
+  body.print-warranty-processed .warranty-box-action-save .warranty-print-action {
+    font-weight: 800;
+  }
+  body.print-warranty-processed .warranty-box-action-hold .warranty-print-action {
+    font-weight: 800;
+  }
+  body.print-warranty-processed .warranty-processed-print-legend {
+    margin-top: 0.45rem;
+    font-size: 8pt;
+    color: #333;
+  }
+  @page {
+    margin: 0.45in;
+    size: letter;
+  }
+}
+
+/* --- Office invoice lookup --- */
+.invoice-lookup-search {
+  display: grid;
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+}
+.invoice-lookup-search label {
+  display: grid;
+  gap: 0.3rem;
+  font-weight: 650;
+}
+.invoice-lookup-search input[type="search"] {
+  font-size: 1.1rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+}
+.invoice-lookup-suggestions {
+  margin: 0.5rem 0 0.85rem;
+}
+.invoice-lookup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.invoice-lookup-section {
+  margin-top: 1rem;
+}
+.invoice-lookup-section-title {
+  margin: 0 0 0.55rem;
+  font-size: 1rem;
+}
+.invoice-lookup-card {
+  display: grid;
+  gap: 0.65rem;
+  margin-bottom: 0.65rem;
+}
+.invoice-lookup-card.is-missing {
+  border-style: dashed;
+  opacity: 0.95;
+}
+.invoice-lookup-equip-block {
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  padding: 0.65rem 0.75rem;
+  background: color-mix(in srgb, var(--surface-2, #f1f5f9) 55%, var(--surface));
+  margin-bottom: 0.45rem;
+}
+.invoice-lookup-equip-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+.invoice-lookup-model,
+.invoice-lookup-serial {
+  margin: 0.35rem 0;
+}
+.invoice-lookup-model span,
+.invoice-lookup-serial span {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 700;
+}
+.invoice-lookup-model strong,
+.invoice-lookup-serial strong {
+  display: block;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  word-break: break-word;
+}
+.invoice-lookup-missing {
+  margin: 0;
+  font-weight: 650;
+  color: var(--muted);
+}
+.invoice-lookup-meta {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.92rem;
+}
+.invoice-lookup-actions {
+  gap: 0.4rem;
+}
+
+.invoice-lookup-source-pill {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent, #1d4ed8) 12%, var(--surface));
+  width: fit-content;
+}
+.invoice-lookup-banner {
+  margin: 0.5rem 0 0.85rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, var(--warning, #c9a227) 55%, var(--line));
+  background: color-mix(in srgb, var(--warning, #c9a227) 12%, var(--surface));
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+.invoice-lookup-section-hint {
+  margin: 0 0 0.55rem;
+  font-size: 0.82rem;
 }

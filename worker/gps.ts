@@ -148,6 +148,14 @@ function matchVehicleInPool(label: string, search: FleetVehicle[]): FleetVehicle
   const byUnit = search.find((v) => normalizeName(v.unit_number) === n);
   if (byUnit) return byUnit;
 
+  // Compact unit match so Box2 matches "Box 2" / "Box 1" style labels
+  const compactN = n.replace(/\s+/g, "");
+  const byUnitCompact = search.find((v) => {
+    const u = normalizeName(v.unit_number).replace(/\s+/g, "");
+    return u.length > 0 && u === compactN;
+  });
+  if (byUnitCompact) return byUnitCompact;
+
   // Unit embedded in name (e.g. "Old Van - 008", "Unit 42")
   for (const v of search) {
     const unit = normalizeName(v.unit_number);
@@ -866,7 +874,7 @@ function dedupePositionsByVehicle(
     let pick =
       (prefer && list.find((p) => p.provider === prefer)) ||
       list.slice().sort((a, b) => ageMs(a.last_update) - ageMs(b.last_update))[0];
-    // If preferred provider exists but is much staler (>2h) than another, use fresher
+    // If preferred provider exists but is much staler (>10m) than another, use fresher
     if (prefer) {
       const preferredPos = list.find((p) => p.provider === prefer);
       const freshest = list.slice().sort((a, b) => ageMs(a.last_update) - ageMs(b.last_update))[0];
@@ -874,7 +882,7 @@ function dedupePositionsByVehicle(
         preferredPos &&
         freshest &&
         preferredPos.id !== freshest.id &&
-        ageMs(preferredPos.last_update) - ageMs(freshest.last_update) > 2 * 60 * 60 * 1000
+        ageMs(preferredPos.last_update) - ageMs(freshest.last_update) > 10 * 60 * 1000
       ) {
         pick = freshest;
       } else if (preferredPos) {

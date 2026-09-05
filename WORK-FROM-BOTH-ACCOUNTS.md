@@ -1,6 +1,6 @@
 # Building Field App from either of your X accounts (Grok Build)
 
-You’re the only builder. GitHub is the **shared brain** so either Grok login can pick up the same code.
+You’re the only builder. GitHub is the code. The briefing is the Slack canvas (Goals + status), not commit messages. Either Grok login uses the same folder.
 
 **Repo (private):** https://github.com/totalassuranceac/field-app  
 **Local folder (this PC):** `C:\grok\fueltracker`  
@@ -28,16 +28,16 @@ The **code** is always “whatever is on GitHub + this folder.”
 
 ```powershell
 cd C:\grok\fueltracker
-git add -A
+git add PATHS-TO-REAL-FILES-ONLY
 git status
 git commit -m "Describe what you finished"
-git push origin main
+git push
 ```
 
 If nothing to commit, still:
 
 ```powershell
-git push origin main
+git push
 ```
 
 ### Start of a session (other account or next day)
@@ -49,7 +49,7 @@ git push origin main
 
 ```powershell
 cd C:\grok\fueltracker
-git pull origin main
+git pull
 ```
 
 4. Tell Grok something like:  
@@ -108,3 +108,6 @@ If `git` isn’t found in PATH, use the full path or re-open the terminal after 
 
 Repo → **Settings → Collaborators** → add their GitHub username.  
 For **only your two X accounts**, you don’t need two GitHub users — one GitHub (`totalassuranceac`) + pull/push from any machine is enough.
+
+
+Never git add -A. Commit only real files. Briefing is the Slack canvas, not commits.

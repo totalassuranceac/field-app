@@ -172,7 +172,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/truck-stock") ||
     pathname.startsWith("/parts-receipts") ||
     pathname.startsWith("/assets") ||
-    pathname.startsWith("/warranties")
+    pathname.startsWith("/warranties") ||
+    pathname.startsWith("/invoice-lookup")
   ) {
     return "warehouse";
   }
@@ -588,6 +589,14 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/warranties",
       label: "Warranties",
       show: true,
+    },
+    {
+      to: "/invoice-lookup",
+      label: "Invoice lookup",
+      show:
+        adminShell ||
+        user?.role === "office" ||
+        user?.role === "supervisor",
     },
   ];
 

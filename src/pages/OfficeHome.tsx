@@ -161,13 +161,13 @@ export function OfficeHome() {
             </span>
           </span>
         </Link>
-        <Link to="/inventory" className="office-action">
+        <Link to="/invoice-lookup" className="office-action">
           <span className="office-action-icon" aria-hidden>
-            📊
+            🧾
           </span>
           <span>
-            <strong>Inventory</strong>
-            <span className="office-action-hint">View stock &amp; trucks</span>
+            <strong>Invoice lookup</strong>
+            <span className="office-action-hint">Address → model &amp; serial → print</span>
           </span>
         </Link>
         <Link to="/part-pickup" className="office-action">
@@ -181,6 +181,15 @@ export function OfficeHome() {
                 ? `${vendorWaiting} waiting for warehouse pickup`
                 : "Parts ready at a store — request pickup"}
             </span>
+          </span>
+        </Link>
+        <Link to="/inventory" className="office-action">
+          <span className="office-action-icon" aria-hidden>
+            📊
+          </span>
+          <span>
+            <strong>Inventory</strong>
+            <span className="office-action-hint">View stock &amp; trucks</span>
           </span>
         </Link>
         {unread > 0 && (

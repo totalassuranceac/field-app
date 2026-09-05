@@ -1,7 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
-import { PTO_SHEET_EMPLOYEES, PTO_SHEET_LOG } from "../ptoSheetImport";
 
 type TimeOffStatus = "pending" | "approved" | "declined" | "cancelled";
 type TimeOffType = "pto" | "sick" | "personal" | "unpaid" | "other";
@@ -467,7 +466,6 @@ export function TimeOffPage() {
       note: string | null;
     }>;
   } | null>(null);
-  const [importBusy, setImportBusy] = useState(false);
   /** Printable overage acknowledgment (employee signs they agree they used advance time) */
   const [overageForm, setOverageForm] = useState<PtoBoardRow | null>(null);
 
@@ -485,7 +483,17 @@ export function TimeOffPage() {
   const [adjustKind, setAdjustKind] = useState<"vacation" | "sick">("sick");
   const [adjustHours, setAdjustHours] = useState("");
   const [adjustNote, setAdjustNote] = useState("");
+  /** Day the hours were actually used — required; not defaulted to today. */
+  const [adjustUsedOn, setAdjustUsedOn] = useState("");
   const [adjustBusy, setAdjustBusy] = useState(false);
+
+  function openManualAdjust(r: PtoBoardRow) {
+    setAdjustRow(r);
+    setAdjustKind(r.sick_balance < r.vacation_balance ? "sick" : "vacation");
+    setAdjustHours("");
+    setAdjustNote("");
+    setAdjustUsedOn("");
+  }
 
   const canSeeAllApprovals =
     user?.role === "admin" || user?.role === "office" || can(user, "manageUsers");
@@ -652,6 +660,11 @@ export function TimeOffPage() {
       setError("Enter non-zero hours (positive = use more, negative = restore).");
       return;
     }
+    const usedOn = adjustUsedOn.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(usedOn)) {
+      setError("Pick the Used on date — the day those hours were actually used.");
+      return;
+    }
     if (!adjustNote.trim()) {
       setError("Note is required for manual adjustments.");
       return;
@@ -667,14 +680,17 @@ export function TimeOffPage() {
           kind: adjustKind,
           hours,
           note: adjustNote.trim(),
+          entry_date: usedOn,
         }),
       });
+      const kindLabel = adjustKind === "sick" ? "sick" : "vacation";
       setOk(
-        `Adjusted ${adjustRow.name} ${adjustKind} by ${hours > 0 ? "+" : ""}${hours}h`
+        `Adjusted ${adjustRow.name}: ${hours > 0 ? "+" : ""}${hours}h ${kindLabel} · used on ${formatDisplayDate(usedOn)}`
       );
       setAdjustRow(null);
       setAdjustHours("");
       setAdjustNote("");
+      setAdjustUsedOn("");
       await loadBoard();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adjust failed");
@@ -695,74 +711,6 @@ export function TimeOffPage() {
       document.body.classList.remove("print-pto-overage");
     };
   }, []);
-
-  async function runSheetImport() {
-    if (
-      !window.confirm(
-        "Import hire dates, birthdays, and current vacation/sick balances from the PTO spreadsheet snapshot into Field App?\n\nYour Google Sheet is not changed. You can re-import later."
-      )
-    ) {
-      return;
-    }
-    setImportBusy(true);
-    setError("");
-    setOk("");
-    try {
-      const res = await api<{
-        updated: number;
-        skipped: number;
-        unmatched: string[];
-      }>("/time-off/import-sheet", {
-        method: "POST",
-        body: JSON.stringify({ rows: PTO_SHEET_EMPLOYEES }),
-      });
-      setOk(
-        `Imported ${res.updated} employee balance(s)` +
-          (res.unmatched?.length
-            ? ` · unmatched: ${res.unmatched.slice(0, 8).join(", ")}${res.unmatched.length > 8 ? "…" : ""}`
-            : "")
-      );
-      await loadBoard();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Import failed");
-    } finally {
-      setImportBusy(false);
-    }
-  }
-
-  async function runLogImport() {
-    if (
-      !window.confirm(
-        "Import the spreadsheet Time Off Log into the ledger (Print report history)?\n\nBalances are not changed. Your Google Sheet is not changed. Re-import replaces prior Sheet log rows."
-      )
-    ) {
-      return;
-    }
-    setImportBusy(true);
-    setError("");
-    setOk("");
-    try {
-      const res = await api<{
-        inserted: number;
-        skipped: number;
-        unmatched: string[];
-      }>("/time-off/import-log", {
-        method: "POST",
-        body: JSON.stringify({ rows: PTO_SHEET_LOG, replace: true }),
-      });
-      setOk(
-        `Imported ${res.inserted} ledger row(s)` +
-          (res.unmatched?.length
-            ? ` · unmatched: ${res.unmatched.slice(0, 8).join(", ")}${res.unmatched.length > 8 ? "…" : ""}`
-            : "")
-      );
-      if (reportEmpId) await loadReport();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Log import failed");
-    } finally {
-      setImportBusy(false);
-    }
-  }
 
   type ReportPayload = {
     employee: { id: number; name: string };
@@ -993,7 +941,7 @@ export function TimeOffPage() {
           <h1>Time off</h1>
           <p>
             Request days off and track vacation &amp; sick balances
-            {canSeeBoard ? " — office board matches the PTO spreadsheet" : ""}. Vacation and sick
+            {canSeeBoard ? " — office board and Adjust are here" : ""}. Vacation and sick
             requests can only be submitted for hours you still have available.
           </p>
         </div>
@@ -1351,32 +1299,12 @@ export function TimeOffPage() {
               <button type="button" className="btn secondary btn-sm" onClick={() => void loadBoard()}>
                 Refresh
               </button>
-              {user?.role === "admin" && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    disabled={importBusy}
-                    onClick={() => void runSheetImport()}
-                  >
-                    {importBusy ? "Importing…" : "Import balances from sheet"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn secondary btn-sm"
-                    disabled={importBusy}
-                    onClick={() => void runLogImport()}
-                  >
-                    {importBusy ? "Importing…" : "Import Time Off Log (history)"}
-                  </button>
-                </>
-              )}
             </div>
             <p className="muted" style={{ margin: "0.5rem 0 0", fontSize: "0.82rem" }}>
               Balances can go negative (they owe hours). On each hire anniversary, vacation &amp; sick
               used reset automatically. When someone is over, use{" "}
               <strong>Print owe / sign-off</strong> below — they sign that owed hours come out of
-              their next grant. Use <strong>Import Time Off Log</strong> if ledger history is empty.
+              their next grant.
             </p>
             <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}>
               <strong>Rehire rule:</strong> mark leavers inactive in People (set last day). If they
@@ -1430,94 +1358,175 @@ export function TimeOffPage() {
           <div className="card pto-board-table-wrap no-print">
             {!boardRows.length ? (
               <p className="muted" style={{ margin: 0 }}>
-                No employees on the board yet. Add hire dates in People, or run Import from PTO
-                spreadsheet (admin).
+                No employees on the board yet. Add hire dates in People.
               </p>
             ) : (
-              <table className="pto-board-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Hired</th>
-                    <th>Yrs</th>
-                    <th>Next anniv.</th>
-                    <th>Vac bal</th>
-                    <th>Vac used</th>
-                    <th>Sick bal</th>
-                    <th>Sick used</th>
-                    <th>Birthday</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
+              <>
+                {/* Desktop / tablet: compact table, sticky Adjust column */}
+                <div className="pto-board-desktop">
+                  <table className="pto-board-table pto-board-table-fit">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Hired</th>
+                        <th>Yrs</th>
+                        <th>Next anniv.</th>
+                        <th>Vacation</th>
+                        <th>Sick</th>
+                        <th className="pto-board-actions-col">Adjust</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {boardRows.map((r) => {
+                        const over = r.vacation_balance < 0 || r.sick_balance < 0;
+                        return (
+                          <tr key={r.employee_id} className={over ? "pto-row-over" : undefined}>
+                            <td className="pto-board-name-cell">
+                              <strong>{r.name}</strong>
+                              {over ? (
+                                <span className="badge danger" style={{ marginLeft: "0.35rem" }}>
+                                  Over
+                                </span>
+                              ) : null}
+                              {r.birthday_md ? (
+                                <div className="muted pto-board-bday">Bday {r.birthday_md}</div>
+                              ) : null}
+                            </td>
+                            <td>{r.hire_date || "—"}</td>
+                            <td>{r.years_of_service}</td>
+                            <td>{r.next_anniversary || "—"}</td>
+                            <td
+                              className={`pto-bank-cell${
+                                r.vacation_balance < 0 ? " pto-neg" : ""
+                              }`}
+                            >
+                              <span className="pto-bank-bal">
+                                {r.vacation_balance}
+                                <span className="muted"> / {r.vacation_entitlement}</span>
+                              </span>
+                              <span className="muted pto-bank-used">used {r.vacation_used}</span>
+                            </td>
+                            <td
+                              className={`pto-bank-cell${r.sick_balance < 0 ? " pto-neg" : ""}`}
+                            >
+                              <span className="pto-bank-bal">
+                                {r.sick_balance}
+                                <span className="muted"> / {r.sick_entitlement}</span>
+                              </span>
+                              <span className="muted pto-bank-used">used {r.sick_used}</span>
+                            </td>
+                            <td className="pto-board-actions-col">
+                              <div className="pto-board-actions">
+                                {canConfirmPayroll ? (
+                                  <button
+                                    type="button"
+                                    className="btn secondary btn-sm"
+                                    onClick={() => openManualAdjust(r)}
+                                  >
+                                    Adjust
+                                  </button>
+                                ) : null}
+                                {over ? (
+                                  <button
+                                    type="button"
+                                    className="btn secondary btn-sm"
+                                    onClick={() => void printOverageForm(r)}
+                                    title="Print acknowledgment of hours owed"
+                                  >
+                                    Print owe
+                                  </button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Phone: one card per employee — no sideways scroll */}
+                <ul className="pto-board-cards">
                   {boardRows.map((r) => {
                     const over = r.vacation_balance < 0 || r.sick_balance < 0;
                     return (
-                      <tr key={r.employee_id} className={over ? "pto-row-over" : undefined}>
-                        <td>
-                          <strong>{r.name}</strong>
-                          {over ? (
-                            <span className="badge danger" style={{ marginLeft: "0.35rem" }}>
-                              Over
-                            </span>
-                          ) : null}
-                        </td>
-                        <td>{r.hire_date || "—"}</td>
-                        <td>{r.years_of_service}</td>
-                        <td>{r.next_anniversary || "—"}</td>
-                        <td className={r.vacation_balance < 0 ? "pto-neg" : undefined}>
-                          {r.vacation_balance}
-                          <span className="muted"> / {r.vacation_entitlement}</span>
-                        </td>
-                        <td>{r.vacation_used}</td>
-                        <td className={r.sick_balance < 0 ? "pto-neg" : undefined}>
-                          {r.sick_balance}
-                          <span className="muted"> / {r.sick_entitlement}</span>
-                        </td>
-                        <td>{r.sick_used}</td>
-                        <td>{r.birthday_md || "—"}</td>
-                        <td>
-                          <div className="toolbar" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
-                            {canConfirmPayroll ? (
-                              <button
-                                type="button"
-                                className="btn secondary btn-sm"
-                                onClick={() => {
-                                  setAdjustRow(r);
-                                  setAdjustKind(r.sick_balance < r.vacation_balance ? "sick" : "vacation");
-                                  setAdjustHours("");
-                                  setAdjustNote("");
-                                }}
-                              >
-                                Adjust
-                              </button>
-                            ) : null}
+                      <li
+                        key={r.employee_id}
+                        className={`pto-board-card${over ? " is-over" : ""}`}
+                      >
+                        <div className="pto-board-card-head">
+                          <div>
+                            <strong>{r.name}</strong>
                             {over ? (
-                              <button
-                                type="button"
-                                className="btn secondary btn-sm"
-                                onClick={() => void printOverageForm(r)}
-                                title="Print acknowledgment of hours owed"
-                              >
-                                Print owe / sign-off
-                              </button>
+                              <span className="badge danger" style={{ marginLeft: "0.35rem" }}>
+                                Over
+                              </span>
                             ) : null}
+                            <div className="muted pto-board-card-meta">
+                              {[
+                                r.hire_date ? `Hired ${r.hire_date}` : null,
+                                `${r.years_of_service} yr`,
+                                r.next_anniversary ? `Next ${r.next_anniversary}` : null,
+                                r.birthday_md ? `Bday ${r.birthday_md}` : null,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </div>
                           </div>
-                        </td>
-                      </tr>
+                        </div>
+                        <div className="pto-board-card-banks">
+                          <div>
+                            <span className="pto-board-card-label">Vacation</span>
+                            <span className={r.vacation_balance < 0 ? "pto-neg" : undefined}>
+                              {r.vacation_balance}
+                              <span className="muted"> / {r.vacation_entitlement}</span>
+                            </span>
+                            <span className="muted"> · used {r.vacation_used}</span>
+                          </div>
+                          <div>
+                            <span className="pto-board-card-label">Sick</span>
+                            <span className={r.sick_balance < 0 ? "pto-neg" : undefined}>
+                              {r.sick_balance}
+                              <span className="muted"> / {r.sick_entitlement}</span>
+                            </span>
+                            <span className="muted"> · used {r.sick_used}</span>
+                          </div>
+                        </div>
+                        <div className="pto-board-card-actions">
+                          {canConfirmPayroll ? (
+                            <button
+                              type="button"
+                              className="btn secondary btn-sm"
+                              onClick={() => openManualAdjust(r)}
+                            >
+                              Adjust
+                            </button>
+                          ) : null}
+                          {over ? (
+                            <button
+                              type="button"
+                              className="btn secondary btn-sm"
+                              onClick={() => void printOverageForm(r)}
+                            >
+                              Print owe / sign-off
+                            </button>
+                          ) : null}
+                        </div>
+                      </li>
                     );
                   })}
-                </tbody>
-              </table>
+                </ul>
+              </>
             )}
           </div>
 
           {adjustRow && canConfirmPayroll && (
-            <div className="card" style={{ marginTop: "0.75rem" }}>
+            <div className="card pto-adjust-form-card" style={{ marginTop: "0.75rem" }}>
               <h3 style={{ marginTop: 0 }}>Manual adjust · {adjustRow.name}</h3>
               <p className="muted" style={{ fontSize: "0.85rem" }}>
-                Positive hours = use more (deduct from bank). Negative = restore / credit. Required note
-                for the ledger.
+                Positive hours = use more (deduct from bank). Negative = restore / credit.{" "}
+                <strong>Used on</strong> is the day they were actually out — not today unless that
+                is the day. Note required for the ledger.
               </p>
               <form className="form" onSubmit={(ev) => void submitManualAdjust(ev)}>
                 <div className="form row">
@@ -1541,6 +1550,15 @@ export function TimeOffPage() {
                       required
                     />
                   </label>
+                  <label>
+                    Used on *
+                    <input
+                      type="date"
+                      value={adjustUsedOn}
+                      onChange={(e) => setAdjustUsedOn(e.target.value)}
+                      required
+                    />
+                  </label>
                 </div>
                 <label>
                   Note
@@ -1558,7 +1576,10 @@ export function TimeOffPage() {
                   <button
                     type="button"
                     className="btn secondary"
-                    onClick={() => setAdjustRow(null)}
+                    onClick={() => {
+                      setAdjustRow(null);
+                      setAdjustUsedOn("");
+                    }}
                   >
                     Cancel
                   </button>
@@ -1841,20 +1862,8 @@ export function TimeOffPage() {
             <p className="muted" style={{ fontSize: "0.85rem" }}>
               Pick an employee — <strong>From</strong> defaults to their last anniversary (or hire
               date), <strong>To</strong> to today. Print report uses that window. Adjust dates if
-              needed. If ledger is empty, import the Time Off Log (admin).
+              needed.
             </p>
-            {user?.role === "admin" && (
-              <div className="toolbar" style={{ marginBottom: "0.65rem" }}>
-                <button
-                  type="button"
-                  className="btn secondary btn-sm"
-                  disabled={importBusy}
-                  onClick={() => void runLogImport()}
-                >
-                  {importBusy ? "Importing…" : "Import Time Off Log (history)"}
-                </button>
-              </div>
-            )}
             <div className="form row">
               <label>
                 Employee
@@ -2000,9 +2009,8 @@ export function TimeOffPage() {
               <h3 className="pto-report-section-title">Ledger history</h3>
               {!reportData.ledger.length ? (
                 <p className="muted">
-                  No ledger rows in range. Balances can still show hours while history is empty —
-                  import the spreadsheet Time Off Log (admin), or clear the date filter and try
-                  again.
+                  No ledger rows in this date range. Clear the date filter and try again, or check
+                  Adjust entries on the PTO board.
                 </p>
               ) : (
                 <table className="pto-board-table">
