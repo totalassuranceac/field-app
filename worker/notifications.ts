@@ -559,10 +559,12 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
       const days = Number(w.days_open) || 0;
       const urgent = days >= 14;
       const kind = urgent ? "warranty_urgent" : "warranty_aging";
+      // Any prior row (read or unread) — sweep may auto-read non-File claims;
+      // do not recreate every poll or the inbox table fills with read spam.
       const existing = await db
         .prepare(
           `SELECT id FROM notifications
-           WHERE kind = ? AND entity_id = ? AND read_at IS NULL
+           WHERE kind = ? AND entity_id = ?
            LIMIT 1`
         )
         .bind(kind, String(w.id))
@@ -730,6 +732,239 @@ export async function markNotificationRead(
     )
     .bind(id, user.id)
     .run();
+}
+
+/**
+ * Normalize entity_type aliases used when inserting notifications.
+ * Returns a canonical key, or null for unknown types (leave unread — no guessing).
+ */
+function normalizeNotifEntityType(raw: string | null | undefined): string | null {
+  const t = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+  if (!t) return null;
+  if (t === "tool_loan" || t === "loan" || t === "tool_loan_request") return "tool_loan";
+  if (t === "warranty" || t === "warranty_claim") return "warranty";
+  if (t === "fuel" || t === "fuel_receipt" || t === "fuel_entry" || t === "receipt") return "fuel";
+  if (t === "part_pickup" || t === "vendor_run" || t === "parts_request" || t === "parts_pickup")
+    return "part_pickup";
+  if (t === "pickup" || t === "part_pickups") return "pickup";
+  if (t === "parts_dropoff" || t === "parts_drop_off" || t === "dropoff") return "parts_dropoff";
+  return null;
+}
+
+/**
+ * Whether the linked card is still waiting work.
+ * - true  → keep unread
+ * - false → auto-mark read
+ * - null  → entity missing / unknown / error → leave unread (no guessing)
+ */
+async function entityStillWaiting(
+  db: D1Database,
+  entityType: string,
+  entityId: string
+): Promise<boolean | null> {
+  const kind = normalizeNotifEntityType(entityType);
+  if (!kind) return null;
+  const idNum = Number(entityId);
+  if (!Number.isFinite(idNum) || idNum <= 0) return null;
+
+  try {
+    if (kind === "tool_loan") {
+      const row = await db
+        .prepare(
+          `SELECT status, part_status FROM tool_loan_requests WHERE id = ?`
+        )
+        .bind(idNum)
+        .first<{ status: string; part_status: string | null }>();
+      if (!row) return null;
+      const status = String(row.status || "").toLowerCase();
+      // Needs Chris/office approve, or any legacy pending_* queue
+      if (status === "pending_office" || status === "pending_manager" || status.startsWith("pending_")) {
+        return true;
+      }
+      // Approved but not ordered yet — still waiting work
+      if (status === "approved") {
+        const part = String(row.part_status || "pending_order").toLowerCase() || "pending_order";
+        return part === "pending_order";
+      }
+      // ordered / arrived / paperwork_signed / declined / cancelled / done → clear
+      return false;
+    }
+
+    if (kind === "warranty") {
+      // Same rule as countWarrantyFilePile / Home warranty File badge
+      try {
+        const row = await db
+          .prepare(
+            `SELECT status, IFNULL(parked, 0) as parked FROM warranty_claims WHERE id = ?`
+          )
+          .bind(idNum)
+          .first<{ status: string; parked: number }>();
+        if (!row) return null;
+        return (
+          String(row.status || "").toLowerCase() === "dropped_off" && Number(row.parked || 0) === 0
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/no such column.*parked/i.test(msg)) {
+          const row = await db
+            .prepare(`SELECT status FROM warranty_claims WHERE id = ?`)
+            .bind(idNum)
+            .first<{ status: string }>();
+          if (!row) return null;
+          return String(row.status || "").toLowerCase() === "dropped_off";
+        }
+        return null;
+      }
+    }
+
+    if (kind === "fuel") {
+      // Needs OCR review = Home fuel badge; verified (ocr_reviewed_at set) → clear
+      try {
+        const row = await db
+          .prepare(
+            `SELECT ocr_reviewed_at, ocr_needs_review, ocr_json, receipt_key
+             FROM fuel_entries WHERE id = ?`
+          )
+          .bind(idNum)
+          .first<{
+            ocr_reviewed_at: string | null;
+            ocr_needs_review: number | null;
+            ocr_json: string | null;
+            receipt_key: string | null;
+          }>();
+        if (!row) return null;
+        if (row.ocr_reviewed_at) return false;
+        const hasReceipt = Boolean(row.receipt_key && String(row.receipt_key).trim());
+        const needsReview =
+          Number(row.ocr_needs_review || 0) === 1 || row.ocr_json == null || row.ocr_json === "";
+        // Only keep unread while it would count on the OCR review pile
+        return hasReceipt && needsReview;
+      } catch {
+        return null;
+      }
+    }
+
+    if (kind === "part_pickup") {
+      // Speedy vendor-run tickets — waiting while open lines remain
+      try {
+        const ticket = await db
+          .prepare(`SELECT status FROM part_pickup_tickets WHERE id = ?`)
+          .bind(idNum)
+          .first<{ status: string }>();
+        if (!ticket) return null;
+        const openLines = await db
+          .prepare(
+            `SELECT COUNT(*) as c FROM part_pickup_ticket_lines
+             WHERE ticket_id = ? AND status IN ('pending','not_ready','partial')`
+          )
+          .bind(idNum)
+          .first<{ c: number }>();
+        const open = Number(openLines?.c || 0);
+        if (open > 0) return true;
+        const st = String(ticket.status || "").toLowerCase();
+        // Empty open/partial ticket still counts as waiting (same as countPartPickupWaiting)
+        if (st === "open" || st === "partial") {
+          const lineCount = await db
+            .prepare(
+              `SELECT COUNT(*) as c FROM part_pickup_ticket_lines WHERE ticket_id = ?`
+            )
+            .bind(idNum)
+            .first<{ c: number }>();
+          if (Number(lineCount?.c || 0) === 0) return true;
+        }
+        // done / cancelled / voided / fully picked → clear
+        return false;
+      } catch {
+        return null;
+      }
+    }
+
+    if (kind === "pickup") {
+      // Legacy warehouse handoff list
+      try {
+        const row = await db
+          .prepare(`SELECT status FROM part_pickups WHERE id = ?`)
+          .bind(idNum)
+          .first<{ status: string }>();
+        if (!row) return null;
+        const st = String(row.status || "").toLowerCase();
+        return st === "open" || st === "ready" || st === "partial";
+      } catch {
+        return null;
+      }
+    }
+
+    if (kind === "parts_dropoff") {
+      try {
+        const row = await db
+          .prepare(`SELECT status FROM parts_dropoffs WHERE id = ?`)
+          .bind(idNum)
+          .first<{ status: string }>();
+        if (!row) return null;
+        return String(row.status || "").toLowerCase() === "waiting";
+      } catch {
+        return null;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Auto-mark unread notifications read when their linked card is no longer waiting.
+ * Only SET read_at — never DELETE. Missing/unknown entities stay unread.
+ * Called from GET /notifications so bell + inbox stay honest without a cron.
+ */
+export async function sweepUnreadNotifications(
+  db: D1Database,
+  userId: number
+): Promise<number> {
+  let rows: Array<{ id: number; entity_type: string; entity_id: string }> = [];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, entity_type, entity_id FROM notifications
+         WHERE user_id = ?
+           AND read_at IS NULL
+           AND kind NOT LIKE 'message%'
+           AND entity_type IS NOT NULL AND TRIM(entity_type) != ''
+           AND entity_id IS NOT NULL AND TRIM(entity_id) != ''
+         ORDER BY id ASC
+         LIMIT 200`
+      )
+      .bind(userId)
+      .all<{ id: number; entity_type: string; entity_id: string }>();
+    rows = res.results || [];
+  } catch {
+    return 0;
+  }
+
+  let marked = 0;
+  for (const n of rows) {
+    // Skip types we don't know how to evaluate (leave unread)
+    if (!normalizeNotifEntityType(n.entity_type)) continue;
+    const waiting = await entityStillWaiting(db, n.entity_type, n.entity_id);
+    if (waiting !== false) continue;
+    try {
+      await db
+        .prepare(
+          `UPDATE notifications SET read_at = datetime('now')
+           WHERE id = ? AND user_id = ? AND read_at IS NULL`
+        )
+        .bind(n.id, userId)
+        .run();
+      marked += 1;
+    } catch {
+      /* ignore single-row failure */
+    }
+  }
+  return marked;
 }
 
 /**

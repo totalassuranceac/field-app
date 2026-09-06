@@ -38,6 +38,7 @@ import {
   notifyUsers,
   notifyWeeklyChecksDue,
   shortSms,
+  sweepUnreadNotifications,
   userIdsForEmployees,
   userIdsForIssue,
   usersByRoles,
@@ -5441,6 +5442,12 @@ api.get("/notifications", async (c) => {
     await notifyOpsActionItems(c.env.DB);
   } catch {
     /* optional */
+  }
+  // Auto-clear inbox rows whose linked card is no longer waiting (loan/warranty/fuel/vendor)
+  try {
+    await sweepUnreadNotifications(c.env.DB, user.id);
+  } catch {
+    /* optional — never block inbox */
   }
   // Exclude legacy team-chat alerts (messaging UI removed)
   const rows = await c.env.DB.prepare(
