@@ -114,6 +114,9 @@ const PartsRunPage = lazy(() =>
 const TvBoardPage = lazy(() =>
   import("./pages/TvBoardPage").then((m) => ({ default: m.TvBoardPage }))
 );
+const DayBoardPage = lazy(() =>
+  import("./pages/DayBoardPage").then((m) => ({ default: m.DayBoardPage }))
+);
 const StudioPage = lazy(() =>
   import("./pages/StudioPage").then((m) => ({ default: m.StudioPage }))
 );
@@ -374,6 +377,10 @@ export default function App() {
                     <Route
                       path="/tv"
                       element={<LazyPage title="TV board" Page={TvBoardPage} />}
+                    />
+                    <Route
+                      path="/day-board"
+                      element={<LazyPage title="Day board" Page={DayBoardPage} />}
                     />
                     <Route
                       path="/studio"

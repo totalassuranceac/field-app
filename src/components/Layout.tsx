@@ -193,7 +193,8 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/settings") ||
     pathname.startsWith("/warehouse-cameras") ||
     pathname.startsWith("/studio") ||
-    pathname.startsWith("/tv")
+    pathname.startsWith("/tv") ||
+    pathname.startsWith("/day-board")
   ) {
     return "company";
   }
@@ -649,6 +650,11 @@ export function Layout({ children }: { children: ReactNode }) {
       to: "/admin",
       label: "People",
       show: adminShell || can(user, "manageUsers") || can(user, "manageEmployees"),
+    },
+    {
+      to: "/day-board",
+      label: "Day board",
+      show: can(user, "viewDayBoard"),
     },
     {
       to: "/warehouse-cameras",

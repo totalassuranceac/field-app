@@ -18336,3 +18336,130 @@ svg {
   font-size: 0.82rem;
   text-align: right;
 }
+
+/* ——— Day board (Oct 2025 Dispatch Board sheet) ——— */
+.day-board {
+  min-width: 0;
+}
+.day-board-header {
+  align-items: flex-end;
+}
+.day-board-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.day-board-picker input[type="date"] {
+  font: inherit;
+  padding: 0.28rem 0.4rem;
+  border: 1px solid var(--border, #c9b896);
+  border-radius: 6px;
+  background: #fff;
+}
+.day-board-error {
+  margin: 0 0 0.75rem;
+}
+.day-board-section {
+  margin: 0 0 1.1rem;
+}
+.day-board-section-label {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #5a4630;
+  margin: 0 0 0.35rem;
+}
+.day-board-empty {
+  margin: 0.25rem 0 0.6rem;
+  font-size: 0.85rem;
+}
+.day-board-sheet {
+  overflow-x: auto;
+  border: 1px solid #c9b896;
+  background: #fff;
+}
+.day-board-row {
+  display: flex;
+  flex-wrap: nowrap;
+  min-height: 4.2rem;
+  align-items: stretch;
+  border-bottom: 1px solid #d8c7a3;
+}
+.day-board-row:last-child {
+  border-bottom: 0;
+}
+.day-board-tech {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  background: #efe4c8;
+  border-right: 1px solid #c9b896;
+  color: #2b2114;
+  font-weight: 800;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+}
+.day-board-tech-name {
+  display: block;
+  max-height: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.day-board-slot {
+  flex: 1 0 7.5rem;
+  min-width: 7.5rem;
+  padding: 0.28rem 0.38rem;
+  border-left: 1px solid #e4d5b4;
+  background: #fff;
+  overflow: hidden;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+.day-board-slot.is-filled {
+  background: #f3e6c8;
+}
+.day-board-slot.is-done {
+  background: #ffe566;
+}
+.day-board-slot.is-off {
+  background: #d32f2f;
+  color: #fff;
+}
+.day-board-slot.ink-st {
+  color: #1a4fd6;
+}
+.day-board-slot.ink-board {
+  color: #111;
+}
+.day-board-slot.is-off,
+.day-board-slot.is-off.ink-st,
+.day-board-slot.is-off.ink-board {
+  color: #fff;
+}
+.day-board-slot-addr {
+  font-weight: 700;
+}
+.day-board-slot-meta {
+  opacity: 0.92;
+}
+.day-board-slot-off {
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+@media (max-width: 640px) {
+  .day-board-tech {
+    width: 36px;
+    flex-basis: 36px;
+    font-size: 0.74rem;
+  }
+}

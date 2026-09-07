@@ -159,6 +159,8 @@ export type StTechnician = {
   email: string | null;
   phone: string | null;
   active: boolean;
+  /** ST team name (Service / Install). Null when ST omits it. */
+  team: string | null;
 };
 
 /** Single user-facing failure line for Home. No ST/RFC/scope essays. */
@@ -525,6 +527,57 @@ export type LoadTechniciansResult =
   | { ok: true; techs: StTechnician[] }
   | { ok: false; forbidden: boolean; status: number; techs: StTechnician[] };
 
+function teamFromStRow(team: unknown): string | null {
+  if (team == null) return null;
+  if (typeof team === "string") {
+    const s = team.trim();
+    return s || null;
+  }
+  if (typeof team === "object" && team && "name" in team) {
+    const s = String((team as { name?: unknown }).name ?? "").trim();
+    return s || null;
+  }
+  const s = String(team).trim();
+  if (!s || s === "[object Object]") return null;
+  return s;
+}
+
+/** When the list API omits team, try the export endpoint (skip if it fails). */
+async function mergeTeamsFromTechnicianExport(
+  env: Env,
+  db: D1Database,
+  tenantId: string,
+  techs: StTechnician[]
+): Promise<void> {
+  try {
+    const q = new URLSearchParams({
+      page: "1",
+      pageSize: "500",
+      active: "true",
+    });
+    const res = await stApiGet(
+      env,
+      db,
+      `/settings/v2/tenant/${tenantId}/export/technicians?${q.toString()}`
+    );
+    if (!res.ok) return;
+    const body = res.json as { data?: Array<{ id?: number; team?: unknown }> };
+    const byId = new Map<number, string>();
+    for (const row of body?.data || []) {
+      if (row.id == null) continue;
+      const team = teamFromStRow(row.team);
+      if (team) byId.set(Number(row.id), team);
+    }
+    if (!byId.size) return;
+    for (const t of techs) {
+      const team = byId.get(t.id);
+      if (team) t.team = team;
+    }
+  } catch {
+    /* optional merge — board still works without team */
+  }
+}
+
 /** Load active ST technicians (settings API). Cached ~1h. Never invents IDs. */
 export async function loadStTechnicians(
   env: Env,
@@ -540,10 +593,11 @@ export async function loadStTechnicians(
     try {
       const cached = JSON.parse(raw) as TechListCache;
       if (cached.at && now - cached.at < TECH_CACHE_TTL_MS && Array.isArray(cached.techs)) {
-        // Normalize older cache rows that lacked userId
+        // Normalize older cache rows that lacked userId / team
         cached.techs = cached.techs.map((t) => ({
           ...t,
           userId: t.userId != null && Number(t.userId) > 0 ? Number(t.userId) : null,
+          team: t.team ?? null,
         }));
         memoryTechs = cached;
         return { ok: true, techs: cached.techs };
@@ -580,6 +634,7 @@ export async function loadStTechnicians(
         phoneNumber?: string | null;
         phone?: string | null;
         active?: boolean;
+        team?: unknown;
       }>;
       hasMore?: boolean;
     };
@@ -597,10 +652,15 @@ export async function loadStTechnicians(
             ? String(row.phone).trim()
             : null,
         active: row.active !== false,
+        team: teamFromStRow(row.team),
       });
     }
     if (!body?.hasMore || rows.length === 0) break;
     page += 1;
+  }
+
+  if (techs.length > 0 && techs.every((t) => t.team == null)) {
+    await mergeTeamsFromTechnicianExport(env, db, tenantId, techs);
   }
 
   const cache: TechListCache = { at: now, techs };
