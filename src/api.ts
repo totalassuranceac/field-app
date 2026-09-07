@@ -419,6 +419,12 @@ export const ALL_PERMISSIONS = [
   "viewLiveMap",
   /** Open live Studio (ta-ads) — office/admin in can(); named extras via canOpenStudio() */
   "openStudio",
+  /** Job clock (Dispatch → Arrive → Complete) — field + admin */
+  "useJobClock",
+  /** Ops Performance — office / admin / supervisor */
+  "viewOpsPerformance",
+  /** Day Board — office all rows; field own day */
+  "viewDayBoard",
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -440,6 +446,7 @@ const WRITE_PERMISSIONS = new Set<string>([
   "manageInventory",
   "manageInventoryLevels",
   "manageCompanyAssets",
+  "useJobClock",
 ]);
 
 /** True for the explorer role — same UI as admin, no mutations. */
@@ -476,7 +483,9 @@ export function can(user: User | null, action: string): boolean {
   // Viewer: read-only twin of admin UI
   if (r === "viewer") {
     if (WRITE_PERMISSIONS.has(action)) return false;
-    // All non-write capabilities (view*, browse) are allowed
+    // Ops board / day board office tools — not the explorer role
+    if (action === "viewOpsPerformance" || action === "viewDayBoard") return false;
+    // All other non-write capabilities (view*, browse) are allowed
     return true;
   }
 
@@ -537,6 +546,12 @@ export function can(user: User | null, action: string): boolean {
     viewLiveMap: ["admin", "office", "mechanic", "warehouse", "supervisor", "viewer"],
     /** Studio door — office only here; admin already short-circuits. Named extras use canOpenStudio(). */
     openStudio: ["admin", "office"],
+    /** Job clock — field techs; admin short-circuits above */
+    useJobClock: ["admin", "driver"],
+    /** Ops Performance — office eyes only */
+    viewOpsPerformance: ["admin", "office", "supervisor"],
+    /** Day Board — office + field (self scoped on API) */
+    viewDayBoard: ["admin", "office", "supervisor", "driver"],
   };
   return (map[action] || []).includes(r);
 }

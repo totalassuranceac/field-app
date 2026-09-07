@@ -33,6 +33,9 @@ export const FAVORITE_CATALOG: FavoriteRoute[] = [
   { path: "/admin", label: "People", hint: "Employees & logins" },
   { path: "/warehouse-cameras", label: "Security cameras", hint: "NVR / shop cams" },
   { path: "/time-off", label: "Time off", hint: "PTO requests" },
+  { path: "/clock", label: "Job clock", hint: "Dispatch · Arrive · Complete" },
+  { path: "/ops-performance", label: "Ops performance", hint: "Jobs · sales · ZC" },
+  { path: "/day-board", label: "Day board", hint: "Tech × jobs for a day" },
   { path: "/tool-loans", label: "Tool loan", hint: "Borrow tools" },
   { path: "/tool-loan-ledger", label: "Tool loan payroll", hint: "Charges" },
   { path: "/onboarding", label: "New hire packet", hint: "Hire forms" },
@@ -127,6 +130,13 @@ export function canFavoritePath(user: User | null, path: string): boolean {
     case "/warehouse-cameras":
       return adminShell || isOffice || isWarehouse || isSupervisor;
     case "/time-off":
+      return true;
+    case "/clock":
+      return can(user, "useJobClock");
+    case "/ops-performance":
+      return can(user, "viewOpsPerformance");
+    case "/day-board":
+      return can(user, "viewDayBoard");
     case "/tool-loans":
       return true;
     case "/tool-loan-ledger":

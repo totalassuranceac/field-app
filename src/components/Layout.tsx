@@ -152,6 +152,9 @@ function NavCategory({
 
 /** Which collapsible nav section a path belongs to (same for every role). */
 function pathCategory(pathname: string): string {
+  if (pathname.startsWith("/day-board")) return "dispatch";
+  if (pathname.startsWith("/clock")) return "mywork";
+  if (pathname.startsWith("/ops-performance")) return "performance";
   if (
     pathname.startsWith("/vehicles") ||
     pathname.startsWith("/live") ||
@@ -173,11 +176,17 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/parts-receipts") ||
     pathname.startsWith("/assets") ||
     pathname.startsWith("/warranties") ||
-    pathname.startsWith("/invoice-lookup")
+    pathname.startsWith("/invoice-lookup") ||
+    pathname.startsWith("/parts-runs") ||
+    pathname.startsWith("/dump-runs")
   ) {
     return "warehouse";
   }
-  if (pathname.startsWith("/issues") || pathname.startsWith("/service")) {
+  if (
+    pathname.startsWith("/issues") ||
+    pathname.startsWith("/service") ||
+    pathname.startsWith("/parts-orders")
+  ) {
     return "shop";
   }
   if (
@@ -194,15 +203,10 @@ function pathCategory(pathname: string): string {
     pathname.startsWith("/settings") ||
     pathname.startsWith("/warehouse-cameras") ||
     pathname.startsWith("/studio") ||
-    pathname.startsWith("/tv")
+    pathname.startsWith("/tv") ||
+    pathname.startsWith("/feedback")
   ) {
     return "company";
-  }
-  if (pathname.startsWith("/parts-orders")) {
-    return "shop";
-  }
-  if (pathname.startsWith("/parts-runs")) {
-    return "warehouse";
   }
   return "home";
 }
@@ -460,12 +464,36 @@ export function Layout({ children }: { children: ReactNode }) {
    * Same Command Center categories for every role — only permitted links show.
    * Empty categories are hidden automatically by NavCategory.
    */
+  /** Home stays thin — Day board / clock / ops live in named sections below. */
   const homeNav: NavItem[] = [
     {
       to: "/",
-      // One word for everyone — “Command center” sounded like a different app
       label: "Home",
       show: true,
+    },
+  ];
+
+  const dispatchNav: NavItem[] = [
+    {
+      to: "/day-board",
+      label: "Day board",
+      show: can(user, "viewDayBoard"),
+    },
+  ];
+
+  const myWorkNav: NavItem[] = [
+    {
+      to: "/clock",
+      label: "Job clock",
+      show: can(user, "useJobClock"),
+    },
+  ];
+
+  const performanceNav: NavItem[] = [
+    {
+      to: "/ops-performance",
+      label: "Ops performance",
+      show: can(user, "viewOpsPerformance"),
     },
   ];
 
@@ -764,6 +792,30 @@ export function Layout({ children }: { children: ReactNode }) {
           <nav className="nav">
             <NavGroup title="Home" items={homeNav} />
             <NavCategory
+              id="dispatch"
+              title="Dispatch"
+              hint="Day board · live ST jobs"
+              items={dispatchNav}
+              open={openCat === "dispatch"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
+              id="mywork"
+              title="My work"
+              hint="Job clock"
+              items={myWorkNav}
+              open={openCat === "mywork"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
+              id="performance"
+              title="Performance"
+              hint="Ops scores"
+              items={performanceNav}
+              open={openCat === "performance"}
+              onToggle={toggleCat}
+            />
+            <NavCategory
               id="fleet"
               title="Fleet"
               hint="Trucks · fuel · checks · map"
@@ -885,7 +937,7 @@ export function Layout({ children }: { children: ReactNode }) {
           {/* Same page color as main — right side, opposite Command Center */}
           <div className="content-tools no-print">
             <div className="topbar-actions content-tools-actions">
-              {showVendorCounter && (
+              {showVendorCounter && !location.pathname.startsWith("/part-pickup") && (
                 <NavLink
                   to="/part-pickup"
                   className={`topbar-vendor-chip${vendorWaiting > 0 ? " is-hot" : " is-clear"}`}

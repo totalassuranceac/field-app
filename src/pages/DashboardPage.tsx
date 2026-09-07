@@ -4,7 +4,6 @@ import { api, can, canOpenStudio, roleLabel } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
 import { StudioDoor } from "../components/StudioDoor";
-import { ZeroChargeCard } from "../components/ZeroChargeCard";
 import { OfficeHome } from "./OfficeHome";
 
 interface Dash {
@@ -915,8 +914,6 @@ export function DashboardPage() {
 
       <MyShortcuts />
 
-      {!isWarehouse ? <ZeroChargeCard /> : null}
-
       {canOpenStudio(user) ? (
         <div className="home-actions studio-door-row" style={{ marginBottom: "0.75rem" }}>
           <StudioDoor variant="home" />
@@ -957,6 +954,30 @@ export function DashboardPage() {
             <h2>Today’s checklist</h2>
           </div>
           <ul className="home-check-list">
+            <li>
+              <Link to="/day-board">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Day board</strong>
+                  <span className="muted">Your jobs for today · pick any day</span>
+                </span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/clock">
+                <span className="home-check-mark" aria-hidden>
+                  ○
+                </span>
+                <span>
+                  <strong>Job clock</strong>
+                  <span className="muted">
+                    Dispatch → Arrive → Complete (saved on phone — ST sync coming)
+                  </span>
+                </span>
+              </Link>
+            </li>
             <li className={myWeekly.length ? "is-todo" : "is-done"}>
               <Link to="/inspections">
                 <span className="home-check-mark" aria-hidden>

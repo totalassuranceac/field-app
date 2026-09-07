@@ -251,6 +251,18 @@ export const ROLE_PERMS = {
    * there is no Field App API that proxies Studio votes.
    */
   openStudio: ["admin", "office"] as Role[],
+  /**
+   * Job clock (Dispatch → Arrive → Complete). Field techs + admin for testing.
+   * Phase 1 queues locally — does not write ServiceTitan appointment status.
+   */
+  useJobClock: ["admin", "driver"] as Role[],
+  /** Ops Performance board — office eyes only (not field / warehouse / mechanic). */
+  viewOpsPerformance: ["admin", "office", "supervisor"] as Role[],
+  /**
+   * Day Board (ST schedule read-only).
+   * Office/admin/supervisor = all rows; driver = own day (enforced in handler).
+   */
+  viewDayBoard: ["admin", "office", "supervisor", "driver"] as Role[],
 };
 
 function normName(s: string): string {

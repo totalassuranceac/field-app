@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import { MyShortcuts } from "../components/MyShortcuts";
 import { StudioDoor } from "../components/StudioDoor";
-import { ZeroChargeCard } from "../components/ZeroChargeCard";
+
 
 
 interface SchedIssue {
@@ -115,11 +115,27 @@ export function OfficeHome() {
 
       <MyShortcuts />
 
-      <ZeroChargeCard />
-
       <div className="office-actions">
         <StudioDoor variant="office" />
-        <Link to="/live" className="office-action primary">
+        <Link to="/day-board" className="office-action primary">
+          <span className="office-action-icon" aria-hidden>
+            📋
+          </span>
+          <span>
+            <strong>Day board</strong>
+            <span className="office-action-hint">Tech × jobs · pick any day</span>
+          </span>
+        </Link>
+        <Link to="/ops-performance" className="office-action">
+          <span className="office-action-icon" aria-hidden>
+            📈
+          </span>
+          <span>
+            <strong>Ops performance</strong>
+            <span className="office-action-hint">Jobs · sales · zero-charge by period</span>
+          </span>
+        </Link>
+        <Link to="/live" className="office-action">
           <span className="office-action-icon" aria-hidden>
             🗺
           </span>

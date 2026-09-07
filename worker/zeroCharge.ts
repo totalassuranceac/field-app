@@ -159,6 +159,8 @@ export type StTechnician = {
   email: string | null;
   phone: string | null;
   active: boolean;
+  /** ST team label e.g. Service Technicians / Duct Installers / Equipment Installers */
+  team: string | null;
 };
 
 /** Single user-facing failure line for Home. No ST/RFC/scope essays. */
@@ -540,13 +542,19 @@ export async function loadStTechnicians(
     try {
       const cached = JSON.parse(raw) as TechListCache;
       if (cached.at && now - cached.at < TECH_CACHE_TTL_MS && Array.isArray(cached.techs)) {
-        // Normalize older cache rows that lacked userId
+        // Normalize older cache rows that lacked userId / team
         cached.techs = cached.techs.map((t) => ({
           ...t,
           userId: t.userId != null && Number(t.userId) > 0 ? Number(t.userId) : null,
+          team: (t as StTechnician).team ?? null,
         }));
-        memoryTechs = cached;
-        return { ok: true, techs: cached.techs };
+        // Refresh if cache predates team labels (Day Board crew split)
+        if (cached.techs.length && cached.techs.every((t) => !t.team)) {
+          /* fall through to live fetch */
+        } else {
+          memoryTechs = cached;
+          return { ok: true, techs: cached.techs };
+        }
       }
     } catch {
       /* refresh */
@@ -580,12 +588,14 @@ export async function loadStTechnicians(
         phoneNumber?: string | null;
         phone?: string | null;
         active?: boolean;
+        team?: unknown;
       }>;
       hasMore?: boolean;
     };
     const rows = body?.data || [];
     for (const row of rows) {
       if (row.id == null) continue;
+      const teamRaw = row.team != null ? String(row.team).trim() : "";
       techs.push({
         id: Number(row.id),
         userId: row.userId != null && Number(row.userId) > 0 ? Number(row.userId) : null,
@@ -597,10 +607,38 @@ export async function loadStTechnicians(
             ? String(row.phone).trim()
             : null,
         active: row.active !== false,
+        team: teamRaw || null,
       });
     }
     if (!body?.hasMore || rows.length === 0) break;
     page += 1;
+  }
+
+  // If list endpoint omits team, merge from export (optional)
+  if (techs.length && techs.every((t) => !t.team)) {
+    try {
+      const eq = new URLSearchParams({ page: "1", pageSize: "500", active: "true" });
+      const ex = await stApiGet(
+        env,
+        db,
+        `/settings/v2/tenant/${tenantId}/export/technicians?${eq.toString()}`
+      );
+      if (ex.ok) {
+        const body = ex.json as { data?: Array<{ id?: number; team?: unknown }> };
+        const byId = new Map<number, string>();
+        for (const row of body.data || []) {
+          if (row.id == null) continue;
+          const team = row.team != null ? String(row.team).trim() : "";
+          if (team) byId.set(Number(row.id), team);
+        }
+        for (const t of techs) {
+          const team = byId.get(t.id);
+          if (team) t.team = team;
+        }
+      }
+    } catch {
+      /* keep techs without team */
+    }
   }
 
   const cache: TechListCache = { at: now, techs };

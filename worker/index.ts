@@ -141,6 +141,25 @@ import {
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
 import { buildZeroChargePayload } from "./zeroCharge";
+import {
+  clockStWriteEnabled,
+  getTodaysJobsForUser,
+  recordClockStep,
+} from "./jobClock";
+import {
+  buildOpsPerformance,
+  buildOpsPersonJobs,
+  canViewOpsPerformance,
+} from "./opsPerformance";
+import {
+  buildAssignmentSmsBody,
+  isAfter4pmChicago,
+  maybeSmsAfterHoursAssignment,
+  parseAssignmentWebhookPayload,
+  pollAfterHoursAssignments,
+  verifyAssignmentWebhookSecret,
+} from "./assignmentSms";
+import { buildDayBoard, canViewDayBoard } from "./dayBoard";
 import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
 import {
   invoiceLookupPrintHtml,
@@ -7223,6 +7242,9 @@ api.patch("/warranties/:id", async (c) => {
       sets.push("shipped_by_user_id = COALESCE(shipped_by_user_id, ?)");
       vals.push(user.id);
     }
+    if (next === "claim_submitted" || next === "delivered") {
+      sets.push("needs_vendor_return = 0");
+    }
     // Closing outcomes — set processed_at so it leaves open / aging lists
     if (next === "approved" || next === "rejected" || next === "not_warranty") {
       sets.push("processed_at = datetime('now')");
@@ -7779,6 +7801,7 @@ api.get("/sms/status", async (c) => {
   const shop = await getSetting(c.env.DB, "shop_sms_phone", "");
   const mechanic = await getSetting(c.env.DB, "mechanic_sms_phone", "");
   const office = await getSetting(c.env.DB, "office_sms_phone", "");
+  const onCall = await getSetting(c.env.DB, "on_call_sms_phone", "");
   const discord = await getSetting(c.env.DB, "discord_webhook_url", "");
   const canSeeShop = ["admin", "office", "mechanic", "supervisor"].includes(me.role);
   return c.json({
@@ -7787,6 +7810,7 @@ api.get("/sms/status", async (c) => {
     shop_phone: canSeeShop ? shop : undefined,
     mechanic_phone: canSeeShop ? mechanic : undefined,
     office_phone: canSeeShop ? office : undefined,
+    on_call_phone: canSeeShop ? onCall : undefined,
     free_alerts: {
       discord: Boolean(discord.trim()),
       in_app: true,
@@ -7812,6 +7836,7 @@ api.put("/sms/role-phones", requireRoles(["admin"] as Role[]), async (c) => {
     shop_phone?: string;
     mechanic_phone?: string;
     office_phone?: string;
+    on_call_phone?: string;
   }>();
   if (body.shop_phone !== undefined) {
     await setSetting(c.env.DB, "shop_sms_phone", body.shop_phone.trim());
@@ -7822,19 +7847,23 @@ api.put("/sms/role-phones", requireRoles(["admin"] as Role[]), async (c) => {
   if (body.office_phone !== undefined) {
     await setSetting(c.env.DB, "office_sms_phone", body.office_phone.trim());
   }
+  if (body.on_call_phone !== undefined) {
+    await setSetting(c.env.DB, "on_call_sms_phone", body.on_call_phone.trim());
+  }
   await writeAudit(
     c.env.DB,
     c.get("user"),
     "update",
     "settings",
     "role_phones",
-    "Updated shop / mechanic / office SMS numbers"
+    "Updated shop / mechanic / office / on-call SMS numbers"
   );
   return c.json({
     ok: true,
     shop_phone: await getSetting(c.env.DB, "shop_sms_phone", ""),
     mechanic_phone: await getSetting(c.env.DB, "mechanic_sms_phone", ""),
     office_phone: await getSetting(c.env.DB, "office_sms_phone", ""),
+    on_call_phone: await getSetting(c.env.DB, "on_call_sms_phone", ""),
   });
 });
 
@@ -7994,8 +8023,7 @@ api.post("/sms/send", async (c) => {
 
   if (!toPhone) return c.json({ error: "Valid destination phone required" }, 400);
 
-  const prefix = `TA Fleet (${me.display_name}): `;
-  const full = `${prefix}${message}`.slice(0, 1500);
+  const full = message.slice(0, 1500);
   const sent = await sendSms(c.env, toPhone, full);
   await logSms(c.env.DB, {
     from_user_id: me.id,
@@ -8049,10 +8077,11 @@ api.post("/sms/test", async (c) => {
     dateStyle: "short",
     timeStyle: "short",
   });
-  const full = `TA Fleet test: SMS is working for ${me.display_name}. Sent ${when}. Reply STOP to opt out.`.slice(
-    0,
-    1500
-  );
+  const full =
+    `SMS test for ${me.display_name}. Sent ${when}. Reply STOP to opt out.`.slice(
+      0,
+      1500
+    );
   const sent = await sendSms(c.env, toPhone, full);
   await logSms(c.env.DB, {
     from_user_id: me.id,
@@ -8079,6 +8108,70 @@ api.post("/sms/test", async (c) => {
         : null,
   });
 });
+
+/**
+ * Admin: dry-run / force after-4pm assignment SMS logic (no ST writes).
+ * Body: { st_job_id, st_technician_id, assigned_at?, customer_name?, street?, window_start?, window_end?, force?: boolean }
+ * Without force, respects 4pm CT gate + dedupe. force=true sets assigned_at to now if after 4pm, else still gates.
+ */
+api.post(
+  "/sms/assignment-test",
+  requireRoles(["admin"] as Role[]),
+  async (c) => {
+    const body = await c.req.json<{
+      st_job_id?: string | number;
+      st_appointment_id?: string | number | null;
+      st_technician_id?: number;
+      assigned_at?: string;
+      customer_name?: string;
+      street?: string;
+      window_start?: string;
+      window_end?: string;
+      preview_only?: boolean;
+    }>();
+    const techId = Number(body.st_technician_id);
+    const jobId = body.st_job_id != null ? String(body.st_job_id) : "";
+    if (!(techId > 0) || !jobId) {
+      return c.json({ error: "st_job_id and st_technician_id required" }, 400);
+    }
+    const assignedAt = body.assigned_at || new Date().toISOString();
+    const ev = {
+      st_job_id: jobId,
+      st_appointment_id:
+        body.st_appointment_id != null ? String(body.st_appointment_id) : null,
+      st_technician_id: techId,
+      assigned_at: assignedAt,
+      customer_name: body.customer_name || null,
+      street: body.street || null,
+      window_start: body.window_start || null,
+      window_end: body.window_end || null,
+      source: "admin_test",
+    };
+    const preview = buildAssignmentSmsBody(ev);
+    const after4 = isAfter4pmChicago(assignedAt);
+    if (body.preview_only) {
+      return c.json({
+        ok: true,
+        preview_only: true,
+        after_4pm_ct: after4,
+        body: preview,
+        would_skip: !after4,
+      });
+    }
+    const result = await maybeSmsAfterHoursAssignment(c.env, c.env.DB, ev);
+    return c.json({ ok: true, after_4pm_ct: after4, body: preview, result });
+  }
+);
+
+/** Admin: run evening assignment poll once (snapshot diff → SMS if after 4pm CT). */
+api.post(
+  "/sms/assignment-poll",
+  requireRoles(["admin"] as Role[]),
+  async (c) => {
+    const r = await pollAfterHoursAssignments(c.env, c.env.DB);
+    return c.json({ ok: true, ...r, after_4pm_ct: isAfter4pmChicago(new Date()) });
+  }
+);
 
 /**
  * Admin: verify Messaging Service sender pool + A2P campaign link using Worker Twilio secrets.
@@ -9981,6 +10074,165 @@ api.get("/zero-charge", async (c) => {
       500
     );
   }
+});
+
+/** Ops Performance — admin / office / supervisor only. Read-only ST. */
+/**
+ * Day Board Phase 1 — READ-ONLY ST appointments for a Chicago day.
+ * Office/admin/supervisor: all tech rows. Driver: own row only.
+ * Never writes to ServiceTitan.
+ */
+api.get("/day-board", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const date = c.req.query("date");
+  try {
+    const payload = await buildDayBoard(c.env, c.env.DB, user, date);
+    payload.st_write_enabled = false;
+    return c.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Day board failed";
+    return c.json(
+      {
+        date: date || "",
+        timezone: "America/Chicago",
+        view: "office",
+        st_write_enabled: false,
+        rows: [],
+        error: msg,
+      },
+      500
+    );
+  }
+});
+
+api.get("/ops-performance", requireRoles(ROLE_PERMS.viewOpsPerformance), async (c) => {
+  const user = c.get("user");
+  if (!canViewOpsPerformance(user)) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const period = c.req.query("period");
+  const salesOff =
+    c.req.query("sales") === "0" || c.req.query("sales") === "false";
+  try {
+    const payload = await buildOpsPerformance(c.env, c.env.DB, user, period, {
+      sales: !salesOff,
+    });
+    return c.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Ops performance failed";
+    return c.json(
+      {
+        period: "this_week",
+        period_label: "",
+        prior_label: "",
+        timezone: "America/Chicago",
+        service: [],
+        install: [],
+        pulse: { jobs: null, jobs_prior: null, jobs_delta: null },
+        miller_user_id: null,
+        error: msg,
+      },
+      500
+    );
+  }
+});
+
+api.get(
+  "/ops-performance/jobs",
+  requireRoles(ROLE_PERMS.viewOpsPerformance),
+  async (c) => {
+    const user = c.get("user");
+    if (!canViewOpsPerformance(user)) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    const userId = Number(c.req.query("user_id"));
+    if (!(userId > 0)) return c.json({ error: "user_id required" }, 400);
+    const period = c.req.query("period");
+    try {
+      const payload = await buildOpsPersonJobs(
+        c.env,
+        c.env.DB,
+        user,
+        userId,
+        period
+      );
+      return c.json(payload);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to load jobs";
+      return c.json({ error: msg, jobs: [] }, 500);
+    }
+  }
+);
+
+/**
+ * Clock→ST Phase 1: today's ST appointments for the logged-in tech (read-only)
+ * plus Field App clock state from D1. Never writes appointment status to ST.
+ */
+api.get("/jobs/today", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  try {
+    const payload = await getTodaysJobsForUser(c.env, c.env.DB, user);
+    // Hard assertion — Phase 1 never advertises ST write
+    payload.st_write_enabled = false;
+    void clockStWriteEnabled(c.env);
+    return c.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to load today’s jobs";
+    return c.json(
+      {
+        configured: false,
+        st_write_enabled: false,
+        technician_id: null,
+        today: "",
+        jobs: [],
+        message: msg,
+      },
+      500
+    );
+  }
+});
+
+/**
+ * Clock→ST Phase 1: queue Dispatch / Arrive / Complete in D1 (sync_status=queued).
+ * Does NOT call ServiceTitan appointment status APIs.
+ */
+api.post("/clock/:step", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  const step = String(c.req.param("step") || "")
+    .trim()
+    .toLowerCase();
+  let body: {
+    st_job_id?: string;
+    st_appointment_id?: string | null;
+    client_ts?: string | null;
+  } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  // PHASE 1 guard — never attempt ST write from this route
+  if (clockStWriteEnabled(c.env)) {
+    return c.json(
+      { error: "ServiceTitan clock sync is not enabled yet (Phase 1)." },
+      503
+    );
+  }
+  const result = await recordClockStep(c.env.DB, user, step, body);
+  if (!result.ok) {
+    return c.json({ error: result.error }, result.status as 400 | 500 | 503);
+  }
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    event: result.event,
+    clock: result.clock,
+    label: result.label,
+    st_write_enabled: false,
+  });
 });
 
 api.get("/integrations/servicetitan/status", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
@@ -12492,14 +12744,8 @@ api.get("/inventory/part-pickups", async (c) => {
           `SELECT id, log_number, part_name, service_address, vendor_name, status,
                   IFNULL(needs_vendor_return, 0) as needs_vendor_return
            FROM warranty_claims
-           WHERE (
-             status IN ('return_to_vendor', 'delivered')
-             OR (
-               IFNULL(needs_vendor_return, 0) = 1
-               AND status IN ('dropped_off', 'claim_submitted', 'return_to_vendor', 'delivered')
-             )
-           )
-           AND IFNULL(parked, 0) = 0
+           WHERE status = 'return_to_vendor'
+             AND IFNULL(parked, 0) = 0
            ORDER BY dropped_off_at ASC
            LIMIT 200`
         ).all<{
@@ -12515,11 +12761,14 @@ api.get("/inventory/part-pickups", async (c) => {
           const rawVendor = String(row.vendor_name || "").trim();
           // Skip unknown vendor — cannot place on a trip stop
           if (!rawVendor) continue;
-          // Johnstone/Solar "still waiting" via needs_vendor_return; others only on Return pile
+          // Urgent physical return only: return_to_vendor + not parked.
+          // Hold/delivered never become stops. Johnstone/Solar waiting only while still File.
           const st = String(row.status || "");
-          const onReturnPile = st === "return_to_vendor" || st === "delivered";
+          const onReturnPile = st === "return_to_vendor";
           const johnstoneOrSolarWaiting =
-            Number(row.needs_vendor_return) === 1 && vendorDefaultsToReturn(rawVendor);
+            Number(row.needs_vendor_return) === 1 &&
+            st === "dropped_off" &&
+            vendorDefaultsToReturn(rawVendor);
           if (!onReturnPile && !johnstoneOrSolarWaiting) continue;
 
           const display = canonicalizePartsStoreName(rawVendor) || rawVendor;
@@ -12554,7 +12803,7 @@ api.get("/inventory/part-pickups", async (c) => {
               `SELECT id, log_number, part_name, service_address, vendor_name, status,
                       IFNULL(needs_vendor_return, 0) as needs_vendor_return
                FROM warranty_claims
-               WHERE status IN ('return_to_vendor', 'delivered')
+               WHERE status = 'return_to_vendor'
                ORDER BY dropped_off_at ASC
                LIMIT 200`
             ).all<{
@@ -19969,6 +20218,212 @@ api.patch("/feedback/:id", async (c) => {
 
 
 
+/**
+ * PUBLIC ServiceTitan / Zapier assignment hook (no session auth).
+ * When a job is assigned after 4:00 PM America/Chicago → one lean SMS to that tech.
+ * Optional secret: header X-TA-Assignment-Secret or ?secret= (env ST_ASSIGNMENT_WEBHOOK_SECRET
+ * or setting st_assignment_sms_webhook_secret). Empty secret = open (workers.dev HTTPS only).
+ * Never texts customers. Never writes to ST.
+ */
+app.post("/api/st/assignment-sms", async (c) => {
+  try {
+    const secret =
+      c.req.header("X-TA-Assignment-Secret") ||
+      c.req.header("X-Webhook-Secret") ||
+      c.req.query("secret") ||
+      "";
+    const okSecret = await verifyAssignmentWebhookSecret(c.env.DB, c.env, secret);
+    if (!okSecret) return c.json({ error: "Forbidden" }, 403);
+
+    let raw: unknown = null;
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = null;
+    }
+    const events = parseAssignmentWebhookPayload(raw);
+    if (!events.length) {
+      return c.json({ ok: true, processed: 0, message: "No assignment events in payload" });
+    }
+
+    const results = [];
+    for (const ev of events) {
+      const r = await maybeSmsAfterHoursAssignment(c.env, c.env.DB, ev);
+      results.push({
+        st_job_id: ev.st_job_id,
+        st_technician_id: ev.st_technician_id,
+        ...r,
+      });
+    }
+    return c.json({ ok: true, processed: results.length, results });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Never crash the webhook partner
+    return c.json({ ok: false, error: msg }, 200);
+  }
+});
+
+/**
+ * PUBLIC Twilio inbound webhook (no session auth).
+ * Point Messaging Service / phone number webhook POST to /api/sms/inbound.
+ * Emergency keyword → SMS Adam + Chris (+ on_call) + customer ack.
+ */
+app.post("/api/sms/inbound", async (c) => {
+  const twimlEmpty =
+    '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+  const respondOk = () =>
+    new Response(twimlEmpty, {
+      status: 200,
+      headers: { "Content-Type": "text/xml; charset=utf-8" },
+    });
+
+  try {
+    const form = await c.req.parseBody();
+    const get = (k: string) => {
+      const v = form[k];
+      if (typeof v === "string") return v;
+      if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+      return "";
+    };
+    const fromRaw = get("From");
+    const toRaw = get("To");
+    const bodyRaw = get("Body");
+    const messageSid = get("MessageSid") || get("SmsSid") || "";
+    const accountSid = get("AccountSid");
+
+    const expectedSid = (c.env.TWILIO_ACCOUNT_SID || "").trim();
+    if (accountSid && expectedSid && accountSid !== expectedSid) {
+      return c.text("Forbidden", 403);
+    }
+
+    const fromPhone = normalizePhone(fromRaw);
+    const toPhone =
+      normalizePhone(toRaw) ||
+      normalizePhone(await getSetting(c.env.DB, "shop_sms_phone", "")) ||
+      "+13614466925";
+    const body = bodyRaw.trim().slice(0, 1500);
+
+    await logSms(c.env.DB, {
+      from_user_id: null,
+      to_user_id: null,
+      to_phone: toPhone,
+      body: body || "(empty)",
+      status: "received",
+      provider_sid: messageSid || null,
+      error: fromPhone ? `from:${fromPhone}` : fromRaw ? `from_raw:${fromRaw}` : null,
+      context: "inbound",
+    });
+
+    const isEmergency = /\bemerg(?:ency)?\b/i.test(body);
+    if (!isEmergency || !fromPhone) {
+      return respondOk();
+    }
+
+    const fanoutWork = async () => {
+      try {
+        // Dedupe: same customer + emergency already fanned out in last 10 min
+        const fromDigits = fromPhone.replace(/\D/g, "");
+        const dedupeMarker = `EMERGENCY SMS from ${fromDigits}:`;
+        try {
+          const recent = await c.env.DB.prepare(
+            `SELECT id FROM sms_log
+             WHERE context = 'inbound_emergency_fanout'
+               AND body LIKE ?
+               AND datetime(created_at) >= datetime('now', '-10 minutes')
+             LIMIT 1`
+          )
+            .bind(`${dedupeMarker}%`)
+            .first();
+          if (recent) return;
+        } catch {
+          /* continue without dedupe if table/query fails */
+        }
+
+        const onCallRaw = await getSetting(c.env.DB, "on_call_sms_phone", "");
+        const targets = [
+          normalizePhone("+13615003246"), // Adam Bosquez
+          normalizePhone("+13617791182"), // Chris Marroquin
+          normalizePhone(onCallRaw),
+        ].filter((p): p is string => Boolean(p));
+
+        const uniq: string[] = [];
+        const seen = new Set<string>();
+        for (const p of targets) {
+          if (p === fromPhone) continue;
+          if (seen.has(p)) continue;
+          seen.add(p);
+          uniq.push(p);
+        }
+
+        const prefix = `EMERGENCY SMS from ${fromDigits}: `;
+        const maxBody = Math.max(20, 140 - prefix.length);
+        const snippet = body.replace(/\s+/g, " ").trim().slice(0, maxBody);
+        const fanoutBody = `${prefix}${snippet}`.slice(0, 1500);
+
+        for (const to of uniq) {
+          const sent = await sendSms(c.env, to, fanoutBody);
+          await logSms(c.env.DB, {
+            from_user_id: null,
+            to_user_id: null,
+            to_phone: to,
+            body: fanoutBody,
+            status: sent.ok ? "sent" : "failed",
+            provider_sid: sent.ok ? sent.sid : null,
+            error: sent.ok ? null : sent.error,
+            context: "inbound_emergency_fanout",
+          });
+        }
+
+        const ack =
+          "We got your emergency text. Total Assurance will contact you shortly.";
+        const ackSent = await sendSms(c.env, fromPhone, ack);
+        await logSms(c.env.DB, {
+          from_user_id: null,
+          to_user_id: null,
+          to_phone: fromPhone,
+          body: ack,
+          status: ackSent.ok ? "sent" : "failed",
+          provider_sid: ackSent.ok ? ackSent.sid : null,
+          error: ackSent.ok ? null : ackSent.error,
+          context: "inbound_emergency_ack",
+        });
+
+        try {
+          const notifyIds = [
+            ...(await usersByRoles(c.env.DB, ["admin", "supervisor"])),
+            ...(await coreFleetNotifyIds(c.env.DB)),
+          ];
+          await notifyUsers(
+            c.env.DB,
+            notifyIds,
+            "sms_emergency",
+            "EMERGENCY SMS",
+            `${fromDigits}: ${snippet}`,
+            undefined
+          );
+        } catch {
+          /* in-app notify best-effort */
+        }
+      } catch {
+        /* never fail Twilio webhook */
+      }
+    };
+
+    try {
+      if (c.executionCtx?.waitUntil) {
+        c.executionCtx.waitUntil(fanoutWork());
+      } else {
+        void fanoutWork();
+      }
+    } catch {
+      void fanoutWork();
+    }
+    return respondOk();
+  } catch {
+    return respondOk();
+  }
+});
+
 app.route("/api", api);
 
 // SPA fallback via assets binding — never cache HTML so phones always get the latest shell
@@ -20017,10 +20472,27 @@ export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
     return app.fetch(request, env, ctx);
   },
-  /** Morning shop bring-in reminders + weekly checks + PTO anniversary grants. */
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  /**
+   * Morning (13:00 UTC): shop bring-in + weekly checks + PTO + ST materials.
+   * Evening (every 20 min ~4–10:40pm CT): after-hours ST assignment SMS poll.
+   */
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const cron = String((event as { cron?: string }).cron || "");
+    const isEveningAssignPoll =
+      cron.includes("21-23") ||
+      cron.includes("0-3") ||
+      /^[0-9,]+ (21|22|23|0|1|2|3) /.test(cron);
+
     ctx.waitUntil(
       (async () => {
+        if (isEveningAssignPoll) {
+          try {
+            await pollAfterHoursAssignments(env, env.DB);
+          } catch {
+            /* best-effort assignment SMS */
+          }
+          return;
+        }
         try {
           await notifyShopBringInsToday(env.DB, env);
         } catch {
@@ -20045,6 +20517,12 @@ export default {
           await cronSyncStMaterialsInsertOnly(env, env.DB);
         } catch {
           /* best-effort ST materials insert_only; never overwrite */
+        }
+        // Morning cron may also refresh assignment snapshot (no SMS before 4pm)
+        try {
+          await pollAfterHoursAssignments(env, env.DB);
+        } catch {
+          /* ignore */
         }
       })()
     );

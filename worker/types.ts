@@ -40,6 +40,13 @@ export interface Env {
   ST_CLIENT_ID?: string;
   ST_CLIENT_SECRET?: string;
   ST_APP_KEY?: string;
+  /**
+   * Clock→ST Phase 2 flag. Phase 1 always ignores this (hard-off in jobClock.ts).
+   * Set to "1" only when Chris unlocks live appointment status writes.
+   */
+  CLOCK_ST_WRITE?: string;
+  /** Optional shared secret for POST /api/st/assignment-sms webhook */
+  ST_ASSIGNMENT_WEBHOOK_SECRET?: string;
   /** Shared with ta-ads worker — signs Field App → Studio handoff tokens */
   STUDIO_SSO_SECRET?: string;
   /** Override live Studio URL (default https://ta-ads.totalassurance.workers.dev) */

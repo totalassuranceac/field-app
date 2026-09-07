@@ -99,6 +99,15 @@ const RolesPage = lazy(() =>
 const TimeOffPage = lazy(() =>
   import("./pages/TimeOffPage").then((m) => ({ default: m.TimeOffPage }))
 );
+const JobClockPage = lazy(() =>
+  import("./pages/JobClockPage").then((m) => ({ default: m.JobClockPage }))
+);
+const OpsPerformancePage = lazy(() =>
+  import("./pages/OpsPerformancePage").then((m) => ({ default: m.OpsPerformancePage }))
+);
+const DayBoardPage = lazy(() =>
+  import("./pages/DayBoardPage").then((m) => ({ default: m.DayBoardPage }))
+);
 const ToolLoanPage = lazy(() =>
   import("./pages/ToolLoanPage").then((m) => ({ default: m.ToolLoanPage }))
 )
@@ -281,6 +290,20 @@ export default function App() {
                     <Route
                       path="/notifications"
                       element={<LazyPage title="Inbox" Page={NotificationsPage} />}
+                    />
+                    <Route
+                      path="/clock"
+                      element={<LazyPage title="Job clock" Page={JobClockPage} />}
+                    />
+                    <Route
+                      path="/ops-performance"
+                      element={
+                        <LazyPage title="Ops performance" Page={OpsPerformancePage} />
+                      }
+                    />
+                    <Route
+                      path="/day-board"
+                      element={<LazyPage title="Day board" Page={DayBoardPage} />}
                     />
                     <Route path="/messages" element={<Navigate to="/notifications" replace />} />
                     <Route
