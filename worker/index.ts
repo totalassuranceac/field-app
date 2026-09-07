@@ -133,6 +133,7 @@ import {
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
 import { buildZeroChargePayload } from "./zeroCharge";
+import { buildDayBoard, chicagoTodayIso } from "./dayBoard";
 import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
 
 /**
@@ -9671,6 +9672,28 @@ api.get("/studio/handoff", async (c) => {
     return c.json({ error: result.error }, result.status as 403 | 503);
   }
   return c.json({ url: result.url });
+});
+
+api.get("/day-board", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const raw = (c.req.query("date") || "").trim();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : chicagoTodayIso();
+  try {
+    const payload = await buildDayBoard(c.env, c.env.DB, date);
+    return c.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Day board failed";
+    return c.json(
+      {
+        date,
+        timezone: "America/Chicago",
+        rows: [],
+        error: /timeout|timed out|AbortError|network|fetch failed|deadline/i.test(msg)
+          ? "ServiceTitan is slow, try again"
+          : msg || "Day board failed",
+      },
+      500
+    );
+  }
 });
 
 api.get("/zero-charge", async (c) => {

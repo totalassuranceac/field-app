@@ -251,6 +251,11 @@ export const ROLE_PERMS = {
    * there is no Field App API that proxies Studio votes.
    */
   openStudio: ["admin", "office"] as Role[],
+  /**
+   * Day board (read-only ST dispatch sheet). Office / supervisors.
+   * Field techs do not see others' jobs.
+   */
+  viewDayBoard: ["admin", "office", "supervisor", "viewer"] as Role[],
 };
 
 function normName(s: string): string {
