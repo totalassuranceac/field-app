@@ -505,6 +505,11 @@ export function Layout({ children }: { children: ReactNode }) {
         : {}),
     },
     {
+      to: "/clock",
+      label: "Job clock",
+      show: can(user, "useJobClock"),
+    },
+    {
       to: "/inspections",
       label: "Weekly check",
       show: adminShell || isDriver || isMechanic || isOffice,

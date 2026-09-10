@@ -134,6 +134,17 @@ import {
 import { suggestTankCapacity } from "./tankCapacity";
 import { buildZeroChargePayload } from "./zeroCharge";
 import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
+import {
+  ackClockEventSynced,
+  clockStWriteEnabled,
+  clockStWriteMode,
+  getTodaysJobsForUser,
+  recordClockStep,
+  syncQueuedClockEvents,
+} from "./jobClock";
+import { clockShopIn, clockShopOut } from "./shopClock";
+import { runClockAuditAfterPunch } from "./clockAudit";
+import { permitBlocksComplete, setD1PermitStatus } from "./installPermitGate";
 
 /**
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
@@ -9671,6 +9682,228 @@ api.get("/studio/handoff", async (c) => {
     return c.json({ error: result.error }, result.status as 403 | 503);
   }
   return c.json({ url: result.url });
+});
+
+api.get("/jobs/today", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  try {
+    const payload = await getTodaysJobsForUser(c.env, c.env.DB, user);
+    return c.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to load today's jobs";
+    const mode = clockStWriteMode(c.env);
+    return c.json(
+      {
+        configured: false,
+        st_write_enabled: mode === "live",
+        st_write_mode: mode,
+        technician_id: null,
+        today: "",
+        jobs: [],
+        message: msg,
+      },
+      500
+    );
+  }
+});
+
+api.post("/clock/sync", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
+  let includeErrors = false;
+  try {
+    const body = (await c.req.json()) as { include_errors?: boolean; includeErrors?: boolean };
+    includeErrors = Boolean(body?.include_errors || body?.includeErrors);
+  } catch {
+    includeErrors = false;
+  }
+  const sync = await syncQueuedClockEvents(c.env, c.env.DB, {
+    includeErrors,
+    limit: 100,
+  });
+  return c.json({ ok: true, ...sync, st_write_enabled: clockStWriteEnabled(c.env) });
+});
+
+api.post("/clock/retry", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  const sync = await syncQueuedClockEvents(c.env, c.env.DB, {
+    includeErrors: true,
+    onlyUserId: user.id,
+    limit: 40,
+  });
+  return c.json({ ok: true, ...sync, st_write_enabled: clockStWriteEnabled(c.env) });
+});
+
+api.post("/clock/events/:id/ack", requireRoles(ROLE_PERMS.manageInstallPermit), async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!(id > 0)) return c.json({ error: "invalid id" }, 400);
+  let note = "";
+  try {
+    const body = (await c.req.json()) as { note?: string };
+    note = String(body?.note || "");
+  } catch {
+    note = "";
+  }
+  const saved = await ackClockEventSynced(c.env.DB, id, note);
+  if (!saved.ok) return c.json({ error: saved.error || "Ack failed" }, 404);
+  return c.json({ ok: true });
+});
+
+api.post("/clock/shop/in", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  const result = await clockShopIn(c.env, c.env.DB, user, body);
+  if (!result.ok) {
+    return c.json(
+      { error: result.error, session: result.session ?? null },
+      result.status as 400 | 500
+    );
+  }
+  let hasJobs = false;
+  try {
+    const today = await getTodaysJobsForUser(c.env, c.env.DB, user);
+    hasJobs = (today.jobs || []).length > 0;
+  } catch {
+    hasJobs = false;
+  }
+  let clock_audit = null;
+  if (!result.deduped) {
+    try {
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "shop_in",
+        kind: result.session.kind,
+        hasScheduledJobsToday: hasJobs,
+        sessionId: result.session.id,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    session: result.session,
+    label: result.label,
+    st_timesheet_write: false,
+    clock_audit,
+  });
+});
+
+api.post("/clock/shop/out", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  const result = await clockShopOut(c.env, c.env.DB, user, body);
+  if (!result.ok) {
+    return c.json(
+      { error: result.error, session: result.session ?? null },
+      result.status as 400 | 500
+    );
+  }
+  let clock_audit = null;
+  if (!result.deduped) {
+    try {
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "shop_out",
+        kind: result.session.kind,
+        clockInAt: result.session.clock_in_at,
+        clockOutAt: result.session.clock_out_at,
+        sessionId: result.session.id,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    session: result.session,
+    label: result.label,
+    st_timesheet_write: false,
+    clock_audit,
+  });
+});
+
+api.post("/clock/:step", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  const step = String(c.req.param("step") || "").trim().toLowerCase();
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  if (step === "complete") {
+    const stJobId = String(body.st_job_id || "").trim();
+    if (stJobId) {
+      const blocked = await permitBlocksComplete(c.env, c.env.DB, stJobId);
+      if (blocked) {
+        return c.json({ error: blocked.error, permit: blocked.permit }, blocked.status as 409);
+      }
+    }
+  }
+  const result = await recordClockStep(c.env, c.env.DB, user, step, body);
+  if (!result.ok) {
+    return c.json({ error: result.error }, result.status as 400 | 500);
+  }
+  let sync = null;
+  try {
+    sync = await syncQueuedClockEvents(c.env, c.env.DB, { limit: 20 });
+  } catch {
+    sync = null;
+  }
+  let clock_audit = null;
+  if (!result.deduped) {
+    try {
+      const stFailed =
+        Boolean(sync && (sync.failed > 0 || (sync.errors && sync.errors.length))) ||
+        String(result.event.sync_status || "") === "error";
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "job_clock",
+        step,
+        stWriteFailed: stFailed,
+        stWriteError: result.event.sync_error || (sync?.errors || [])[0] || null,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+  const mode = clockStWriteMode(c.env);
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    event: result.event,
+    clock: result.clock,
+    label: result.label,
+    st_write_enabled: mode === "live",
+    st_write_mode: mode,
+    sync,
+    clock_audit,
+  });
+});
+
+api.put("/install-permits/:stJobId", requireRoles(ROLE_PERMS.manageInstallPermit), async (c) => {
+  const user = c.get("user");
+  const stJobId = String(c.req.param("stJobId") || "").trim();
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  const saved = await setD1PermitStatus(c.env.DB, stJobId, String(body.status || ""), {
+    note: body.note,
+    updatedBy: user.id,
+  });
+  if (!saved.ok) return c.json({ error: saved.error }, 400);
+  return c.json({ ok: true, status: saved.status });
 });
 
 api.get("/zero-charge", async (c) => {
@@ -19479,6 +19712,11 @@ export default {
           await cronSyncStMaterialsInsertOnly(env, env.DB);
         } catch {
           /* best-effort ST materials insert_only; never overwrite */
+        }
+        try {
+          await syncQueuedClockEvents(env, env.DB, { limit: 50 });
+        } catch {
+          /* best-effort Job Clock ST sync */
         }
       })()
     );

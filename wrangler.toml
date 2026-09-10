@@ -30,6 +30,8 @@ preview_database_id = "9126adda-009e-4aff-8f78-dddf54be8ffa"
 APP_NAME = "Field App"
 WORKSPACE_DOMAIN = ""
 GOOGLE_ALLOWED_EXTRA = ""
+# Job Clock ST punch sync: off | dry | live  (production uses Cloudflare var CLOCK_ST_WRITE)
+# CLOCK_ST_WRITE = "off"
 
 # ~7–8am Central (13:00 UTC): same-day shop bring-in reminders + light ops nudges
 [triggers]

@@ -11,6 +11,7 @@ export const FAVORITE_CATALOG: FavoriteRoute[] = [
   { path: "/vehicles", label: "Trucks", hint: "Units & assignments" },
   { path: "/live", label: "Live map", hint: "Fleet GPS" },
   { path: "/yard", label: "Yard", hint: "Shop yard board" },
+  { path: "/clock", label: "Job clock", hint: "Dispatch · Arrive · Complete" },
   { path: "/fuel", label: "Fuel", hint: "Log fuel" },
   { path: "/fuel/receipt-review", label: "Fuel receipts", hint: "OCR review" },
   { path: "/inspections", label: "Weekly check", hint: "Van weekly checks" },
@@ -81,6 +82,8 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return can(user, "viewLiveMap");
     case "/yard":
       return adminShell || isMechanic || isSupervisor;
+    case "/clock":
+      return can(user, "useJobClock");
     case "/fuel":
       return adminShell || can(user, "logFuel") || can(user, "viewReports") || isDriver;
     case "/fuel/receipt-review":
