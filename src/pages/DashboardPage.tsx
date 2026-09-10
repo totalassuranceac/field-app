@@ -752,7 +752,8 @@ export function DashboardPage() {
   const actions = (() => {
     if (isDriver) {
       return [
-        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Photo receipt · odometer", primary: true },
+        { to: "/clock", icon: "⏱", title: "Job clock", hint: "Dispatch · Arrive · Complete", primary: true },
+        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Photo receipt · odometer" },
         { to: "/inspections", icon: "✓", title: "Weekly check", hint: "OK or report issue" },
         {
           to: "/parts-runs",

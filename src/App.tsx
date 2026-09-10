@@ -120,6 +120,9 @@ const StudioPage = lazy(() =>
 const FeedbackPage = lazy(() =>
   import("./pages/FeedbackPage").then((m) => ({ default: m.FeedbackPage }))
 );
+const JobClockPage = lazy(() =>
+  import("./pages/JobClockPage").then((m) => ({ default: m.JobClockPage }))
+);
 
 function PageFallback() {
   return (
@@ -274,6 +277,10 @@ export default function App() {
                     <Route
                       path="/service"
                       element={<LazyPage title="Oil changes" Page={ServicePage} />}
+                    />
+                    <Route
+                      path="/clock"
+                      element={<LazyPage title="Job clock" Page={JobClockPage} />}
                     />
                     <Route
                       path="/notifications"

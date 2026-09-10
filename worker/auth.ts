@@ -251,6 +251,10 @@ export const ROLE_PERMS = {
    * there is no Field App API that proxies Studio votes.
    */
   openStudio: ["admin", "office"] as Role[],
+  /** Field Job Clock (Dispatch / Arrive / Complete). Admin can test. */
+  useJobClock: ["admin", "driver"] as Role[],
+  /** Permit gate on install jobs — office can unblock Complete. */
+  manageInstallPermit: ["admin", "office", "supervisor"] as Role[],
 };
 
 function normName(s: string): string {

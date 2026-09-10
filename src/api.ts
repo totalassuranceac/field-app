@@ -419,6 +419,8 @@ export const ALL_PERMISSIONS = [
   "viewLiveMap",
   /** Open live Studio (ta-ads) — office/admin in can(); named extras via canOpenStudio() */
   "openStudio",
+  "useJobClock",
+  "manageInstallPermit",
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -537,6 +539,8 @@ export function can(user: User | null, action: string): boolean {
     viewLiveMap: ["admin", "office", "mechanic", "warehouse", "supervisor", "viewer"],
     /** Studio door — office only here; admin already short-circuits. Named extras use canOpenStudio(). */
     openStudio: ["admin", "office"],
+    useJobClock: ["admin", "driver"],
+    manageInstallPermit: ["admin", "office", "supervisor"],
   };
   return (map[action] || []).includes(r);
 }

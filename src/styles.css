@@ -18336,3 +18336,137 @@ svg {
   font-size: 0.82rem;
   text-align: right;
 }
+
+/* Job Clock — street address is the primary label techs scan */
+.job-clock-policy {
+  margin: 0 0 0.85rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 10px;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+  font-size: 0.92rem;
+}
+.job-clock-toast {
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+  font-size: 0.9rem;
+}
+.job-clock-layout {
+  display: grid;
+  gap: 1rem;
+}
+@media (min-width: 800px) {
+  .job-clock-layout {
+    grid-template-columns: minmax(16rem, 22rem) 1fr;
+    align-items: start;
+  }
+}
+.job-clock-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+.job-clock-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.job-clock-job-btn {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  background: var(--card, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+.job-clock-job-btn.is-active {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+.job-clock-job-btn.is-done {
+  opacity: 0.78;
+}
+.job-clock-job-addr {
+  font-size: 1.05rem;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.job-clock-job-cust {
+  font-size: 0.95rem;
+}
+.job-clock-job-num {
+  font-size: 0.85rem;
+}
+.job-clock-address {
+  margin: 0 0 0.45rem;
+  font-size: 1.25rem;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.job-clock-active-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.job-clock-active-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.job-clock-customer {
+  margin: 0.25rem 0 0.15rem;
+}
+.job-clock-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+}
+.job-clock-step {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.job-clock-step-btn {
+  min-width: 8.5rem;
+}
+.job-clock-sync-error {
+  margin: 0.65rem 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #7f1d1d;
+  font-size: 0.9rem;
+}
+.job-clock-permit-gate {
+  margin: 0.65rem 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #78350f;
+  font-size: 0.92rem;
+}
+.job-clock-shop-btn {
+  margin-top: 0.75rem;
+}
+.job-clock-shop-banner {
+  margin-bottom: 0.85rem;
+  padding: 0.7rem 0.85rem;
+}
+.job-clock-check {
+  color: #059669;
+  font-weight: 700;
+}
