@@ -34,6 +34,10 @@ interface ToolLoanRequest {
   paperwork_signed_at?: string | null;
   paperwork_note?: string | null;
   paperwork_key?: string | null;
+  actual_cost?: number | null;
+  carrier?: string | null;
+  tracking_number?: string | null;
+  tracking_url?: string | null;
   created_at: string;
   employee_name?: string | null;
   manager_name?: string | null;
@@ -383,6 +387,19 @@ function LoanProgress({ r }: { r: ToolLoanRequest }) {
           Part ordered{r.ordered_at ? ` on ${formatWhen(r.ordered_at)}` : ""}. Waiting for arrival.
         </p>
       )}
+      {(part === "ordered" || part === "arrived" || part === "paperwork_signed") &&
+        (r.tracking_number || r.tracking_url) && (
+          <p className="tool-loan-tracking" style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
+            {r.carrier ? <strong>{r.carrier} · </strong> : null}
+            {r.tracking_url ? (
+              <a href={r.tracking_url} target="_blank" rel="noreferrer">
+                {r.tracking_number || "Track shipment"}
+              </a>
+            ) : (
+              <span>Tracking #: {r.tracking_number}</span>
+            )}
+          </p>
+        )}
       {part === "arrived" && (
         <p className="tool-loan-progress-note">
           Part arrived{r.arrived_at ? ` on ${formatWhen(r.arrived_at)}` : ""} — waiting on signed
@@ -441,10 +458,14 @@ export function ToolLoanPage() {
   const [showForm, setShowForm] = useState(true);
   const [actingId, setActingId] = useState<number | null>(null);
 
-  const [itemName, setItemName] = useState("");
+  const [itemName, setItemName] = useState(
+    () => new URLSearchParams(window.location.search).get("item") || ""
+  );
   const [itemUrl, setItemUrl] = useState("");
   const [amount, setAmount] = useState("");
-  const [purpose, setPurpose] = useState("");
+  const [purpose, setPurpose] = useState(
+    () => new URLSearchParams(window.location.search).get("purpose") || ""
+  );
   const [disclaimer, setDisclaimer] = useState(false);
 
   const [decideId, setDecideId] = useState<number | null>(null);
@@ -453,9 +474,13 @@ export function ToolLoanPage() {
 
   const [partNoteId, setPartNoteId] = useState<number | null>(null);
   const [partNoteAction, setPartNoteAction] = useState<
-    "ordered" | "arrived" | "paperwork_signed"
+    "ordered" | "arrived" | "paperwork_signed" | "print_form"
   >("ordered");
   const [partNote, setPartNote] = useState("");
+  const [actualCost, setActualCost] = useState("");
+  const [carrier, setCarrier] = useState("");
+  const [trackingNumber, setTrackingNumber] = useState("");
+  const [trackingUrl, setTrackingUrl] = useState("");
   const [paperworkFile, setPaperworkFile] = useState<File | null>(null);
   /** null = none selected; number = link existing; "new" = create with tax */
   const [paperworkMode, setPaperworkMode] = useState<"link" | "new" | null>(null);
@@ -550,6 +575,14 @@ export function ToolLoanPage() {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get("tab") === "approvals" && isApprover) setTab("approvals");
+    const item = (q.get("item") || "").trim();
+    const why = (q.get("purpose") || "").trim();
+    if (item) {
+      setItemName(item.slice(0, 180));
+      setShowForm(true);
+      setTab("mine");
+    }
+    if (why) setPurpose(why.slice(0, 600));
   }, [isApprover]);
 
   const amountNum = Number(amount);
@@ -655,19 +688,25 @@ export function ToolLoanPage() {
 
   function openPartStatus(
     r: ToolLoanRequest,
-    action: "ordered" | "arrived" | "paperwork_signed"
+    action: "ordered" | "arrived" | "paperwork_signed" | "print_form"
   ) {
     setPartNoteId(r.id);
     setPartNoteAction(action);
     setPartNote(
       action === "paperwork_signed" ? r.paperwork_note || "" : r.part_note || ""
     );
+    setActualCost(
+      r.actual_cost != null && Number(r.actual_cost) > 0 ? String(Number(r.actual_cost)) : ""
+    );
+    setCarrier(r.carrier || "");
+    setTrackingNumber(r.tracking_number || "");
+    setTrackingUrl(r.tracking_url || "");
     setPaperworkFile(null);
     setSelectedChargeId(null);
     setBundleRequestIds([]);
     setPaperworkMode(null);
     setLedgerMatch(null);
-    if (action === "paperwork_signed") {
+    if (action === "paperwork_signed" || action === "print_form") {
       setLedgerMatch({ loading: true });
       void (async () => {
         try {
@@ -710,7 +749,9 @@ export function ToolLoanPage() {
           setCreateTaxRate(String(td?.tax_rate ?? 8.25));
           // Prefer charge that already mentions this item, or amount match
           const itemKey = (r.item_name || "").toLowerCase().slice(0, 12);
+          const linked = (data.charges || []).find((c) => c.already_linked) || null;
           const match =
+            linked ||
             (data.charges || []).find(
               (c) =>
                 itemKey &&
@@ -793,7 +834,11 @@ export function ToolLoanPage() {
 
   /** Live amount check for selected charge + bundled items (or new loan + tax). */
   const linkAmountCheck = useMemo((): AmountCheck | null => {
-    if (partNoteAction !== "paperwork_signed" || !ledgerMatch || ledgerMatch.loading) {
+    if (
+      (partNoteAction !== "paperwork_signed" && partNoteAction !== "print_form") ||
+      !ledgerMatch ||
+      ledgerMatch.loading
+    ) {
       return null;
     }
     const taxRate =
@@ -859,11 +904,24 @@ export function ToolLoanPage() {
 
     let printWin: Window | null = null;
     const willPrintPaperwork =
-      partNoteAction === "paperwork_signed" &&
+      (partNoteAction === "paperwork_signed" || partNoteAction === "print_form") &&
       (paperworkMode === "new" || paperworkMode === "link");
 
     try {
-      if (partNoteAction === "paperwork_signed") {
+      const paidNow = actualCost.trim() ? Number(actualCost) : NaN;
+      if (partNoteAction === "ordered" || partNoteAction === "arrived") {
+        if (actualCost.trim() && !(Number.isFinite(paidNow) && paidNow > 0)) {
+          throw new Error("Price paid must be a positive amount.");
+        }
+        if (partNoteAction === "arrived" && !actualCost.trim()) {
+          const existing = Number(
+            (approvals.find((x) => x.id === partNoteId) || mine.find((x) => x.id === partNoteId))
+              ?.actual_cost ?? 0
+          );
+          if (!(existing > 0)) throw new Error("Enter the price paid.");
+        }
+      }
+      if (partNoteAction === "paperwork_signed" || partNoteAction === "print_form") {
         if (paperworkMode === "link" && !selectedChargeId) {
           throw new Error("Select a recent ledger loan to link, or choose Create new loan.");
         }
@@ -924,12 +982,26 @@ export function ToolLoanPage() {
         paperworkKey = up.key || null;
       }
 
+      const currentLoanForPrint =
+        approvals.find((x) => x.id === partNoteId) || mine.find((x) => x.id === partNoteId);
       const body: Record<string, unknown> = {
-        part_status: partNoteAction,
+        part_status:
+          partNoteAction === "print_form"
+            ? (currentLoanForPrint ? effectivePartStatus(currentLoanForPrint) : null) || "ordered"
+            : partNoteAction,
         note: partNote.trim() || null,
         paperwork_key: paperworkKey,
       };
-      if (partNoteAction === "paperwork_signed") {
+      if (partNoteAction === "print_form") body.prepare_print = true;
+      if (partNoteAction === "ordered" || partNoteAction === "arrived") {
+        body.carrier = carrier.trim() || null;
+        body.tracking_number = trackingNumber.trim() || null;
+        body.tracking_url = trackingUrl.trim() || null;
+        if (actualCost.trim()) {
+          body.actual_cost = Math.round(Number(actualCost) * 100) / 100;
+        }
+      }
+      if (partNoteAction === "paperwork_signed" || partNoteAction === "print_form") {
         if (bundleRequestIds.length) {
           body.also_request_ids = bundleRequestIds;
         }
@@ -959,23 +1031,42 @@ export function ToolLoanPage() {
         body: JSON.stringify(body),
       });
 
+      const priceBit =
+        actualCost.trim() && Number.isFinite(paidNow) && paidNow > 0
+          ? ` Price paid ${moneyFmt(Math.round(paidNow * 100) / 100)}.`
+          : "";
+      const currentLoan =
+        approvals.find((x) => x.id === partNoteId) || mine.find((x) => x.id === partNoteId);
+      const alreadyOrdered =
+        partNoteAction === "ordered" &&
+        currentLoan != null &&
+        effectivePartStatus(currentLoan) === "ordered";
       let msg =
         partNoteAction === "ordered"
-          ? "Marked ordered — employee was notified."
+          ? alreadyOrdered
+            ? `Price saved.${priceBit}`
+            : `Marked ordered.${priceBit} Employee was notified.`
           : partNoteAction === "arrived"
-            ? "Marked arrived — next: get loan paperwork signed."
+            ? `Marked arrived.${priceBit} Next: get the loan paperwork signed.`
             : "Paperwork marked signed — loan complete.";
-      if (partNoteAction === "paperwork_signed") {
+      if (partNoteAction === "paperwork_signed" || partNoteAction === "print_form") {
         const printChargeId =
           paperworkMode === "new"
             ? res.linked_charge_id || null
             : selectedChargeId;
-        if (paperworkMode === "new" && res.linked_charge_id) {
-          msg = `Paperwork signed · new payroll charge #${res.linked_charge_id} for ${moneyFmt(
+        if (partNoteAction === "print_form") {
+          msg =
+            paperworkMode === "new" && res.linked_charge_id
+              ? `Form ready. Payroll charge #${res.linked_charge_id} for ${moneyFmt(
+                  createTaxPreview.total
+                )} (includes tax). The loan stays ordered.`
+              : `Form ready. Using payroll charge #${selectedChargeId}. The loan stays ordered.`;
+        } else if (paperworkMode === "new" && res.linked_charge_id) {
+          msg = `Paperwork signed. New payroll charge #${res.linked_charge_id} for ${moneyFmt(
             createTaxPreview.total
           )} (includes tax).`;
         } else if (paperworkMode === "link" && selectedChargeId) {
-          msg = `Paperwork signed · linked to ledger charge #${selectedChargeId}.`;
+          msg = `Paperwork signed. Linked to ledger charge #${selectedChargeId}.`;
         }
         if (paperworkKey) msg += " Scan attached.";
         if (printChargeId) {
@@ -992,6 +1083,10 @@ export function ToolLoanPage() {
       setOk(msg);
       setPartNoteId(null);
       setPartNote("");
+      setActualCost("");
+      setCarrier("");
+      setTrackingNumber("");
+      setTrackingUrl("");
       setPaperworkFile(null);
       setSelectedChargeId(null);
       setBundleRequestIds([]);
@@ -1042,7 +1137,7 @@ export function ToolLoanPage() {
     <div className="page tool-loan-page">
       <div className="page-header">
         <div>
-          <h1>Tool loan request</h1>
+          <h1>Tool loan</h1>
           <p>
             Request a company tool loan for field work. Office approves, orders the part, marks
             arrival, then confirms signed loan paperwork so nothing slips through.
@@ -1183,7 +1278,7 @@ export function ToolLoanPage() {
             />
           </label>
           <label>
-            Loan amount ($)
+            Estimated price ($)
             <input
               type="number"
               min={1}
@@ -1191,9 +1286,12 @@ export function ToolLoanPage() {
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               required
-              placeholder="Total amount to finance"
+              placeholder="About what it costs"
             />
           </label>
+          <p className="muted" style={{ marginTop: "-0.35rem", fontSize: "0.85rem" }}>
+            Office enters the price paid when the order is placed. That amount is the loan.
+          </p>
           {estWeekly > 0 && (
             <div
               className="tool-loan-weekly-preview"
@@ -1400,8 +1498,8 @@ export function ToolLoanPage() {
             Parts to track{needsFulfillment.length ? ` (${needsFulfillment.length})` : ""}
           </h2>
           <p className="muted" style={{ margin: "-0.25rem 0 0.55rem", fontSize: "0.85rem" }}>
-            After approval: Ordered → Arrived → Paperwork signed. Attach the signed loan form on
-            the last step so you always have proof under the request.
+            After approval: mark it ordered and enter the price, then print the form for him to sign.
+            Mark arrived when the part is here. Paperwork signed is for the signed copy.
           </p>
           {!needsFulfillment.length ? (
             <div className="card muted">
@@ -1421,6 +1519,11 @@ export function ToolLoanPage() {
                     </span>
                   </div>
                   <p className="tool-loan-amount">${Number(r.amount).toFixed(2)}</p>
+                  <p className="muted" style={{ margin: "0.15rem 0 0", fontSize: "0.85rem" }}>
+                    {r.actual_cost != null && Number(r.actual_cost) > 0
+                      ? "Price paid"
+                      : "Estimate until the order is placed"}
+                  </p>
                   <LoanProgress r={r} />
                   {r.item_url ? (
                     isHttpLink(r.item_url) ? (
@@ -1439,19 +1542,25 @@ export function ToolLoanPage() {
                   {partNoteId === r.id ? (
                     <form
                       className={`form tool-loan-part-form${
-                        partNoteAction === "paperwork_signed" ? " is-paperwork" : ""
+                        partNoteAction === "paperwork_signed" || partNoteAction === "print_form"
+                          ? " is-paperwork"
+                          : ""
                       }`}
                       onSubmit={submitPartStatus}
                     >
                       <p className="tool-loan-part-form-title">
                         {partNoteAction === "ordered"
-                          ? "Mark ordered"
+                          ? ps === "ordered"
+                            ? "Edit price"
+                            : "Mark ordered"
                           : partNoteAction === "arrived"
                             ? "Mark arrived"
-                            : "Paperwork signed"}
+                            : partNoteAction === "print_form"
+                              ? "Print to sign"
+                              : "Paperwork signed"}
                       </p>
 
-                      {partNoteAction === "paperwork_signed" && (
+                      {(partNoteAction === "paperwork_signed" || partNoteAction === "print_form") && (
                         <div className="tool-loan-ledger-match" aria-label="Link or create payroll loan">
                           {ledgerMatch?.loading && (
                             <p className="tool-loan-match-status muted">Loading recent loans…</p>
@@ -1750,14 +1859,82 @@ export function ToolLoanPage() {
                         </div>
                       )}
 
-                      {partNoteAction !== "paperwork_signed" ? (
+                      {partNoteAction === "ordered" || partNoteAction === "arrived" ? (
+                        <div className="tool-loan-tracking-fields" style={{ display: "grid", gap: "0.45rem" }}>
+                          <label>
+                            Price paid ${" "}
+                            <span className="muted">
+                              {partNoteAction === "arrived" &&
+                              !(r.actual_cost != null && Number(r.actual_cost) > 0)
+                                ? "(required)"
+                                : "(what you actually paid)"}
+                            </span>
+                            <input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              required={
+                                partNoteAction === "arrived" &&
+                                !(r.actual_cost != null && Number(r.actual_cost) > 0)
+                              }
+                              value={actualCost}
+                              onChange={(e) => setActualCost(e.target.value)}
+                              placeholder={
+                                r.actual_cost != null && Number(r.actual_cost) > 0
+                                  ? String(Number(r.actual_cost))
+                                  : `Estimate ${moneyFmt(Number(r.amount) || 0)}`
+                              }
+                            />
+                          </label>
+                          <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+                            {r.actual_cost != null && Number(r.actual_cost) > 0
+                              ? `Loan amount now: ${moneyFmt(Number(r.amount) || 0)}. A new price replaces it.`
+                              : `Request estimate: ${moneyFmt(Number(r.amount) || 0)}. The price you enter becomes the loan amount.`}
+                          </p>
+                          <label>
+                            Carrier <span className="muted">(optional)</span>
+                            <input
+                              value={carrier}
+                              onChange={(e) => setCarrier(e.target.value)}
+                              placeholder="e.g. UPS / Amazon / USPS"
+                            />
+                          </label>
+                          <label>
+                            Tracking # <span className="muted">(optional)</span>
+                            <input
+                              value={trackingNumber}
+                              onChange={(e) => setTrackingNumber(e.target.value)}
+                              placeholder="Leave empty if unknown"
+                            />
+                          </label>
+                          <label>
+                            Tracking URL <span className="muted">(optional)</span>
+                            <input
+                              value={trackingUrl}
+                              onChange={(e) => setTrackingUrl(e.target.value)}
+                              placeholder="https://"
+                            />
+                          </label>
+                          <label>
+                            Note for employee <span className="muted">(optional)</span>
+                            <input
+                              value={partNote}
+                              onChange={(e) => setPartNote(e.target.value)}
+                              placeholder="e.g. Amazon order # / front desk"
+                            />
+                          </label>
+                        </div>
+                      ) : partNoteAction === "print_form" ? (
+                        <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.85rem" }}>
+                          Prints the form for him to sign. The loan stays ordered until the part arrives.
+                        </p>
+                      ) : partNoteAction !== "paperwork_signed" ? (
                         <label>
-                          Note for employee{" "}
-                          <span className="muted">(optional)</span>
+                          Note for employee <span className="muted">(optional)</span>
                           <input
                             value={partNote}
                             onChange={(e) => setPartNote(e.target.value)}
-                            placeholder="e.g. Amazon order #… / front desk"
+                            placeholder="e.g. Amazon order # / front desk"
                           />
                         </label>
                       ) : (
@@ -1789,17 +1966,25 @@ export function ToolLoanPage() {
                         <button className="btn btn-sm" type="submit" disabled={actingId === r.id}>
                           {actingId === r.id
                             ? "Saving…"
-                            : partNoteAction === "paperwork_signed"
-                              ? paperworkMode === "new"
-                                ? "Create + print form"
-                                : "Link + print form"
-                              : "Confirm"}
+                            : partNoteAction === "print_form"
+                              ? "Print form"
+                              : partNoteAction === "paperwork_signed"
+                                ? paperworkMode === "new"
+                                  ? "Create + print form"
+                                  : "Link + print form"
+                              : partNoteAction === "ordered" && ps === "ordered"
+                                ? "Save price"
+                                : "Confirm"}
                         </button>
                         <button
                           type="button"
                           className="btn secondary btn-sm"
                           onClick={() => {
                             setPartNoteId(null);
+                            setActualCost("");
+                            setCarrier("");
+                            setTrackingNumber("");
+                            setTrackingUrl("");
                             setPaperworkFile(null);
                             setLedgerMatch(null);
                             setSelectedChargeId(null);
@@ -1819,6 +2004,24 @@ export function ToolLoanPage() {
                           onClick={() => openPartStatus(r, "ordered")}
                         >
                           Mark ordered
+                        </button>
+                      )}
+                      {ps === "ordered" && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => openPartStatus(r, "ordered")}
+                        >
+                          Edit price
+                        </button>
+                      )}
+                      {ps === "ordered" && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => openPartStatus(r, "print_form")}
+                        >
+                          Print to sign
                         </button>
                       )}
                       {(ps === "pending_order" || ps === "ordered") && (

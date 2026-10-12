@@ -804,7 +804,7 @@ async function handleClip(req, res, url) {
       return;
     }
 
-    // ISAPI download sized for full duration (RTSP port is closed on this NVR)
+    // Clips use ISAPI ContentMgmt download (live uses RTSP when :554 open, else snap-pump)
     const found = await searchPlaybackUri(channelId, start, end, mode);
     if (!found.ok) {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -927,7 +927,42 @@ const WYZE_CAMS = (Array.isArray(cfg.wyzeCameras) ? cfg.wyzeCameras : []).filter
 const wyzeRecordProcs = new Map();
 /** Cap concurrent Wyze ffmpeg snapshot jobs so NVR stays responsive */
 let wyzeSnapInFlight = 0;
-const WYZE_SNAP_MAX = 2;
+const WYZE_SNAP_MAX = 6;
+/**
+ * Concurrent LIVE streams (NVR + Wyze combined) — opening many tiles must not melt the shop PC.
+ * Per-source caps + a global ceiling.
+ */
+let wyzeLiveInFlight = 0;
+let nvrLiveInFlight = 0;
+const WYZE_LIVE_MAX = 3;
+const NVR_LIVE_MAX = 3;
+const LIVE_MAX = 4;
+
+function liveBusyPayload() {
+  return {
+    error: "Live busy - close other live cameras and retry",
+    liveInFlight: wyzeLiveInFlight + nvrLiveInFlight,
+    liveMax: LIVE_MAX,
+    nvrLiveInFlight,
+    nvrLiveMax: NVR_LIVE_MAX,
+    wyzeLiveInFlight,
+    wyzeLiveMax: WYZE_LIVE_MAX,
+  };
+}
+
+function canStartWyzeLive() {
+  return (
+    wyzeLiveInFlight < WYZE_LIVE_MAX &&
+    wyzeLiveInFlight + nvrLiveInFlight < LIVE_MAX
+  );
+}
+
+function canStartNvrLive() {
+  return (
+    nvrLiveInFlight < NVR_LIVE_MAX &&
+    wyzeLiveInFlight + nvrLiveInFlight < LIVE_MAX
+  );
+}
 
 function wyzeCamById(id) {
   const key = String(id || "").trim().toLowerCase();
@@ -1330,6 +1365,546 @@ function startAllWyzeRecorders() {
   );
 }
 
+/**
+ * Continuous LIVE for NVR channels.
+ * Preference: RTSP (ffmpeg MJPEG) → ISAPI httpPreview → snapshot-pump MJPEG.
+ * RTSP :554 is often CLOSED on this LTS — enable it on the NVR for best quality.
+ * GET /fieldapp/nvr/live?channel=1
+ */
+function nvrRtspUrl(channel) {
+  const host = (() => {
+    try {
+      return new URL(NVR).hostname || "192.168.1.111";
+    } catch {
+      return "192.168.1.111";
+    }
+  })();
+  const track = `${Number(channel)}01`;
+  const user = encodeURIComponent(String(cfg.nvrUser || "admin"));
+  const pass = encodeURIComponent(String(cfg.nvrPass || ""));
+  return `rtsp://${user}:${pass}@${host}:554/Streaming/Channels/${track}`;
+}
+
+/** TCP probe NVR RTSP port — fail fast when closed (common on this LTS). */
+function probeNvrRtsp(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let host = "192.168.1.111";
+    try {
+      host = new URL(NVR).hostname || host;
+    } catch {
+      /* defaults */
+    }
+    const sock = net.connect({ host, port: 554 });
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try {
+        sock.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on("connect", () => finish(true));
+    sock.on("timeout", () => finish(false));
+    sock.on("error", () => finish(false));
+  });
+}
+
+function writeLiveMjpegHeaders(res) {
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+    "Cache-Control": "no-cache, no-store",
+    Connection: "close",
+    "X-Accel-Buffering": "no",
+  });
+}
+
+/**
+ * Pipe ffmpeg RTSP → multipart MJPEG. Resolves true if stream started (first bytes),
+ * false if connect/fail within failMs (caller should try next method).
+ */
+function startFfmpegLiveMjpeg(req, res, rtspUrl, { failMs = 2000, logTag = "live" } = {}) {
+  return new Promise((resolve) => {
+    const ff = cfg.ffmpegPath;
+    if (!existsSync(ff)) {
+      resolve({ ok: false, error: `ffmpeg not found at ${ff}` });
+      return;
+    }
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-rtsp_transport",
+      "tcp",
+      "-timeout",
+      "2000000", // 2s (microseconds) — hard fail when RTSP closed/hung
+      "-rw_timeout",
+      "2000000",
+      "-i",
+      rtspUrl,
+      "-an",
+      "-f",
+      "mpjpeg",
+      "-q:v",
+      "7",
+      "-r",
+      "8",
+      "pipe:1",
+    ];
+    let proc = null;
+    let closed = false;
+    let started = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (proc) {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        proc = null;
+      }
+    };
+    try {
+      proc = spawn(ff, args, { windowsHide: true });
+    } catch (e) {
+      finish({
+        ok: false,
+        error: e instanceof Error ? e.message : "Could not start live ffmpeg",
+      });
+      return;
+    }
+
+    const failTimer = setTimeout(() => {
+      if (started) return;
+      cleanup();
+      finish({ ok: false, error: `RTSP connect timed out (${failMs}ms)` });
+    }, failMs);
+
+    proc.stdout.on("data", (chunk) => {
+      if (closed) return;
+      if (!started) {
+        started = true;
+        clearTimeout(failTimer);
+        try {
+          writeLiveMjpegHeaders(res);
+        } catch {
+          cleanup();
+          finish({ ok: false, error: "Could not write response headers" });
+          return;
+        }
+        finish({ ok: true, cleanup, proc });
+        console.log(`${logTag} method=rtsp`);
+      }
+      if (res.writableEnded) {
+        cleanup();
+        return;
+      }
+      try {
+        res.write(chunk);
+      } catch {
+        cleanup();
+      }
+    });
+    proc.stderr.on("data", () => {
+      /* swallow */
+    });
+    proc.on("error", () => {
+      if (!started) {
+        clearTimeout(failTimer);
+        cleanup();
+        finish({ ok: false, error: "ffmpeg process error" });
+      } else {
+        cleanup();
+      }
+    });
+    proc.on("close", () => {
+      clearTimeout(failTimer);
+      if (!started) {
+        cleanup();
+        finish({ ok: false, error: "RTSP stream ended before first frame" });
+        return;
+      }
+      cleanup();
+      try {
+        if (!res.writableEnded) res.end();
+      } catch {
+        /* ignore */
+      }
+    });
+    const onClientGone = () => {
+      cleanup();
+      if (!started) {
+        clearTimeout(failTimer);
+        finish({ ok: false, error: "client disconnected" });
+      }
+    };
+    req.on("close", onClientGone);
+    res.on("close", onClientGone);
+  });
+}
+
+/** One authenticated JPEG from ISAPI picture (used by snap-pump). */
+async function nvrGrabPicture(channel, timeoutMs = 5000) {
+  const track = `${Number(channel)}01`;
+  const path = `/ISAPI/Streaming/channels/${track}/picture`;
+  const res = await nvrAuthFetch(path, { timeoutMs, maxBytes: 2_000_000 });
+  if (res.status !== 200) {
+    const head = res.body.toString("utf8").slice(0, 120);
+    throw new Error(`picture HTTP ${res.status}: ${head}`);
+  }
+  if (!res.body || res.body.length < 500) {
+    throw new Error(`picture too small (${res.body?.length || 0} bytes)`);
+  }
+  // Reject XML/HTML error bodies
+  if (res.body[0] === 0x3c /* < */) {
+    throw new Error(`picture returned XML/HTML: ${res.body.toString("utf8").slice(0, 80)}`);
+  }
+  return res.body;
+}
+
+/**
+ * Try common Hikvision/LTS ISAPI HTTP preview paths. Most firmwares 403 here;
+ * if one returns multipart or a continuous body, pipe it. Otherwise false.
+ */
+async function tryNvrIsapiPreview(req, res, channel) {
+  const track = `${Number(channel)}01`;
+  const candidates = [
+    `/ISAPI/Streaming/channels/${track}/httpPreview`,
+    `/ISAPI/Streaming/channels/${track}/preview`,
+    `/PSIA/Streaming/channels/${track}/httpPreview`,
+  ];
+  for (const path of candidates) {
+    try {
+      // Probe with a short capped fetch — continuous streams won't finish; we only
+      // accept if we get an immediate JPEG or multipart header in the first chunk.
+      const probe = await nvrAuthFetch(path, { timeoutMs: 2500, maxBytes: 64_000 });
+      const ct = String(probe.headers["content-type"] || "").toLowerCase();
+      if (probe.status !== 200) continue;
+      if (ct.includes("multipart") || ct.includes("image/jpeg")) {
+        // Not a true continuous pipe via nvrAuthFetch (buffered). Fall through to
+        // snap-pump which reuses the working picture endpoint — more reliable.
+        console.log(
+          `nvr live ch=${channel} isapi probe ok path=${path} ct=${ct} (using snap-pump for continuous)`
+        );
+        return { ok: false, error: "isapi preview not streamable via buffered fetch", soft: true };
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return { ok: false, error: "ISAPI httpPreview not supported (403/missing on this firmware)" };
+}
+
+/** Snapshot-pump MJPEG: loop ISAPI picture ~3 fps into multipart (fallback when RTSP closed). */
+async function startNvrSnapPump(req, res, channel) {
+  // Verify first frame before committing headers
+  let first;
+  try {
+    first = await nvrGrabPicture(channel, 6000);
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "snapshot pump: first picture failed",
+    };
+  }
+
+  let closed = false;
+  const cleanup = () => {
+    closed = true;
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+
+  try {
+    writeLiveMjpegHeaders(res);
+  } catch (e) {
+    cleanup();
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "could not write snap-pump headers",
+    };
+  }
+
+  const writeFrame = (jpeg) => {
+    if (closed || res.writableEnded) return false;
+    try {
+      res.write(`--ffmpeg\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
+      res.write(jpeg);
+      res.write(`\r\n`);
+      return true;
+    } catch {
+      cleanup();
+      return false;
+    }
+  };
+
+  if (!writeFrame(first)) {
+    cleanup();
+    return { ok: false, error: "client gone before first snap-pump frame" };
+  }
+  console.log(`nvr live ch=${channel} method=snap-pump`);
+
+  // ~3 fps — gentle on NVR + shop PC; continuous enough for live UX
+  const intervalMs = 350;
+  (async () => {
+    while (!closed && !res.writableEnded) {
+      const t0 = Date.now();
+      try {
+        const jpeg = await nvrGrabPicture(channel, 5000);
+        if (!writeFrame(jpeg)) break;
+      } catch (e) {
+        // Transient picture blip — keep trying a few times then end
+        console.warn(
+          `nvr snap-pump ch=${channel} frame error:`,
+          e instanceof Error ? e.message : e
+        );
+        await new Promise((r) => setTimeout(r, 800));
+        if (closed) break;
+        continue;
+      }
+      const elapsed = Date.now() - t0;
+      const wait = Math.max(50, intervalMs - elapsed);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    cleanup();
+    try {
+      if (!res.writableEnded) res.end();
+    } catch {
+      /* ignore */
+    }
+  })();
+
+  return { ok: true, cleanup };
+}
+
+async function handleNvrLive(req, res, url) {
+  const channel = Number(
+    url.searchParams.get("channel") || url.searchParams.get("ch") || ""
+  );
+  if (!Number.isFinite(channel) || channel < 1 || channel > 8) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Invalid channel (use 1-8)" }));
+    return;
+  }
+  if (!cfg.nvrPass) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "NVR password not set in proxy-config.json" }));
+    return;
+  }
+  if (!canStartNvrLive()) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(liveBusyPayload()));
+    return;
+  }
+
+  nvrLiveInFlight += 1;
+  let slotHeld = true;
+  let streamCleanup = null;
+  const releaseSlot = () => {
+    if (!slotHeld) return;
+    slotHeld = false;
+    nvrLiveInFlight = Math.max(0, nvrLiveInFlight - 1);
+    if (typeof streamCleanup === "function") {
+      try {
+        streamCleanup();
+      } catch {
+        /* ignore */
+      }
+      streamCleanup = null;
+    }
+  };
+  req.on("close", releaseSlot);
+  res.on("close", releaseSlot);
+
+  const failures = [];
+
+  // A1) RTSP — best quality when NVR :554 is open
+  const rtspOpen = await probeNvrRtsp(1500);
+  if (rtspOpen) {
+    const rtsp = nvrRtspUrl(channel);
+    const rtspResult = await startFfmpegLiveMjpeg(req, res, rtsp, {
+      failMs: 2000,
+      logTag: `nvr live ch=${channel}`,
+    });
+    if (rtspResult.ok) {
+      streamCleanup = rtspResult.cleanup;
+      console.log(
+        `nvr live start ch=${channel} method=rtsp nvrLiveInFlight=${nvrLiveInFlight}`
+      );
+      return; // stream owns the response; releaseSlot on client close
+    }
+    failures.push({ method: "rtsp", error: rtspResult.error || "RTSP failed" });
+  } else {
+    failures.push({
+      method: "rtsp",
+      error: "NVR RTSP port 554 closed/unreachable — enable RTSP on NVR for best live",
+    });
+  }
+
+  // A2) ISAPI preview (often unsupported) — probe only; continuous via snap-pump
+  const isapi = await tryNvrIsapiPreview(req, res, channel);
+  if (!isapi.ok && !isapi.soft) {
+    failures.push({ method: "isapi", error: isapi.error || "ISAPI preview failed" });
+  } else if (isapi.soft) {
+    failures.push({ method: "isapi", error: isapi.error, note: "falling back to snap-pump" });
+  }
+
+  // A2/A3) Snapshot pump — reliable when RTSP closed (verified picture endpoint works)
+  const pump = await startNvrSnapPump(req, res, channel);
+  if (pump.ok) {
+    streamCleanup = pump.cleanup;
+    console.log(
+      `nvr live start ch=${channel} method=snap-pump nvrLiveInFlight=${nvrLiveInFlight}`
+    );
+    return;
+  }
+  failures.push({ method: "snap-pump", error: pump.error || "snap-pump failed" });
+
+  releaseSlot();
+  if (!res.headersSent) {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "NVR live failed — all methods exhausted",
+        channel,
+        failures,
+      })
+    );
+  }
+}
+
+/**
+ * Continuous LIVE MJPEG from Wyze Bridge RTSP (browser-friendly through tunnel).
+ * GET /fieldapp/wyze/live?cam=warehouse
+ */
+async function handleWyzeLive(req, res, url) {
+  const camId = url.searchParams.get("cam") || url.searchParams.get("id") || "";
+  const cam = wyzeCamById(camId);
+  if (!cam) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `Unknown Wyze camera: ${camId}` }));
+    return;
+  }
+  if (!canStartWyzeLive()) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(liveBusyPayload()));
+    return;
+  }
+  const bridgeUp = await probeWyzeBridge(800);
+  if (!bridgeUp) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error:
+          "Wyze Bridge not running (nothing on RTSP :8554). Install Docker + install-wyze-bridge.ps1",
+      })
+    );
+    return;
+  }
+  const ff = cfg.ffmpegPath;
+  if (!existsSync(ff)) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `ffmpeg not found at ${ff}` }));
+    return;
+  }
+
+  const rtsp = wyzeRtspUrl(cam);
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-rtsp_transport",
+    "tcp",
+    "-timeout",
+    "5000000",
+    "-rw_timeout",
+    "5000000",
+    "-i",
+    rtsp,
+    "-an",
+    "-f",
+    "mpjpeg", // multipart JPEG — works with <img src> + boundary=ffmpeg
+    "-q:v",
+    "7",
+    "-r",
+    "8",
+    "pipe:1",
+  ];
+
+  wyzeLiveInFlight += 1;
+  let closed = false;
+  let proc = null;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    wyzeLiveInFlight = Math.max(0, wyzeLiveInFlight - 1);
+    if (proc) {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      proc = null;
+    }
+  };
+
+  try {
+    proc = spawn(ff, args, { windowsHide: true });
+  } catch (e) {
+    cleanup();
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: e instanceof Error ? e.message : "Could not start live ffmpeg",
+      })
+    );
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+    "Cache-Control": "no-cache, no-store",
+    Connection: "close",
+  });
+
+  proc.stdout.on("data", (chunk) => {
+    if (closed || res.writableEnded) return;
+    try {
+      res.write(chunk);
+    } catch {
+      cleanup();
+    }
+  });
+  proc.stderr.on("data", () => {
+    /* swallow ffmpeg chatter */
+  });
+  proc.on("error", () => cleanup());
+  proc.on("close", () => {
+    cleanup();
+    try {
+      if (!res.writableEnded) res.end();
+    } catch {
+      /* ignore */
+    }
+  });
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+  console.log(
+    `wyze live start cam=${cam.id} method=rtsp liveInFlight=${wyzeLiveInFlight} global=${wyzeLiveInFlight + nvrLiveInFlight}`
+  );
+}
+
 async function handleWyzeSnapshot(req, res, url) {
   try {
     const camId = url.searchParams.get("cam") || url.searchParams.get("id") || "";
@@ -1471,6 +2046,14 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         nvr: NVR,
         ffmpeg: existsSync(cfg.ffmpegPath),
+        live: {
+          inFlight: wyzeLiveInFlight + nvrLiveInFlight,
+          max: LIVE_MAX,
+          nvrInFlight: nvrLiveInFlight,
+          nvrMax: NVR_LIVE_MAX,
+          wyzeInFlight: wyzeLiveInFlight,
+          wyzeMax: WYZE_LIVE_MAX,
+        },
         wyze: {
           rtspBase: WYZE_RTSP,
           record: WYZE_RECORD,
@@ -1489,8 +2072,16 @@ const server = http.createServer(async (req, res) => {
     await handleSegments(req, res, url);
     return;
   }
+  if (url.pathname === "/fieldapp/nvr/live") {
+    await handleNvrLive(req, res, url);
+    return;
+  }
   if (url.pathname === "/fieldapp/wyze/snapshot") {
     await handleWyzeSnapshot(req, res, url);
+    return;
+  }
+  if (url.pathname === "/fieldapp/wyze/live") {
+    await handleWyzeLive(req, res, url);
     return;
   }
   if (url.pathname === "/fieldapp/wyze/clip") {
@@ -1510,6 +2101,10 @@ const server = http.createServer(async (req, res) => {
         record: WYZE_RECORD,
         retainHours: WYZE_RETAIN_H,
         segmentSec: WYZE_SEG_SEC,
+        liveInFlight: wyzeLiveInFlight,
+        liveMax: WYZE_LIVE_MAX,
+        globalLiveInFlight: wyzeLiveInFlight + nvrLiveInFlight,
+        globalLiveMax: LIVE_MAX,
         cameras: WYZE_CAMS.map((c) => ({
           id: c.id,
           label: c.label,
@@ -1528,6 +2123,9 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`NVR media proxy on http://127.0.0.1:${PORT} -> ${NVR}`);
   console.log(`Clip: http://127.0.0.1:${PORT}/fieldapp/clip?channel=1&start=ISO&end=ISO`);
   console.log(`Segments: http://127.0.0.1:${PORT}/fieldapp/segments?channel=1&around=ISO&padMin=60`);
+  console.log(`NVR LIVE: http://127.0.0.1:${PORT}/fieldapp/nvr/live?channel=1 (RTSP→ISAPI→snap-pump)`);
   console.log(`Wyze: http://127.0.0.1:${PORT}/fieldapp/wyze/snapshot?cam=warehouse`);
+  console.log(`Wyze LIVE: http://127.0.0.1:${PORT}/fieldapp/wyze/live?cam=warehouse`);
+  console.log(`Live caps: global=${LIVE_MAX} nvr=${NVR_LIVE_MAX} wyze=${WYZE_LIVE_MAX}`);
   startAllWyzeRecorders();
 });

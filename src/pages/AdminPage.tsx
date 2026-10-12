@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError, can, isViewer, Role, roleLabel } from "../api";
 import { useAuth } from "../auth";
 
@@ -33,7 +33,26 @@ interface Employee {
   separation_date?: string | null;
   original_hire_date?: string | null;
   rides_with_employee_id?: number | null;
+  position_title?: string | null;
 }
+
+const HVAC_TITLES = [
+  "Service Technician",
+  "Lead Service Technician",
+  "Install Technician",
+  "Lead Installer",
+  "Install Helper",
+  "Apprentice",
+  "Maintenance Technician",
+  "Service Manager",
+  "Install Manager",
+  "Field Supervisor",
+  "Dispatcher",
+  "CSR",
+  "Office Manager",
+  "Warehouse / Parts",
+  "Fleet / Shop",
+];
 
 /** Local YYYY-MM-DD for date inputs */
 function todayIsoLocal(): string {
@@ -108,7 +127,8 @@ type MatchPayload = {
 };
 
 export function AdminPage() {
-  const { user } = useAuth();
+  const { user, realUser, startViewAs, viewAsPerson } = useAuth();
+  const navigate = useNavigate();
   const feedbackRef = useRef<HTMLDivElement>(null);
   const usersTableRef = useRef<HTMLDivElement>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -159,6 +179,29 @@ export function AdminPage() {
 
   function clearInviteBanner() {
     persistInvite("", "");
+  }
+
+
+  const canPersonViewAs =
+    Boolean(realUser?.role === "admin" && !realUser?.is_warehouse) && !viewAsPerson;
+
+  async function viewAsUser(u: AdminUser) {
+    if (!canPersonViewAs) return;
+    if (!u.active) {
+      showFeedback("Can only view as an active login.", true);
+      return;
+    }
+    if (u.role === "admin") {
+      showFeedback("Cannot view as another admin (blocked by default).", true);
+      return;
+    }
+    try {
+      await startViewAs(u.id);
+      showFeedback(`Viewing as ${u.display_name}`);
+      navigate("/");
+    } catch (err) {
+      showFeedback(err instanceof Error ? err.message : "Could not start view-as", true);
+    }
   }
 
   function openLoginEdit(u: AdminUser) {
@@ -213,6 +256,8 @@ export function AdminPage() {
   const [editPhone, setEditPhone] = useState("");
   const [editHireDate, setEditHireDate] = useState("");
   const [editBirthday, setEditBirthday] = useState("");
+  const [editTitleChoice, setEditTitleChoice] = useState("");
+  const [editTitleOther, setEditTitleOther] = useState("");
   const [editActive, setEditActive] = useState(true);
   const [editSeparationDate, setEditSeparationDate] = useState("");
   const [editRehireDate, setEditRehireDate] = useState("");
@@ -370,6 +415,17 @@ export function AdminPage() {
     setEditPhone(emp.phone ? formatPhone(emp.phone) : "");
     setEditHireDate(emp.hire_date || "");
     setEditBirthday(emp.birthday_md || "");
+    const title = (emp.position_title || "").trim();
+    if (title && HVAC_TITLES.includes(title)) {
+      setEditTitleChoice(title);
+      setEditTitleOther("");
+    } else if (title) {
+      setEditTitleChoice("Other");
+      setEditTitleOther(title);
+    } else {
+      setEditTitleChoice("");
+      setEditTitleOther("");
+    }
     setEditActive(emp.active !== 0);
     setEditSeparationDate(emp.separation_date || todayIsoLocal());
     setEditRehireDate(todayIsoLocal());
@@ -435,6 +491,10 @@ export function AdminPage() {
           phone: formatPhone(editPhone) || null,
           hire_date: editHireDate.trim() || null,
           birthday_md: editBirthday.trim() || null,
+          position_title:
+            editTitleChoice === "Other"
+              ? editTitleOther.trim() || null
+              : editTitleChoice.trim() || null,
           active: editActive,
           rides_with_employee_id: editRidesWith ? Number(editRidesWith) : null,
           ...(isLeaving
@@ -931,7 +991,10 @@ export function AdminPage() {
 
   async function setActive(u: AdminUser, active: boolean) {
     const action = active ? "reactivate" : "deactivate";
-    if (!window.confirm(`${action} ${u.display_name}?`)) return;
+    const leaveNote = active
+      ? `Reactivate ${u.display_name}? Personal tools come back on file. Gas bottles stay left until Back in service.`
+      : `Deactivate ${u.display_name}? This turns the login off. Personal tools and employee bottles leave with them. The truck assignment clears. Company bottles stay on the truck. This is not a vacation unassign.`;
+    if (!window.confirm(leaveNote)) return;
     try {
       await api(`/users/${u.id}`, {
         method: "PATCH",
@@ -939,7 +1002,9 @@ export function AdminPage() {
       });
       await load();
       showFeedback(
-        active ? `${u.display_name} reactivated` : `${u.display_name} deactivated (can't sign in)`
+        active
+          ? `${u.display_name} reactivated. Personal tools are back. Bottles stay left until Back in service.`
+          : `${u.display_name} deactivated. Login is off. Personal tools and employee bottles left with them.`
       );
     } catch (err) {
       showFeedback(err instanceof Error ? err.message : "Update failed", true);
@@ -1019,6 +1084,23 @@ export function AdminPage() {
   const canBrowsePeople = canEditPeople || isViewer(user);
   const readOnly = isViewer(user);
 
+  /** Flag logins that share the same display name (e.g. two Chris Marroquin admins). */
+  const duplicateNameIds = useMemo(() => {
+    const counts = new Map<string, number[]>();
+    for (const u of users) {
+      const key = (u.display_name || "").trim().toLowerCase();
+      if (!key) continue;
+      const list = counts.get(key) || [];
+      list.push(u.id);
+      counts.set(key, list);
+    }
+    const ids = new Set<number>();
+    for (const list of counts.values()) {
+      if (list.length > 1) for (const id of list) ids.add(id);
+    }
+    return ids;
+  }, [users]);
+
   if (!canBrowsePeople) {
     return <div className="error">Admin access required.</div>;
   }
@@ -1027,10 +1109,10 @@ export function AdminPage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>People</h1>
+          <h1>Employees</h1>
           <p>
             {can(user, "manageUsers")
-              ? "Everyone is listed as an employee. Logins use Field, Mechanic, Office, Warehouse, or Admin."
+              ? `Everyone is listed as an employee. Logins use Field, Mechanic, ${roleLabel("office")}, Warehouse, or Admin.`
               : "Employee list and unit assignments"}
           </p>
         </div>
@@ -1353,11 +1435,11 @@ export function AdminPage() {
                         {e.name}
                         {!e.active && <span className="badge">inactive</span>}
                       </span>
-                      {linked ? (
-                        <span className="muted emp-account-role">
-                          {roleLabel(linked.role)} · @{linked.username || "—"}
-                        </span>
-                      ) : null}
+                      <span className="muted emp-account-role">
+                        {(e.position_title || "").trim() ||
+                          (linked ? roleLabel(linked.role) : "Employee")}
+                        {linked ? ` · @${linked.username || "—"}` : ""}
+                      </span>
                       {e.phone ? (
                         <span className="muted emp-account-phone">{formatPhone(e.phone)}</span>
                       ) : null}
@@ -1381,6 +1463,35 @@ export function AdminPage() {
                     to={`/termination?emp=${editEmp.id}`}
                   >
                     Print separation notice
+                  </Link>{" "}
+                  <Link
+                    className="btn secondary btn-sm"
+                    to={`/hr/writeups?for=${encodeURIComponent(editName || editEmp.name || "")}&employee_id=${editEmp.id}`}
+                  >
+                    New write-up
+                  </Link>{" "}
+                  {userForEmployee(editEmp) ? (
+                    <Link
+                      className="btn secondary btn-sm"
+                      to={`/safety?tab=file&user=${userForEmployee(editEmp)?.id}`}
+                    >
+                      Training file
+                    </Link>
+                  ) : (
+                    <span className="muted">Training file needs a login</span>
+                  )}{" "}
+                  {userForEmployee(editEmp) ? (
+                    <Link
+                      className="btn secondary btn-sm"
+                      to={`/responsibility?user=${userForEmployee(editEmp)?.id}`}
+                    >
+                      Card and vehicle forms
+                    </Link>
+                  ) : (
+                    <span className="muted">Card and vehicle forms need a login</span>
+                  )}{" "}
+                  <Link className="btn secondary btn-sm" to={`/audit?entity=employee&id=${editEmp.id}`}>
+                    Change history
                   </Link>
                 </p>
                 <form className="form admin-compact-form" onSubmit={(ev) => void saveEmployeeEdit(ev)}>
@@ -1437,6 +1548,32 @@ export function AdminPage() {
                     </p>
                   ) : null}
                   <label>
+                    Job title
+                    <select
+                      value={editTitleChoice}
+                      onChange={(e) => setEditTitleChoice(e.target.value)}
+                    >
+                      <option value="">Use their role</option>
+                      {HVAC_TITLES.map((title) => (
+                        <option key={title} value={title}>
+                          {title}
+                        </option>
+                      ))}
+                      <option value="Other">Other</option>
+                    </select>
+                  </label>
+                  {editTitleChoice === "Other" ? (
+                    <label>
+                      Other title
+                      <input
+                        value={editTitleOther}
+                        onChange={(e) => setEditTitleOther(e.target.value)}
+                        placeholder="Type the title"
+                        maxLength={80}
+                      />
+                    </label>
+                  ) : null}
+                  <label>
                     Birthday (MM-DD)
                     <input
                       value={editBirthday}
@@ -1465,6 +1602,14 @@ export function AdminPage() {
                     />
                     Active on employee list
                   </label>
+                  {!editActive ? (
+                    <p className="muted" style={{ fontSize: "0.8rem" }}>
+                      Turning this off is leaving the company. Personal tools and employee bottles
+                      leave with them and the truck clears. Company bottles stay. A vacation
+                      unassign does not do this. Turning it back on brings personal tools back.
+                      Bottles stay left until Back in service.
+                    </p>
+                  ) : null}
                   {/* Leaving: capture last day */}
                   {editEmp.active !== 0 && !editActive ? (
                     <label>
@@ -1605,7 +1750,7 @@ export function AdminPage() {
                               [
                                 ["driver", "Field"],
                                 ["mechanic", "Mechanic"],
-                                ["office", "Office"],
+                                ["office", roleLabel("office")],
                                 ["supervisor", "Supervisor"],
                                 ["warehouse", "Warehouse"],
                                 ["admin", "Admin"],
@@ -1734,7 +1879,7 @@ export function AdminPage() {
                     [
                       ["driver", "Field"],
                       ["mechanic", "Mechanic"],
-                      ["office", "Office"],
+                      ["office", roleLabel("office")],
                       ["supervisor", "Supervisor"],
                       ["warehouse", "Warehouse"],
                       ["admin", "Admin"],
@@ -1829,24 +1974,50 @@ export function AdminPage() {
             </form>
             )}
             <div className="admin-users-list" ref={usersTableRef}>
+              {duplicateNameIds.size > 0 ? (
+                <div className="admin-dup-banner" role="status">
+                  <strong>Duplicate logins:</strong>{" "}
+                  {users
+                    .filter((u) => duplicateNameIds.has(u.id))
+                    .map((u) => `${u.display_name} (@${u.username || "—"}${u.active ? "" : ", inactive"})`)
+                    .filter((v, i, a) => a.indexOf(v) === i)
+                    .join(" · ")}
+                  . Keep one active admin; Deactivate the extra.
+                </div>
+              ) : null}
+              {(() => {
+                const missing = users.filter(
+                  (u) =>
+                    u.active &&
+                    (u.role === "driver" || u.role === "mechanic" || u.role === "supervisor") &&
+                    !(u.st_technician_id != null && Number(u.st_technician_id) > 0)
+                );
+                if (!missing.length) return null;
+                return (
+                  <p className="muted">
+                    ServiceTitan name not linked: {missing.map((u) => u.display_name).join(", ")}.
+                    Clock cannot land on their jobs until this is set.
+                  </p>
+                );
+              })()}
               <label className="admin-user-search no-print">
-                <span className="muted">Search logins</span>
+                <span className="muted">Search people</span>
                 <input
                   type="search"
                   value={userSearch}
                   onChange={(e) => setUserSearch(e.target.value)}
-                  placeholder="Name, @username, email, role…"
+                  placeholder="Name, @username, email, role, ST id…"
                   aria-label="Search users"
                 />
               </label>
-              {/* Wide screens: compact table — email sits under login with room to read */}
+              {/* Wide screens: one row per login — employee, role, active, ST, manager */}
               <div className="table-wrap admin-users-table admin-users-wide">
                 <table>
                   <colgroup>
                     <col className="c-name" />
                     <col className="c-login" />
-                    <col className="c-phone" />
                     <col className="c-role" />
+                    <col className="c-st" />
                     <col className="c-mgr" />
                     <col className="c-emp" />
                     <col className="c-act" />
@@ -1854,9 +2025,9 @@ export function AdminPage() {
                   <thead>
                     <tr>
                       <th>Name</th>
-                      <th>Login / email</th>
-                      <th>Phone</th>
+                      <th>Login</th>
                       <th>Role</th>
+                      <th>ST tech ID</th>
                       <th>Manager</th>
                       <th className="no-print">Employee</th>
                       <th className="no-print">Actions</th>
@@ -1872,7 +2043,9 @@ export function AdminPage() {
                           (u.username || "").toLowerCase().includes(q) ||
                           (u.email || "").toLowerCase().includes(q) ||
                           u.role.toLowerCase().includes(q) ||
-                          (u.phone || "").includes(q)
+                          (u.phone || "").includes(q) ||
+                          String(u.st_technician_id || "").includes(q) ||
+                          (u.manager_name || "").toLowerCase().includes(q)
                         );
                       })
                       .map((u) => (
@@ -1890,13 +2063,21 @@ export function AdminPage() {
                               new
                             </span>
                           )}
-                          {!u.active && <span className="badge">off</span>}
+                          {!u.active && <span className="badge">Inactive</span>}
                           {isPendingSetup(u) && (
                             <div className="muted admin-cell-hint">pending setup</div>
                           )}
+                          {duplicateNameIds.has(u.id) ? (
+                            <div className="badge warn admin-dup-flag" title="Another login shares this name">
+                              Duplicate name
+                            </div>
+                          ) : null}
                         </td>
                         <td className="admin-login-cell">
                           <strong title={u.username || undefined}>@{u.username || "—"}</strong>
+                          {u.phone ? (
+                            <div className="muted admin-cell-hint">{formatPhone(u.phone)}</div>
+                          ) : null}
                           {u.email ? (
                             <a
                               className="admin-cell-email"
@@ -1907,10 +2088,12 @@ export function AdminPage() {
                             </a>
                           ) : null}
                         </td>
-                        <td className="admin-cell-phone admin-cell-nowrap">
-                          {u.phone ? formatPhone(u.phone) : "—"}
-                        </td>
                         <td className="admin-cell-role admin-cell-nowrap">{roleLabel(u.role)}</td>
+                        <td className="admin-cell-st admin-cell-nowrap">
+                          {u.st_technician_id != null && Number(u.st_technician_id) > 0
+                            ? u.st_technician_id
+                            : "—"}
+                        </td>
                         <td className="admin-cell-mgr admin-cell-nowrap" title={u.manager_name || undefined}>
                           {u.manager_name || "—"}
                         </td>
@@ -1959,6 +2142,16 @@ export function AdminPage() {
                               >
                                 Edit
                               </button>
+                              {canPersonViewAs && u.active && u.role !== "admin" ? (
+                                <button
+                                  className="btn ghost btn-sm"
+                                  type="button"
+                                  title={`View Home/board/clock as ${u.display_name}`}
+                                  onClick={() => void viewAsUser(u)}
+                                >
+                                  View as
+                                </button>
+                              ) : null}
                               <button
                                 className="btn secondary btn-sm"
                                 type="button"
@@ -1983,17 +2176,19 @@ export function AdminPage() {
                                 <button
                                   className="btn ghost btn-sm"
                                   type="button"
+                                  title="Deactivate — they cannot sign in"
                                   onClick={() => setActive(u, false)}
                                 >
-                                  Off
+                                  Deactivate
                                 </button>
                               ) : (
                                 <button
                                   className="btn secondary btn-sm"
                                   type="button"
+                                  title="Reactivate — restore sign-in"
                                   onClick={() => setActive(u, true)}
                                 >
-                                  On
+                                  Reactivate
                                 </button>
                               )}
                             </div>
@@ -2009,7 +2204,20 @@ export function AdminPage() {
 
               {/* Narrow screens: cards with 2-up fields (not one long column of empty space) */}
               <ul className="admin-users-stack admin-users-narrow">
-                {users.map((u) => (
+                {users
+                  .filter((u) => {
+                    const q = userSearch.trim().toLowerCase();
+                    if (!q) return true;
+                    return (
+                      u.display_name.toLowerCase().includes(q) ||
+                      (u.username || "").toLowerCase().includes(q) ||
+                      (u.email || "").toLowerCase().includes(q) ||
+                      u.role.toLowerCase().includes(q) ||
+                      (u.phone || "").includes(q) ||
+                      String(u.st_technician_id || "").includes(q)
+                    );
+                  })
+                  .map((u) => (
                   <li
                     key={u.id}
                     className={`admin-user-card${u.id === justAddedId ? " row-just-added" : ""}${
@@ -2021,7 +2229,10 @@ export function AdminPage() {
                         <strong className="admin-user-card-name">{u.display_name}</strong>
                         <div className="admin-user-card-badges">
                           {u.id === justAddedId && <span className="badge ok">new</span>}
-                          {!u.active && <span className="badge">off</span>}
+                          {!u.active && <span className="badge">Inactive</span>}
+                          {duplicateNameIds.has(u.id) ? (
+                            <span className="badge warn">Duplicate name</span>
+                          ) : null}
                           {isPendingSetup(u) && (
                             <span className="badge">pending setup</span>
                           )}
@@ -2037,6 +2248,16 @@ export function AdminPage() {
                           >
                             Edit
                           </button>
+                          {canPersonViewAs && u.active && u.role !== "admin" ? (
+                            <button
+                              className="btn ghost btn-sm"
+                              type="button"
+                              title={`View Home/board/clock as ${u.display_name}`}
+                              onClick={() => void viewAsUser(u)}
+                            >
+                              View as
+                            </button>
+                          ) : null}
                           <button
                             className="btn secondary btn-sm"
                             type="button"
@@ -2061,17 +2282,19 @@ export function AdminPage() {
                             <button
                               className="btn ghost btn-sm"
                               type="button"
+                              title="Deactivate — they cannot sign in"
                               onClick={() => setActive(u, false)}
                             >
-                              Off
+                              Deactivate
                             </button>
                           ) : (
                             <button
                               className="btn secondary btn-sm"
                               type="button"
+                              title="Reactivate — restore sign-in"
                               onClick={() => setActive(u, true)}
                             >
-                              On
+                              Reactivate
                             </button>
                           )}
                         </div>
@@ -2088,6 +2311,14 @@ export function AdminPage() {
                       <div className="admin-user-field">
                         <dt>Role</dt>
                         <dd>{roleLabel(u.role)}</dd>
+                      </div>
+                      <div className="admin-user-field">
+                        <dt>ST tech ID</dt>
+                        <dd>
+                          {u.st_technician_id != null && Number(u.st_technician_id) > 0
+                            ? u.st_technician_id
+                            : "—"}
+                        </dd>
                       </div>
                       <div className="admin-user-field">
                         <dt>Phone</dt>

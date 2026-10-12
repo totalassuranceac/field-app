@@ -1,6 +1,9 @@
 /**
  * Inventory helpers — catalog from ServiceTitan Materials export + multi-location qty.
  */
+import { ShortStockError, planAdjust, planStrictIssue } from "./stockMoves";
+
+export { ShortStockError };
 
 export type StockLocationType = "warehouse" | "attic" | "vehicle";
 
@@ -182,6 +185,44 @@ export async function ensureVehicleStockLocation(
     }
   }
   return loc.id;
+}
+
+/** Home bin when it is a shop section. Otherwise the first warehouse location. */
+export async function shopBinForPart(db: D1Database, partId: number): Promise<number | null> {
+  try {
+    const home = await db
+      .prepare(
+        `SELECT p.home_location_id as id, l.type
+         FROM parts p
+         LEFT JOIN stock_locations l ON l.id = p.home_location_id AND l.active = 1
+         WHERE p.id = ?`
+      )
+      .bind(partId)
+      .first<{ id: number | null; type: string | null }>();
+    if (home?.id && home.type && home.type !== "vehicle") return Number(home.id);
+  } catch {
+    /* home bin column is optional */
+  }
+  try {
+    const wh = await db
+      .prepare(
+        `SELECT id FROM stock_locations
+         WHERE active = 1 AND type = 'warehouse'
+         ORDER BY sort_order, id LIMIT 1`
+      )
+      .first<{ id: number }>();
+    if (wh?.id) return wh.id;
+  } catch {
+    const wh = await db
+      .prepare(
+        `SELECT id FROM stock_locations
+         WHERE active = 1 AND type = 'warehouse'
+         ORDER BY id LIMIT 1`
+      )
+      .first<{ id: number }>();
+    if (wh?.id) return wh.id;
+  }
+  return null;
 }
 
 /** Create a named warehouse section (shelf, overhead bay, attic rack, etc.). */
@@ -1000,7 +1041,7 @@ export async function setStockQty(
   }
 }
 
-/** Add delta to qty (receive positive / issue negative). */
+/** Add delta to qty (receive positive / issue negative). Still clamps at 0 for existing callers. */
 export async function adjustStockQty(
   db: D1Database,
   partId: number,
@@ -1015,7 +1056,8 @@ export async function adjustStockQty(
     .bind(locationId, partId)
     .first<{ qty: number }>();
   const before = prev?.qty ?? 0;
-  const next = Math.max(0, before + delta);
+  const plan = planAdjust(before, delta);
+  const next = plan.next;
 
   await db
     .prepare(
@@ -1028,7 +1070,9 @@ export async function adjustStockQty(
     .run();
 
   if (delta !== 0) {
-    await db
+    const movementNotes =
+      plan.flagText && notes ? `${notes} | ${plan.flagText}` : plan.flagText || notes || null;
+    const mov = await db
       .prepare(
         `INSERT INTO stock_movements
           (part_id, from_location_id, to_location_id, qty, reason, notes, created_by_user_id)
@@ -1040,12 +1084,81 @@ export async function adjustStockQty(
         delta > 0 ? locationId : null,
         Math.abs(delta),
         reason,
-        notes || null,
+        movementNotes,
         userId
       )
       .run();
+    if (plan.clamped && plan.flagText) {
+      try {
+        await db
+          .prepare(
+            `INSERT INTO stock_move_log (
+               source_kind, part_id, from_location_id, qty, from_before, from_after,
+               status, flag_text, stock_movement_id, created_by_user_id
+             ) VALUES ('adjust', ?, ?, ?, ?, ?, 'clamped', ?, ?, ?)`
+          )
+          .bind(
+            partId,
+            locationId,
+            plan.requestedQty,
+            before,
+            next,
+            plan.flagText,
+            Number(mov.meta.last_row_id) || null,
+            userId
+          )
+          .run();
+      } catch {
+        /* A missing log table must not break an existing adjust. */
+      }
+    }
   }
   return next;
+}
+
+/**
+ * Issue qty out of one location. Throws ShortStockError and writes nothing when on-hand is short.
+ * Optional extra statements run in the same batch, after the movement insert.
+ */
+export async function issueStockStrict(
+  db: D1Database,
+  partId: number,
+  locationId: number,
+  qty: number,
+  userId: number | null,
+  notes?: string | null,
+  extra?: D1PreparedStatement[]
+): Promise<{ before: number; after: number; movementId: number }> {
+  const prev = await db
+    .prepare(`SELECT qty FROM stock_balances WHERE location_id = ? AND part_id = ?`)
+    .bind(locationId, partId)
+    .first<{ qty: number }>();
+  const before = Number(prev?.qty ?? 0) || 0;
+  const plan = planStrictIssue(before, qty);
+  if (!plan.ok) throw new ShortStockError(plan.have, plan.need);
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO stock_balances (location_id, part_id, qty, updated_at)
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(location_id, part_id) DO UPDATE SET
+           qty = excluded.qty, updated_at = datetime('now')`
+      )
+      .bind(locationId, partId, plan.after),
+    db
+      .prepare(
+        `INSERT INTO stock_movements
+          (part_id, from_location_id, to_location_id, qty, reason, notes, created_by_user_id)
+         VALUES (?, ?, NULL, ?, 'issue', ?, ?)`
+      )
+      .bind(partId, locationId, plan.qty, notes || null, userId),
+    ...(extra || []),
+  ]);
+  return {
+    before: plan.before,
+    after: plan.after,
+    movementId: Number(results[1]?.meta?.last_row_id) || 0,
+  };
 }
 
 /**

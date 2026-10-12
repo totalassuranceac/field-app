@@ -339,9 +339,11 @@ export function DumpRunsPage() {
       {canLog && (
         <div className="card" style={{ marginBottom: "1.25rem" }}>
           <h2 style={{ marginTop: 0 }}>Log a dump</h2>
+          <p className="muted">Warehouse and supervisors can log dump runs.</p>
           <form className="form" onSubmit={submit}>
             <PhotoCapture
               required
+              alignPaper
               label="Dump ticket photo *"
               hint={scanning ? "Reading ticket…" : "Photo the full scale ticket / receipt."}
               tip={PHOTO_TIPS.receipt}

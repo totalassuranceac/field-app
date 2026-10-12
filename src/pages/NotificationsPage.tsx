@@ -14,6 +14,47 @@ interface Note {
   entity_id: string | null;
   read_at: string | null;
   created_at: string;
+  /** Present only when the API already sent them. */
+  link?: string | null;
+  url?: string | null;
+  vehicle?: string | { unit_number?: string | null; unit?: string | null } | null;
+  unit_number?: string | null;
+  entity?: { unit_number?: string | null; unit?: string | null } | string | null;
+}
+
+function inAppPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (!s.startsWith("/") || s.startsWith("//")) return null;
+  return s;
+}
+
+function unitText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (value && typeof value === "object") {
+    const row = value as { unit_number?: unknown; unit?: unknown };
+    const unit = row.unit_number ?? row.unit;
+    if (typeof unit === "string") return unit.trim();
+  }
+  return "";
+}
+
+/** Truck label already on the notification. Never looks up a new record. */
+function noteUnit(n: Note): string | null {
+  const direct =
+    unitText(n.unit_number) || unitText(n.vehicle) || unitText(n.entity);
+  const cleaned = direct.replace(/^unit\s+#?\s*/i, "").trim();
+  if (cleaned) return cleaned;
+  const text = `${n.title || ""} ${n.body || ""}`;
+  const match = text.match(/\bunit\s+#?\s*([A-Za-z0-9][A-Za-z0-9-]*)/i);
+  return match ? match[1] : null;
+}
+
+/** Open the job, repair, or part when this row already has a path or entity id. */
+function noteTarget(n: Note): string | null {
+  const explicit = inAppPath(n.link) || inAppPath(n.url);
+  if (explicit) return explicit;
+  return notificationLink(n);
 }
 
 const SWIPE_THRESHOLD = 64;
@@ -32,7 +73,8 @@ function NotifyRow({
   onMarkRead: (id: number) => void;
 }) {
   const unread = !n.read_at;
-  const to = notificationLink(n);
+  const to = noteTarget(n);
+  const unit = to ? noteUnit(n) : null;
   const clickable = Boolean(to);
 
   const rowRef = useRef<HTMLDivElement>(null);
@@ -252,6 +294,7 @@ function NotifyRow({
           {n.body && <p className="notify-body muted">{n.body}</p>}
           <span className="muted notify-meta">
             {n.created_at?.replace("T", " ").slice(0, 16)}
+            {unit ? <span> · Unit {unit}</span> : null}
             {clickable ? <span className="notify-open-hint"> · Tap to open</span> : ` · ${n.kind}`}
             {unread ? <span className="notify-swipe-hint"> · Swipe left = read</span> : null}
           </span>
@@ -338,7 +381,7 @@ export function NotificationsPage() {
   }, []);
 
   async function openNote(n: Note) {
-    const to = notificationLink(n);
+    const to = noteTarget(n);
     if (!n.read_at) await markOne(n.id);
     if (to) {
       setNavReturn(NOTIF_NAV_STATE.returnTo, NOTIF_NAV_STATE.returnLabel);

@@ -93,7 +93,8 @@ export function JoinPage() {
       } else {
         await refresh();
       }
-      navigate("/", { replace: true });
+      const linked = data.user?.st_technician_id != null && Number(data.user.st_technician_id) > 0;
+      navigate(`/day-board?joined=1&st=${linked ? "1" : "0"}`, { replace: true });
     } catch (err) {
       setError(
         err instanceof ApiError

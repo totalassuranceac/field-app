@@ -1,4 +1,4 @@
-import type { Role } from "./api";
+import { roleLabel, type Role } from "./api";
 
 /** Who the guide is written for (viewer uses admin browse guides as read-only). */
 export type HowToAudience = Role | "everyone";
@@ -40,7 +40,7 @@ export const HOWTO_ROLES: { id: HowToAudience; label: string; blurb: string }[] 
   },
   {
     id: "office",
-    label: "Office",
+    label: roleLabel("office"),
     blurb: "Map, scheduled work, people, inventory overview.",
   },
   {
@@ -85,7 +85,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     roles: ["everyone"],
     path: "/feedback",
     steps: [
-      "Open App feedback under Company.",
+      "Open App feedback under Help.",
       "Pick a type (suggestion, bug, praise, or other).",
       "Write what would help — which screen if you can.",
       "Send — office and admin see it in their feedback inbox.",
@@ -180,6 +180,80 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     tips: [
       "Admin should set each person’s Manager under People so requests route to the right person.",
       "You can cancel a request while it is still Pending.",
+    ],
+  },
+  {
+    id: "i-need-a-part",
+    title: "I need a part",
+    summary: "One door for a part at a store, a part already at the shop, or a part the shop brings to the job.",
+    roles: ["everyone"],
+    path: "/",
+    steps: [
+      "On Home, open I need a part.",
+      "At a store opens Will-call.",
+      "Already at the shop opens Shop counter.",
+      "Bring it to the job opens Deliver to job. The job address can already be filled in from Today's jobs.",
+    ],
+    tips: [
+      "Fuel receipts stay on Log fuel. Purchase receipts are for parts and materials.",
+    ],
+  },
+  {
+    id: "card-and-vehicle-forms",
+    title: "Card and vehicle forms",
+    summary: "Sign for a company credit card, and sign that you will treat company trucks the way we require.",
+    roles: ["everyone"],
+    path: "/responsibility",
+    steps: [
+      "Open Card and vehicle forms from Home, or from Company forms.",
+      "Drivers and the shop sign the vehicle form. Read each line, then sign with your finger.",
+      "If you have a company card, enter the last 4 digits, choose fuel or parts, and sign.",
+      "Office can open an employee and ask them to sign. The employee signs on their own phone.",
+      "Print the signed form from that page. The saved copy keeps the wording they signed.",
+    ],
+    tips: [
+      "A full card number is never stored. Only the last 4 digits.",
+      "Clearing a signature is an office action, and the old signature stays in the history as voided.",
+    ],
+  },
+  {
+    id: "tool-checklist",
+    title: "My tools",
+    summary:
+      "Check the tools you already have. They leave the list. An upgrade stays when a better version is worth getting. Make, model, and serial are optional under On file.",
+    roles: ["everyone"],
+    path: "/tools-checklist",
+    steps: [
+      "Open My tools under My work.",
+      "Confirm the role (helper, install helper, service, or install lead).",
+      "Read the next goal: what the tool is for, and how your day gets easier once you have it.",
+      "Check a tool you already own. It leaves the list. If that tool has a better version, answer the question. An older one stays on the list until you get the upgrade.",
+      "Under On file, add make, model, and serial if you want them saved for a lost tool. Those fields are optional. More detail is optional too.",
+      "Lend a tool you own to another tech. They are accountable until you or they mark it returned. The serial stays on your record.",
+      "Office marks each gas bottle as the company's or an employee's under Company assets, Bottles, Whose bottle. An employee's bottle leaves with them when they are taken off the truck.",
+      "Start a tool loan from the next goal if you want the office to order it. You still enter the price and accept the loan terms.",
+    ],
+    tips: [
+      "A 3-port manifold on 1/4 inch hoses is slow to pull a vacuum. Core tools, a short 1/2 inch hose, and a micron gauge are the upgrade.",
+      "Recovery machines, nitrogen bottles, extinguishers, and dollies stay on the truck.",
+    ],
+  },
+  {
+    id: "nate-study",
+    title: "NATE study",
+    summary:
+      "Practice Core and the specialty that matches your work. The page tells you when the scores are in the range to schedule the real test.",
+    roles: ["everyone"],
+    path: "/nate",
+    steps: [
+      "Open NATE study under Performance. Start with Core.",
+      "The page names your next study goal. Take that topic quiz, then a 15-question full practice.",
+      "Missed questions come back under Review misses.",
+      "Ready to schedule means two full practices in a row at 80% or better, every topic at 70% or better, and you mark that you feel ready.",
+    ],
+    tips: [
+      "A high practice score means you are in the range to schedule. It is not a promise you will pass.",
+      "Office can see who is ready. There is no ranking.",
     ],
   },
   {
@@ -283,6 +357,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "If you’re not the driver on the truck, choose who fueled (Driver list).",
       "Take a photo of the full receipt (or pick one from gallery).",
       "Confirm gallons, total cost, last 4 of card, and odometer — fix anything the scan missed.",
+      "If the receipt is prepaid, type the gallons the pump showed and a short reason before you save.",
       "Add a short note if the odometer looks wrong or the pump failed (optional).",
       "Submit. Mileage flags may appear later if miles look off — office/shop will review those.",
     ],
@@ -345,13 +420,13 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   },
   {
     id: "parts-delivery-run",
-    title: "Warehouse delivery request",
+    title: "Deliver to job",
     summary:
       "Need materials brought to a job? Request a delivery, explain why it wasn’t on the truck, and keep a shared log.",
     roles: ["everyone"],
     path: "/parts-runs",
     steps: [
-      "Open Warehouse delivery request under Warehouse.",
+      "Open Deliver to job under Parts.",
       "Describe what you need.",
       "Say why it wasn’t already on the truck.",
       "Enter the address / job site it needs to go to — submit.",
@@ -452,7 +527,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
     tips: [
       "Call needs a phone on their user or employee record (Settings / People).",
       "Search also works for unit numbers (e.g. 004).",
-      "Live map is limited to supervisors, warehouse, shop, and office.",
+      "Live map is limited to admin, office managers, and supervisors.",
     ],
   },
 
@@ -517,13 +592,13 @@ export const HOWTO_GUIDES: HowToGuide[] = [
   },
   {
     id: "wh-vendor-runs",
-    title: "Part pickup request",
+    title: "Will-call",
     summary:
       "Parts ready at a store? Request a pickup — store name, what the part is, and where it needs to go.",
     roles: ["everyone"],
     path: "/part-pickup",
     steps: [
-      "Open Part pickup request under Warehouse.",
+      "Open Will-call under Parts.",
       "Enter the store / vendor (Gemaire, Johnstone, ACES, etc.).",
       "On the pickup run sheet, each vendor also lists Return-pile warranties for that same store (log # · street · Take back to vendor) so the driver brings the failed part on that trip.",
       "Describe the part and the address it’s needed for.",
@@ -531,26 +606,28 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Submit — warehouse sees open requests by store and marks them picked up.",
     ],
     tips: [
-      "If you already picked up and left parts at the shop, use Brought to shop instead.",
+      "If you already picked up and left parts at the shop, use Shop counter instead.",
     ],
   },
   {
     id: "wh-parts-dropoff",
-    title: "Parts drop-off — parts already at the shop",
+    title: "Shop counter",
     summary:
       "When someone picks up from a vendor while they’re out and leaves the parts at the shop, log a drop-off so warehouse knows they’re ready to put away or issue.",
     roles: ["everyone"],
     path: "/parts-dropoff",
     steps: [
-      "Open Parts drop-off (Warehouse menu).",
+      "Open Shop counter under Parts.",
       "Enter vendor, what’s in the drop-off, and optional unit/job + where you left them.",
       "Optional: add part # / description lines for each piece.",
-      "Tap Log drop-off at shop — warehouse gets a notification.",
-      "Warehouse taps Received · ready to issue when they have the parts.",
+      "Tap Log drop-off at shop. Warehouse gets a notification.",
+      "Warehouse taps Received when the parts stay at the shop.",
+      "If you take the parts onto your van, tap Van stock. They leave the shop counter and are recorded on your truck.",
     ],
     tips: [
-      "Use Part pickup request when parts are still at a store waiting to be collected.",
-      "Use Brought to shop when the parts are already on the counter / in the cage at the shop.",
+      "Use Will-call when parts are still at a store waiting to be collected.",
+      "Use Shop counter when the parts are already on the counter or in the cage at the shop.",
+      "Van stock uses the truck assigned to you. Tap Cancel when the drop-off was logged by mistake.",
     ],
   },
   {
@@ -841,7 +918,7 @@ export const HOWTO_GUIDES: HowToGuide[] = [
       "Field: fuel receipts, weekly checks, warranty drop-off, request repair, truck gear, parts receipts (no live map).",
       "Warehouse: inventory, scan-to-receive, issue-to-tech + truck scan, pickup log, bottles, warranties, live map, log fuel receipts.",
       "Mechanic: shop repairs, oil/service, yard walk, fleet flags, vehicles, weekly checks, live map, log fuel receipts.",
-      "Office / supervisor: live map Map/Call, fuel, scheduled repairs, people, inventory overview, warranties, reports.",
+      `${roleLabel("office")} / supervisor: live map Map/Call, fuel, scheduled repairs, people, inventory overview, warranties, reports.`,
       "Admin: everything + invite/resend, role simulator, audit, settings.",
       "Viewer: same screens as admin, cannot save or submit.",
     ],

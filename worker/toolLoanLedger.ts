@@ -5,6 +5,7 @@
 import type { Hono } from "hono";
 import type { Env, PublicUser, Variables } from "./types";
 import { writeAudit } from "./audit";
+import { releasePersonalGearForUser, restorePersonalTools } from "./growth";
 
 type App = Hono<{ Bindings: Env; Variables: Variables }>;
 
@@ -437,15 +438,21 @@ export function registerToolLoanLedger(api: App): void {
       )
         .bind(body.status, id)
         .run();
-      // Former / inactive: turn off app login so they can't use the system, but ledger balance remains
+      // Former turns the login off and personal tools leave. Inactive is a pause: login and tools stay.
       const shouldDeactivate =
         body.deactivate_login !== false &&
-        (body.status === "former" || body.status === "inactive") &&
+        body.status === "former" &&
         row.user_id;
       if (shouldDeactivate) {
         await c.env.DB.prepare(`UPDATE users SET active = 0 WHERE id = ? AND active = 1`)
           .bind(row.user_id)
           .run();
+        try {
+          await releasePersonalGearForUser(c.env.DB, row.user_id);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!/no such table|no such column/i.test(msg)) throw e;
+        }
         await writeAudit(
           c.env.DB,
           user,
@@ -455,11 +462,23 @@ export function registerToolLoanLedger(api: App): void {
           `Deactivated login (tool loan ${body.status}): ${row.display_name} — balance retained`
         );
       }
-      // Re-hire path: mark active again → re-enable login if linked
+      // Re-hire path: mark active again → re-enable login if linked.
+      // Personal tools come back on file. Bottles stay until Back in service.
       if (body.status === "active" && row.user_id && body.deactivate_login !== true) {
+        const prior = await c.env.DB.prepare(`SELECT active FROM users WHERE id = ?`)
+          .bind(row.user_id)
+          .first<{ active: number }>();
         await c.env.DB.prepare(`UPDATE users SET active = 1 WHERE id = ?`)
           .bind(row.user_id)
           .run();
+        if (prior && Number(prior.active) === 0) {
+          try {
+            await restorePersonalTools(c.env.DB, row.user_id);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (!/no such table|no such column/i.test(msg)) throw e;
+          }
+        }
       }
     }
     if (body.notes !== undefined) {
@@ -533,6 +552,12 @@ export function registerToolLoanLedger(api: App): void {
           .first<{ active: number }>();
         if (u && u.active) {
           await c.env.DB.prepare(`UPDATE users SET active = 0 WHERE id = ?`).bind(p.user_id).run();
+          try {
+            await releasePersonalGearForUser(c.env.DB, p.user_id);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (!/no such table|no such column/i.test(msg)) throw e;
+          }
           loginsDeactivated++;
           await writeAudit(
             c.env.DB,

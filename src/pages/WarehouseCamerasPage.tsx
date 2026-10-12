@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, apiBinary, apiBinaryWithHeaders } from "../api";
 import { useAuth } from "../auth";
 
@@ -65,7 +66,8 @@ function tilesFromConfig(cfg: CamConfig | null): CamTile[] {
   return [...nvr, ...wyze];
 }
 
-const SNAPSHOT_REFRESH_MS = 5000;
+/** Wall stills — slower interval cuts flicker; sticky tiles keep last good frame. */
+const SNAPSHOT_REFRESH_MS = 10_000;
 /** 2.5-minute clips — half of 5 min for faster load, still enough to scrub */
 const CLIP_SEC = 150;
 /** First emergency play window — shorter so the first load is not a 40MB wait */
@@ -118,9 +120,51 @@ function combineDateTime(dateStr: string, timeStr: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** ?at= is ISO (with zone) or datetime-local. Naive "YYYY-MM-DD HH:MM:SS" is UTC, same as D1. */
+function parseQueryAt(raw: string | null): Date | null {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  if (/[zZ]$/.test(s) || /[+-]\d{2}:\d{2}$/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (s.includes(" ") && !s.includes("T")) {
+    const d = new Date(`${s.replace(" ", "T")}Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const local = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?)$/.exec(s);
+  if (local) return combineDateTime(local[1], local[2]);
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function matchCamera(cameras: CamTile[], channel: string): CamTile | null {
+  const q = channel.trim().toLowerCase();
+  if (!q) return null;
+  return (
+    cameras.find((c) => c.key.toLowerCase() === q) ||
+    cameras.find((c) => c.id.toLowerCase() === q) ||
+    cameras.find((c) => `${c.source}:${c.id}`.toLowerCase() === q) ||
+    cameras.find((c) => c.label.trim().toLowerCase() === q) ||
+    null
+  );
+}
+
 function friendlyCamError(msg: string): string {
   const s = msg.replace(/\s+/g, " ").trim();
-  if (/530|Tunnel error|trycloudflare/i.test(s)) {
+  // Proxy outdated / missing /fieldapp/nvr/live — check BEFORE trycloudflare (URL often appears in errors)
+  if (
+    /Document Error|Access Error 404|Can't open URL|<!DOCTYPE|no \/fieldapp\/(nvr\/live|segments|wyze)|\/fieldapp\/nvr\/live.*404|live route missing|outdated media proxy|proxy is outdated/i.test(
+      s
+    )
+  ) {
+    return "Shop camera proxy needs a restart. On the shop PC run FIX-CAMERAS-NOW.bat (Admin), then hard-refresh.";
+  }
+  if (/Live busy|Wyze live busy|live busy|close other live/i.test(s)) {
+    return "Live busy — close another live camera first, then retry.";
+  }
+  // Real tunnel outages (not merely a trycloudflare hostname in a URL)
+  if (/530|Tunnel error|tunnel offline|Error 1033|cloudflared.*not running/i.test(s)) {
     return "Camera link is down (tunnel offline on shop PC).";
   }
   if (/502|503|timeout|took too long/i.test(s)) {
@@ -135,13 +179,6 @@ function friendlyCamError(msg: string): string {
     )
   ) {
     return "Wyze not ready on shop PC — run install-wyze-bridge.ps1 + update media proxy.";
-  }
-  if (
-    /Document Error|Access Error 404|Can't open URL|<!DOCTYPE|no \/fieldapp\/segments|outdated/i.test(
-      s
-    )
-  ) {
-    return "Shop camera proxy is outdated. Update nvr-media-proxy on the NUC and restart FIX-CAMERAS-NOW.";
   }
   return s.length > 160 ? s.slice(0, 157) + "…" : s;
 }
@@ -215,6 +252,11 @@ function clipWindowForPlay(
 export function WarehouseCamerasPage() {
   const { user } = useAuth();
   const allowed = canViewWarehouseCameras(user);
+  const [searchParams] = useSearchParams();
+  const atParam = searchParams.get("at") || "";
+  const queryChannel = (searchParams.get("channel") || "").trim();
+  const queryAt = useMemo(() => parseQueryAt(atParam), [atParam]);
+  const queryApplied = useRef(false);
 
   const [cfg, setCfg] = useState<CamConfig | null>(null);
   const [error, setError] = useState("");
@@ -225,6 +267,10 @@ export function WarehouseCamerasPage() {
   const blobUrlsRef = useRef<string[]>([]);
 
   const [viewerCh, setViewerCh] = useState<CamTile | null>(null);
+  /** Default open = Live (NVR + Wyze). Recordings/clips are a second tab. */
+  const [viewerMode, setViewerMode] = useState<"live" | "recordings">("live");
+  const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  const [liveBusy, setLiveBusy] = useState(false);
   const [pickDate, setPickDate] = useState(() => toDatePart(new Date(Date.now() - 5 * 60 * 1000)));
   const [pickTime, setPickTime] = useState(() => toTimePart(new Date(Date.now() - 5 * 60 * 1000)));
   const [playBusy, setPlayBusy] = useState(false);
@@ -333,9 +379,7 @@ export function WarehouseCamerasPage() {
     if (viewerCh) return;
 
     setProxyStatus((s) => (s === "ok" ? "ok" : "loading"));
-    const next: Record<string, string> = {};
     const errs: Record<string, string> = {};
-    const newBlobs: string[] = [];
     let anyOk = false;
     let firstNvrErr = "";
 
@@ -355,30 +399,47 @@ export function WarehouseCamerasPage() {
             timeoutMs,
           });
           const url = URL.createObjectURL(blob);
-          newBlobs.push(url);
-          next[ch.key] = url;
+          // Sticky: only revoke the previous blob for THIS camera after success
+          setTileUrls((prev) => {
+            const old = prev[ch.key];
+            if (old && old.startsWith("blob:")) {
+              try {
+                URL.revokeObjectURL(old);
+              } catch {
+                /* ignore */
+              }
+              blobUrlsRef.current = blobUrlsRef.current.filter((u) => u !== old);
+            }
+            blobUrlsRef.current.push(url);
+            return { ...prev, [ch.key]: url };
+          });
           anyOk = true;
+          setTileErr((prev) => {
+            if (!prev[ch.key]) return prev;
+            const next = { ...prev };
+            delete next[ch.key];
+            return next;
+          });
         } catch (e) {
           const msg = friendlyCamError(e instanceof Error ? e.message : "Failed");
           errs[ch.key] = msg;
           if (!firstNvrErr && ch.source === "nvr") firstNvrErr = msg;
+          // Keep last good tile image on failure — do not blank
+          setTileErr((prev) => ({ ...prev, [ch.key]: msg }));
         }
       })
     );
 
-    revokeBlobs();
-    blobUrlsRef.current = newBlobs;
-    setTileUrls(next);
-    setTileErr(errs);
-
     if (anyOk) {
       setProxyStatus("ok");
       setProxyError("");
-    } else {
-      setProxyStatus("fail");
-      setProxyError(firstNvrErr || "Could not load camera snapshots.");
+    } else if (Object.keys(errs).length) {
+      setProxyStatus((s) => (s === "ok" ? "ok" : "fail"));
+      if (!anyOk) {
+        setProxyError(firstNvrErr || "Could not load camera snapshots.");
+      }
     }
-  }, [allowed, cloudProxyReady, activeCameras, revokeBlobs, viewerCh]);
+  }, [allowed, cloudProxyReady, activeCameras, viewerCh]);
 
   useEffect(() => {
     if (!cloudProxyReady || !allowed) return;
@@ -620,6 +681,43 @@ export function WarehouseCamerasPage() {
     [loadClip]
   );
 
+  useEffect(() => {
+    if (!allowed || queryApplied.current) return;
+    if (!queryAt && !queryChannel) {
+      queryApplied.current = true;
+      return;
+    }
+    if (!activeCameras.length) return;
+    queryApplied.current = true;
+    const matched = queryChannel ? matchCamera(activeCameras, queryChannel) : null;
+    const ch =
+      matched || (queryAt ? activeCameras.find((c) => c.source === "nvr") || activeCameras[0] : null);
+    if (queryAt) {
+      setPickDate(toDatePart(queryAt));
+      setPickTime(toTimePart(queryAt));
+    }
+    if (!ch) return;
+    setViewerCh(ch);
+    setPlayError("");
+    setClipList([]);
+    setActiveClipIdx(-1);
+    setNearestClipIdx(-1);
+    setNearestGapSec(null);
+    clearVideo();
+    setLiveUrl(null);
+    if (!queryAt) {
+      setViewerMode("live");
+      void startLive(ch);
+      return;
+    }
+    setViewerMode("recordings");
+    if (queryAt.getTime() > Date.now()) {
+      setPlayError("That time is in the future - pick a time earlier today or another day.");
+      return;
+    }
+    void fetchClipList(ch, queryAt, DEFAULT_PAD_MIN, { autoPlayNearest: false });
+  }, [allowed, activeCameras, queryAt, queryChannel, fetchClipList]);
+
   const playClipFromList = useCallback(
     (idx: number) => {
       if (!viewerCh || playBusy) return;
@@ -757,8 +855,30 @@ export function WarehouseCamerasPage() {
     return () => stopRewTimer();
   }, [applyPlaybackMode, stopRewTimer]);
 
+  async function startLive(ch: CamTile) {
+    setLiveBusy(true);
+    setPlayError("");
+    setLiveUrl(null);
+    try {
+      const res = await api<{ ok?: boolean; url?: string; error?: string }>(
+        `/warehouse-cameras/live-url/${encodeURIComponent(ch.key)}`,
+        { timeoutMs: 20_000 }
+      );
+      if (!res.url) {
+        throw new Error(res.error || "Live URL missing");
+      }
+      setLiveUrl(res.url);
+    } catch (e) {
+      setPlayError(
+        friendlyCamError(e instanceof Error ? e.message : "Could not start live view")
+      );
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
   function openViewer(ch: CamTile) {
-    const start = new Date(Date.now() - 5 * 60 * 1000);
+    const start = queryAt || new Date(Date.now() - 5 * 60 * 1000);
     setViewerCh(ch);
     setPickDate(toDatePart(start));
     setPickTime(toTimePart(start));
@@ -772,8 +892,19 @@ export function WarehouseCamerasPage() {
     setNearestGapSec(null);
     setClipListPadMin(DEFAULT_PAD_MIN);
     clearVideo();
-    // List motion clips near now, then auto-play the nearest — no clock-block jumping
-    void fetchClipList(ch, start, DEFAULT_PAD_MIN, { autoPlayNearest: true });
+    setLiveUrl(null);
+    if (queryAt) {
+      setViewerMode("recordings");
+      if (queryAt.getTime() > Date.now()) {
+        setPlayError("That time is in the future - pick a time earlier today or another day.");
+        return;
+      }
+      void fetchClipList(ch, queryAt, DEFAULT_PAD_MIN, { autoPlayNearest: false });
+      return;
+    }
+    // Live-first for every camera (NVR + Wyze). Recordings stay on the second tab.
+    setViewerMode("live");
+    void startLive(ch);
   }
 
   function closeViewer() {
@@ -784,6 +915,9 @@ export function WarehouseCamerasPage() {
     setActiveClipIdx(-1);
     setNearestClipIdx(-1);
     setNearestGapSec(null);
+    setLiveUrl(null);
+    setLiveBusy(false);
+    setViewerMode("live");
     clearVideo();
   }
 
@@ -887,7 +1021,7 @@ export function WarehouseCamerasPage() {
   if (!allowed) {
     return (
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Security cameras</h2>
+        <h2 style={{ marginTop: 0 }}>Shop cameras</h2>
         <p className="error" style={{ marginBottom: 0 }}>
           Camera access is limited to office and warehouse staff.
         </p>
@@ -898,7 +1032,7 @@ export function WarehouseCamerasPage() {
   return (
     <div className="warehouse-cameras-page">
       <div className="card warehouse-cam-head" style={{ marginBottom: "1rem" }}>
-        <h2 style={{ marginTop: 0, marginBottom: "0.25rem" }}>Security cameras</h2>
+        <h2 style={{ marginTop: 0, marginBottom: "0.25rem" }}>Shop cameras</h2>
         <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>
           {error
             ? error
@@ -932,7 +1066,7 @@ export function WarehouseCamerasPage() {
               <div className="warehouse-cam-tile-label">
                 {ch.label}
                 <span className="warehouse-cam-tile-hint">
-                  {ch.source === "wyze" ? "Wyze · Open →" : "Open →"}
+                  {ch.source === "wyze" ? "Wyze · LIVE →" : "LIVE →"}
                 </span>
               </div>
               <div className="warehouse-cam-tile-img-wrap">
@@ -965,13 +1099,62 @@ export function WarehouseCamerasPage() {
             aria-label={`${viewerCh.label} playback`}
           >
             <div className="warehouse-cam-head-row" style={{ marginBottom: "0.75rem" }}>
-              <h3 style={{ margin: 0, fontSize: "1.15rem" }}>{viewerCh.label}</h3>
+              <h3 style={{ margin: 0, fontSize: "1.15rem" }}>
+                {viewerCh.label}
+                {viewerMode === "live" ? (
+                  <span className="warehouse-cam-live-badge" aria-label="Live">
+                    LIVE
+                  </span>
+                ) : null}
+              </h3>
               <button type="button" className="btn secondary small" onClick={closeViewer}>
                 Back
               </button>
             </div>
 
-            {/* Date + time → list of real motion clips (no quiet-gap jumping) */}
+            <div className="warehouse-cam-mode-tabs" role="tablist" aria-label="View mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewerMode === "live"}
+                className={`btn small${viewerMode === "live" ? " primary" : " secondary"}`}
+                onClick={() => {
+                  setViewerMode("live");
+                  clearVideo();
+                  void startLive(viewerCh);
+                }}
+              >
+                Live
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewerMode === "recordings"}
+                className={`btn small${viewerMode === "recordings" ? " primary" : " secondary"}`}
+                onClick={() => {
+                  setViewerMode("recordings");
+                  setLiveUrl(null);
+                  const start =
+                    combineDateTime(pickDate, pickTime) ||
+                    new Date(Date.now() - 5 * 60 * 1000);
+                  void fetchClipList(viewerCh, start, DEFAULT_PAD_MIN, {
+                    autoPlayNearest: true,
+                  });
+                }}
+              >
+                Recordings
+              </button>
+            </div>
+
+            {playError ? (
+              <div className="error" style={{ marginBottom: "0.65rem" }}>
+                {playError}
+              </div>
+            ) : null}
+
+            {/* Recordings tab: date + time → motion clips (NVR + Wyze) */}
+            {viewerMode === "recordings" && (
+              <>
             <div className="warehouse-cam-pick-row">
               <label className="warehouse-cam-pick">
                 <span>Date</span>
@@ -1005,7 +1188,9 @@ export function WarehouseCamerasPage() {
               </button>
             </div>
             <p className="muted" style={{ margin: "0.35rem 0 0.5rem", fontSize: "0.85rem" }}>
-              NVR saves motion only. Plays the clip nearest this minute. Quiet gaps have no video.
+              {viewerCh.source === "wyze"
+                ? "Recorded segments when available. Live is continuous on the Live tab."
+                : "NVR saves motion only. Plays the clip nearest this minute. Quiet gaps have no video."}
             </p>
             {(clipListBusy || playBusy) && (
               <p className="muted" style={{ margin: "0 0 0.5rem", fontSize: "0.85rem" }}>
@@ -1107,12 +1292,39 @@ export function WarehouseCamerasPage() {
                 </div>
               </div>
             )}
+              </>
+            )}
+
             <div
-              className={`warehouse-cam-viewer-stage${showChrome || paused || !videoUrl ? " show-chrome" : ""}`}
+              className={`warehouse-cam-viewer-stage${
+                showChrome || paused || !videoUrl || (viewerMode === "live" && liveUrl)
+                  ? " show-chrome"
+                  : ""
+              }`}
               onMouseMove={bumpChrome}
               onTouchStart={bumpChrome}
             >
-              {videoUrl ? (
+              {viewerMode === "live" ? (
+                liveUrl ? (
+                  <img
+                    src={liveUrl}
+                    alt={`${viewerCh.label} live`}
+                    className="warehouse-cam-video warehouse-cam-video-large"
+                    onError={() => {
+                      setLiveUrl(null);
+                      setPlayError(
+                        friendlyCamError(
+                          "Shop camera proxy is outdated (live route missing). Run FIX-CAMERAS-NOW.bat (Admin) on the shop PC, then hard-refresh."
+                        )
+                      );
+                    }}
+                  />
+                ) : (
+                  <div className="warehouse-cam-viewer-placeholder">
+                    {liveBusy ? "Starting live…" : "Live view unavailable"}
+                  </div>
+                )
+              ) : videoUrl ? (
                 <video
                   ref={videoRef}
                   className="warehouse-cam-video warehouse-cam-video-large"

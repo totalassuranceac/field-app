@@ -129,7 +129,9 @@ function labelFor(path: string, method: string): string {
   if (path.includes("/hand-over") || path.includes("/complete") || path.includes("/pickups"))
     return "Pickup / handoff";
   if (path.startsWith("/assets")) return "Assets update";
+  if (path.startsWith("/inventory/live/used")) return "Parts used";
   if (path.startsWith("/inventory")) return "Inventory change";
+  if (path.startsWith("/handoffs")) return "Vendor hand-off";
   if (path.startsWith("/uploads")) return "Photo upload";
   return `${method} ${path}`;
 }
@@ -140,8 +142,12 @@ export function isQueueableMutation(path: string, method: string): boolean {
   if (!["POST", "PATCH", "PUT", "DELETE"].includes(m)) return false;
   if (path.startsWith("/auth")) return false;
   if (path.startsWith("/ocr")) return false;
+  // Never queue ST Book Job creates (dry/live gate must stay intentional)
+  if (path.startsWith("/day-board/miller-book")) return false;
   // Live GPS etc. — not user "save" actions
   if (path.startsWith("/live")) return false;
+  // HR write-ups must not replay later on their own
+  if (path.startsWith("/hr/writeups")) return false;
   return true;
 }
 

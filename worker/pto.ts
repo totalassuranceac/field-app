@@ -1,5 +1,5 @@
 /**
- * PTO / sick banks — hire date, anniversary grants, negatives allowed.
+ * PTO / sick banks â€” hire date, anniversary grants, negatives allowed.
  * Policy mirrors Total Assurance PTO Tracker spreadsheet.
  */
 
@@ -48,7 +48,7 @@ export function shouldRestartPtoOnRehire(
     return {
       restart: true,
       gap_days: null,
-      reason: "No separation date on file — treating return as a new hire for PTO",
+      reason: "No separation date on file â€” treating return as a new hire for PTO",
     };
   }
   const gap = daysBetweenIso(separationDateIso, rehireDateIso);
@@ -56,13 +56,13 @@ export function shouldRestartPtoOnRehire(
     return {
       restart: true,
       gap_days: gap,
-      reason: `Away ${gap} days (≥ ${breakDays}) — PTO restarts from rehire date`,
+      reason: `Away ${gap} days (â‰¥ ${breakDays}) â€” PTO restarts from rehire date`,
     };
   }
   return {
     restart: false,
     gap_days: gap,
-    reason: `Away ${gap} days (< ${breakDays}) — keep prior hire date and PTO banks`,
+    reason: `Away ${gap} days (< ${breakDays}) â€” keep prior hire date and PTO banks`,
   };
 }
 
@@ -123,7 +123,7 @@ export function lastAnniversary(
   let cand = `${y}-${md}`;
   if (cand > asOfIso) y -= 1;
   cand = `${y}-${md}`;
-  // Before first anniversary → no "last" grant year yet (use hire date)
+  // Before first anniversary â†’ no "last" grant year yet (use hire date)
   if (cand < hireDateIso) return hireDateIso;
   // If asOf is before first anniversary occurrence
   const firstAnn = `${hy + 1}-${md}`;
@@ -131,7 +131,7 @@ export function lastAnniversary(
   return cand;
 }
 
-/** Normalize birthday from sheet "12/28" or "01-27" → "MM-DD" */
+/** Normalize birthday from sheet "12/28" or "01-27" â†’ "MM-DD" */
 export function normalizeBirthdayMd(raw: string | null | undefined): string | null {
   const s = String(raw || "").trim();
   if (!s) return null;
@@ -143,7 +143,7 @@ export function normalizeBirthdayMd(raw: string | null | undefined): string | nu
   return `${mm}-${dd}`;
 }
 
-/** Parse sheet dates like 07/29/2024 or 5/4/2026 → ISO */
+/** Parse sheet dates like 07/29/2024 or 5/4/2026 â†’ ISO */
 export function parseFlexibleDate(raw: string | null | undefined): string | null {
   const s = String(raw || "").trim();
   if (!s) return null;
@@ -157,6 +157,7 @@ export function parseFlexibleDate(raw: string | null | undefined): string | null
   return `${y}-${mm}-${dd}`;
 }
 
+/** True calendar days inclusive (includes weekends). Prefer weekdayDaysInclusive for PTO. */
 export function calendarDaysInclusive(startIso: string, endIso: string): number {
   const a = Date.parse(startIso + "T12:00:00Z");
   const b = Date.parse(endIso + "T12:00:00Z");
@@ -164,8 +165,141 @@ export function calendarDaysInclusive(startIso: string, endIso: string): number 
   return Math.round((b - a) / 86400000) + 1;
 }
 
+/** 0=Sun â€¦ 6=Sat for an ISO calendar date in America/Chicago. */
+export function chicagoWeekdayIndex(iso: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return -1;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    weekday: "short",
+  }).formatToParts(new Date(`${iso}T12:00:00Z`));
+  const wd = parts.find((p) => p.type === "weekday")?.value || "";
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(wd);
+}
+
+/** Saturday / Sunday never count as PTO / personal / sick request days. */
+export function isChicagoWeekend(iso: string): boolean {
+  const i = chicagoWeekdayIndex(iso);
+  return i === 0 || i === 6;
+}
+
+/** Expand startâ†’end into every ISO date (inclusive). */
+export function eachIsoDateInclusive(startIso: string, endIso: string): string[] {
+  const out: string[] = [];
+  let t = Date.parse(`${startIso}T12:00:00Z`);
+  const end = Date.parse(`${endIso}T12:00:00Z`);
+  if (!Number.isFinite(t) || !Number.isFinite(end) || end < t) return out;
+  while (t <= end + 1e-3) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+    t += 86400000;
+  }
+  return out;
+}
+
+/** Weekdays only (Monâ€“Fri, America/Chicago) in the inclusive range. */
+export function eachWeekdayIsoInclusive(startIso: string, endIso: string): string[] {
+  return eachIsoDateInclusive(startIso, endIso).filter((d) => !isChicagoWeekend(d));
+}
+
+/** Count of Monâ€“Fri days in range (Sat/Sun excluded). */
+export function weekdayDaysInclusive(startIso: string, endIso: string): number {
+  return eachWeekdayIsoInclusive(startIso, endIso).length;
+}
+
+/**
+ * PTO bank hours for a request range: 8h Ã— weekday count only.
+ * Original start/end stay on the row; weekends are skipped on expand/deduct.
+ */
 export function hoursForDateRange(startIso: string, endIso: string, hoursPerDay = 8): number {
-  return calendarDaysInclusive(startIso, endIso) * hoursPerDay;
+  return weekdayDaysInclusive(startIso, endIso) * hoursPerDay;
+}
+
+/** Which bank a request draws from. Personal uses vacation; unpaid/other/bereavement = none. */
+export function bankKindForTimeOffType(requestType: string): PtoKind | null {
+  const t = String(requestType || "")
+    .trim()
+    .toLowerCase();
+  if (t === "sick") return "sick";
+  if (t === "pto" || t === "personal") return "vacation";
+  return null;
+}
+
+export type BankCoveragePlan = {
+  weekdays: string[];
+  hoursNeeded: number;
+  paidDays: string[];
+  unpaidDays: string[];
+  paidHours: number;
+  unpaidHours: number;
+  mode: "full_paid" | "full_unpaid" | "split";
+};
+
+/**
+ * Split a date range into paid weekdays (from bank) vs unpaid weekdays.
+ * Whole days only (8h). Sat/Sun never included.
+ */
+export function splitWeekdaysByBankHours(
+  startIso: string,
+  endIso: string,
+  availableHours: number,
+  hoursPerDay = 8
+): BankCoveragePlan {
+  const weekdays = eachWeekdayIsoInclusive(startIso, endIso);
+  const hoursNeeded = weekdays.length * hoursPerDay;
+  const avail = Math.max(0, Number(availableHours) || 0);
+  const paidDayCount = Math.min(
+    weekdays.length,
+    Math.floor((avail + 1e-9) / hoursPerDay)
+  );
+  const paidDays = weekdays.slice(0, paidDayCount);
+  const unpaidDays = weekdays.slice(paidDayCount);
+  return {
+    weekdays,
+    hoursNeeded,
+    paidDays,
+    unpaidDays,
+    paidHours: paidDays.length * hoursPerDay,
+    unpaidHours: unpaidDays.length * hoursPerDay,
+    mode:
+      unpaidDays.length === 0
+        ? "full_paid"
+        : paidDays.length === 0
+          ? "full_unpaid"
+          : "split",
+  };
+}
+
+/**
+ * True when `date` is an actual covered PTO weekday for this request.
+ * - Weekends never count.
+ * - When hours_deducted > 0, only the first N weekdays from start are covered
+ *   (N = ceil(hours / 8)). Fixes one-day bank use that left end_date spanning
+ *   a longer range (hoursOverride / sticky Aaron-style rows).
+ * - hours null/undefined â†’ full weekday span in [start, end].
+ * - hours === 0 (unpaid) â†’ full weekday span (sibling unpaid rows).
+ */
+export function ptoCoversChicagoDate(
+  startIso: string,
+  endIso: string,
+  dateIso: string,
+  hoursDeducted?: number | null,
+  hoursPerDay = 8
+): boolean {
+  if (!dateIso || dateIso < startIso || dateIso > endIso) return false;
+  if (isChicagoWeekend(dateIso)) return false;
+  const hours =
+    hoursDeducted != null && Number.isFinite(Number(hoursDeducted))
+      ? Number(hoursDeducted)
+      : null;
+  if (hours != null && hours > 0) {
+    const weekdays = eachWeekdayIsoInclusive(startIso, endIso);
+    if (!weekdays.length) return false;
+    const n = Math.max(
+      1,
+      Math.min(weekdays.length, Math.ceil(hours / hoursPerDay - 1e-9))
+    );
+    return weekdays.slice(0, n).includes(dateIso);
+  }
+  return true;
 }
 
 export async function ensurePtoTables(db: D1Database): Promise<void> {
@@ -288,7 +422,7 @@ export async function writePtoLedger(
 
 /**
  * If an anniversary is due and not yet applied, refresh entitlements and clear used.
- * Called on board reads and daily cron — automatic, no button.
+ * Called on board reads and daily cron â€” automatic, no button.
  */
 export async function applyDueAnniversary(
   db: D1Database,
@@ -342,7 +476,7 @@ export async function applyDueAnniversary(
     kind: "vacation",
     hours: -prevVacUsed,
     source: "anniversary_grant",
-    note: `Anniversary ${lastAnn}: vacation reset (was used ${prevVacUsed}h) → ${ent.vacation}h entitlement`,
+    note: `Anniversary ${lastAnn}: vacation reset (was used ${prevVacUsed}h) â†’ ${ent.vacation}h entitlement`,
   });
   await writePtoLedger(db, {
     employee_id: employeeId,
@@ -350,7 +484,7 @@ export async function applyDueAnniversary(
     kind: "sick",
     hours: -prevSickUsed,
     source: "anniversary_grant",
-    note: `Anniversary ${lastAnn}: sick reset (was used ${prevSickUsed}h) → ${ent.sick}h entitlement`,
+    note: `Anniversary ${lastAnn}: sick reset (was used ${prevSickUsed}h) â†’ ${ent.sick}h entitlement`,
   });
 
   return { applied: true, anniversary: lastAnn };
@@ -386,7 +520,7 @@ export type RehireTransitionResult = {
 /**
  * Apply leave / rehire side effects for PTO.
  * - Deactivate: stamp separation_date (banks kept for history).
- * - Reactivate after ≥90 days (or unknown gap): hire_date → rehire date, banks → 0.
+ * - Reactivate after â‰¥90 days (or unknown gap): hire_date â†’ rehire date, banks â†’ 0.
  * - Reactivate under 90 days: keep hire_date + banks; clear separation_date.
  */
 export async function applyLeaveOrRehireTransition(
@@ -405,7 +539,7 @@ export async function applyLeaveOrRehireTransition(
     created_by_user_id?: number | null;
     /** Admin override: force restart even if gap &lt; 90 */
     force_restart?: boolean;
-    /** Admin override: force keep prior seniority even if gap ≥ 90 */
+    /** Admin override: force keep prior seniority even if gap â‰¥ 90 */
     force_keep?: boolean;
   }
 ): Promise<RehireTransitionResult | null> {
@@ -514,7 +648,7 @@ export async function applyLeaveOrRehireTransition(
       };
     }
 
-    // Keep seniority — clear separation only
+    // Keep seniority â€” clear separation only
     await db
       .prepare(
         `UPDATE employees SET separation_date = NULL, updated_at = datetime('now') WHERE id = ?`
@@ -685,5 +819,51 @@ export function upcomingRecognition(
     }
   }
   out.sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
+  return out;
+}
+
+/** Birthdays + hire anniversaries falling on asOf (shop calendar day). */
+export function todayRecognition(
+  employees: EmployeePtoProfile[],
+  asOfIso: string
+): UpcomingEvent[] {
+  const out: UpcomingEvent[] = [];
+  const asOfMd = asOfIso.slice(5); // MM-DD
+  for (const e of employees) {
+    if (!e.active) continue;
+    if (e.birthday_md) {
+      const parts = e.birthday_md.split("-").map(Number);
+      if (parts.length >= 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])) {
+        const md = `${String(parts[0]).padStart(2, "0")}-${String(parts[1]).padStart(2, "0")}`;
+        if (md === asOfMd) {
+          out.push({
+            employee_id: e.id,
+            name: e.name,
+            event_type: "birthday",
+            date: asOfIso,
+          });
+        }
+      }
+    }
+    if (e.hire_date) {
+      const next = nextAnniversary(e.hire_date, asOfIso);
+      if (next === asOfIso) {
+        const yrs = completedYearsOfService(e.hire_date, asOfIso);
+        if (yrs >= 1) {
+          out.push({
+            employee_id: e.id,
+            name: e.name,
+            event_type: "anniversary",
+            date: asOfIso,
+            years_of_service: yrs,
+          });
+        }
+      }
+    }
+  }
+  out.sort(
+    (a, b) =>
+      a.event_type.localeCompare(b.event_type) || a.name.localeCompare(b.name)
+  );
   return out;
 }

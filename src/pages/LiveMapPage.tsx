@@ -488,10 +488,9 @@ export function LiveMapPage() {
   if (!allowed) {
     return (
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Live map</h2>
+        <h2 style={{ marginTop: 0 }}>Managers only</h2>
         <p className="error" style={{ marginBottom: "0.75rem" }}>
-          Live map is for supervisors, warehouse, shop, and office — field techs do not see
-          where others are.
+          The live map is for admin, office managers and supervisors.
         </p>
         <Link to="/" className="btn secondary">
           Back to home
@@ -504,172 +503,12 @@ export function LiveMapPage() {
     <div className="live-page">
       <div className="page-header">
         <div>
-          <h1>Live map</h1>
+          <h1>Fleet map</h1>
           <p>OneStep + Verizon GPS · updates every 30 seconds</p>
         </div>
       </div>
 
-      {/* Provider toggles only — no “All GPS / Updated …” line */}
-      <div className="live-status-bar card no-print" style={{ marginBottom: "0.55rem" }}>
-        <button
-          type="button"
-          className={`live-status-item live-provider-toggle${
-            filter === "onestep" ? " is-active" : ""
-          }`}
-          onClick={() => setFilter((f) => (f === "onestep" ? "all" : "onestep"))}
-          aria-pressed={filter === "onestep"}
-          title={
-            filter === "onestep"
-              ? "Showing OneStep only — tap again for all"
-              : "Show only OneStep GPS"
-          }
-        >
-          <strong>OneStep</strong>{" "}
-          {!os ? (
-            <span className="badge">…</span>
-          ) : !os.configured ? (
-            <span className="badge warning">not configured</span>
-          ) : os.ok ? (
-            <span className={`badge ${filter === "onestep" || filter === "all" ? "ok" : ""}`}>
-              {os.count} on map
-              {typeof os.without_position === "number" && os.without_position > 0
-                ? ` · ${os.without_position} no GPS yet`
-                : ""}
-            </span>
-          ) : (
-            <span className="badge danger" title={os.error || "OneStep error"}>
-              error
-            </span>
-          )}
-        </button>
-        <button
-          type="button"
-          className={`live-status-item live-provider-toggle${
-            filter === "verizon" ? " is-active" : ""
-          }`}
-          onClick={() => setFilter((f) => (f === "verizon" ? "all" : "verizon"))}
-          aria-pressed={filter === "verizon"}
-          title={
-            filter === "verizon"
-              ? "Showing Verizon only — tap again for all"
-              : "Show only Verizon GPS"
-          }
-        >
-          <strong>Verizon</strong>{" "}
-          {!vz ? (
-            <span className="badge">…</span>
-          ) : !vz.configured ? (
-            <span className="badge warning">not configured</span>
-          ) : vz.ok ? (
-            <span className={`badge ${filter === "verizon" || filter === "all" ? "ok" : ""}`}>
-              {vz.count} units
-            </span>
-          ) : (
-            <span className="badge danger">error</span>
-          )}
-        </button>
-        {os?.ok && typeof os.without_position === "number" && os.without_position > 0 && (
-          <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}>
-            New OneStep trackers appear here automatically once they report a GPS fix.{" "}
-            {os.without_position} device{os.without_position === 1 ? "" : "s"} visible in OneStep but
-            not on the map yet (no location / not powered on).
-          </p>
-        )}
-        {os && !os.ok && os.error && (
-          <p className="error" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}>
-            OneStep: {os.error}
-          </p>
-        )}
-        {os?.ok && Array.isArray(os.devices) && os.devices.length > 0 && (
-          <details className="live-onestep-devices" style={{ width: "100%", marginTop: "0.45rem" }}>
-            <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: "0.88rem" }}>
-              All OneStep devices ({os.devices.length}) — new trackers auto-show when they have GPS
-            </summary>
-            <ul
-              className="muted"
-              style={{
-                margin: "0.4rem 0 0",
-                paddingLeft: "1.1rem",
-                fontSize: "0.82rem",
-                lineHeight: 1.45,
-                maxHeight: "9rem",
-                overflow: "auto",
-              }}
-            >
-              {os.devices.map((d) => (
-                <li key={d.id}>
-                  <strong>{d.name}</strong>
-                  {d.unit_number ? ` · Unit ${d.unit_number}` : " · not linked to a unit"}
-                  {d.has_position ? " · on map" : " · no GPS fix yet"}
-                  {d.online === false ? " · offline" : ""}
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
-
-        {coverage.length > 0 && (
-          <div
-            className="live-coverage-panel"
-            style={{ width: "100%", marginTop: "0.55rem", fontSize: "0.88rem" }}
-          >
-            <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>
-              Fleet coverage:{" "}
-              <span className="badge ok">{onMapUnits.length} on map</span>{" "}
-              <span className={`badge ${missingUnits.length ? "danger" : ""}`}>
-                {missingUnits.length} missing
-              </span>{" "}
-              <span className={`badge ${noGpsUnits.length ? "warning" : ""}`}>
-                {noGpsUnits.length} no GPS system
-              </span>
-            </p>
-            {missingUnits.length > 0 && (
-              <details open style={{ marginBottom: "0.35rem" }}>
-                <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--danger, #c53030)" }}>
-                  Missing from live map ({missingUnits.length}) — expected to track
-                </summary>
-                <ul style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem", lineHeight: 1.45 }}>
-                  {missingUnits.map((c) => (
-                    <li key={c.vehicle_id}>
-                      <strong>Unit {c.unit_number}</strong>
-                      {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
-                      {c.gps_tracker ? ` · ${c.gps_tracker}` : ""}
-                      <div className="muted" style={{ fontSize: "0.8rem" }}>
-                        {c.reason}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-            {noGpsUnits.length > 0 && (
-              <details>
-                <summary style={{ cursor: "pointer", fontWeight: 600 }}>
-                  No GPS system assigned ({noGpsUnits.length}) — not expected on map yet
-                </summary>
-                <ul
-                  className="muted"
-                  style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem", lineHeight: 1.45 }}
-                >
-                  {noGpsUnits.map((c) => (
-                    <li key={c.vehicle_id}>
-                      <strong>Unit {c.unit_number}</strong>
-                      {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
-                      {c.status !== "active" ? ` · ${c.status}` : ""}
-                    </li>
-                  ))}
-                </ul>
-                <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.8rem" }}>
-                  Set GPS system to One Step or Verizon on Trucks, and name the tracker so it
-                  matches the unit or driver.
-                </p>
-              </details>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Search + Map/Call sit ABOVE the map so no scroll is needed */}
+      {/* Search + Map/Call ABOVE the map */}
       <div className="live-tech-search-bar live-tech-search-top card no-print">
         <label className="live-tech-search">
           <span className="sr-only">Find tech by name</span>
@@ -782,6 +621,186 @@ export function LiveMapPage() {
                 aria-label="Fleet live map"
               />
             </div>
+          </div>
+
+          {/* Coverage / provider status UNDER the map — not above Find-tech */}
+          <div className="live-status-bar card no-print" style={{ marginTop: "0.55rem" }}>
+            <button
+              type="button"
+              className={`live-status-item live-provider-toggle${
+                filter === "onestep" ? " is-active" : ""
+              }`}
+              onClick={() => setFilter((f) => (f === "onestep" ? "all" : "onestep"))}
+              aria-pressed={filter === "onestep"}
+              title={
+                filter === "onestep"
+                  ? "Showing OneStep only — tap again for all"
+                  : "Show only OneStep GPS"
+              }
+            >
+              <strong>OneStep</strong>{" "}
+              {!os ? (
+                <span className="badge">…</span>
+              ) : !os.configured ? (
+                <span className="badge warning">not configured</span>
+              ) : os.ok ? (
+                <span className={`badge ${filter === "onestep" || filter === "all" ? "ok" : ""}`}>
+                  {os.count} on map
+                  {typeof os.without_position === "number" && os.without_position > 0
+                    ? ` · ${os.without_position} no GPS yet`
+                    : ""}
+                </span>
+              ) : (
+                <span className="badge danger" title={os.error || "OneStep error"}>
+                  error
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              className={`live-status-item live-provider-toggle${
+                filter === "verizon" ? " is-active" : ""
+              }`}
+              onClick={() => setFilter((f) => (f === "verizon" ? "all" : "verizon"))}
+              aria-pressed={filter === "verizon"}
+              title={
+                filter === "verizon"
+                  ? "Showing Verizon only — tap again for all"
+                  : "Show only Verizon GPS"
+              }
+            >
+              <strong>Verizon</strong>{" "}
+              {!vz ? (
+                <span className="badge">…</span>
+              ) : !vz.configured ? (
+                <span className="badge warning">not configured</span>
+              ) : vz.ok ? (
+                <span className={`badge ${filter === "verizon" || filter === "all" ? "ok" : ""}`}>
+                  {vz.count} units
+                </span>
+              ) : (
+                <span className="badge danger">error</span>
+              )}
+            </button>
+            {os?.ok && typeof os.without_position === "number" && os.without_position > 0 && (
+              <p
+                className="muted"
+                style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}
+              >
+                New OneStep trackers appear here automatically once they report a GPS fix.{" "}
+                {os.without_position} device{os.without_position === 1 ? "" : "s"} visible in OneStep
+                but not on the map yet (no location / not powered on).
+              </p>
+            )}
+            {os && !os.ok && os.error && (
+              <p
+                className="error"
+                style={{ margin: "0.35rem 0 0", fontSize: "0.82rem", width: "100%" }}
+              >
+                OneStep: {os.error}
+              </p>
+            )}
+            {os?.ok && Array.isArray(os.devices) && os.devices.length > 0 && (
+              <details
+                className="live-onestep-devices"
+                style={{ width: "100%", marginTop: "0.45rem" }}
+              >
+                <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: "0.88rem" }}>
+                  All OneStep devices ({os.devices.length}) — new trackers auto-show when they have
+                  GPS
+                </summary>
+                <ul
+                  className="muted"
+                  style={{
+                    margin: "0.4rem 0 0",
+                    paddingLeft: "1.1rem",
+                    fontSize: "0.82rem",
+                    lineHeight: 1.45,
+                    maxHeight: "9rem",
+                    overflow: "auto",
+                  }}
+                >
+                  {os.devices.map((d) => (
+                    <li key={d.id}>
+                      <strong>{d.name}</strong>
+                      {d.unit_number ? ` · Unit ${d.unit_number}` : " · not linked to a unit"}
+                      {d.has_position ? " · on map" : " · no GPS fix yet"}
+                      {d.online === false ? " · offline" : ""}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            {coverage.length > 0 && (
+              <div
+                className="live-coverage-panel"
+                style={{ width: "100%", marginTop: "0.55rem", fontSize: "0.88rem" }}
+              >
+                <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>
+                  Fleet coverage:{" "}
+                  <span className="badge ok">{onMapUnits.length} on map</span>{" "}
+                  <span className={`badge ${missingUnits.length ? "danger" : ""}`}>
+                    {missingUnits.length} missing
+                  </span>{" "}
+                  <span className={`badge ${noGpsUnits.length ? "warning" : ""}`}>
+                    {noGpsUnits.length} no GPS system
+                  </span>
+                </p>
+                {missingUnits.length > 0 && (
+                  <details open style={{ marginBottom: "0.35rem" }}>
+                    <summary
+                      style={{
+                        cursor: "pointer",
+                        fontWeight: 600,
+                        color: "var(--danger, #c53030)",
+                      }}
+                    >
+                      Missing from live map ({missingUnits.length}) — expected to track
+                    </summary>
+                    <ul style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem", lineHeight: 1.45 }}>
+                      {missingUnits.map((c) => (
+                        <li key={c.vehicle_id}>
+                          <strong>Unit {c.unit_number}</strong>
+                          {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
+                          {c.gps_tracker ? ` · ${c.gps_tracker}` : ""}
+                          <div className="muted" style={{ fontSize: "0.8rem" }}>
+                            {c.reason}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {noGpsUnits.length > 0 && (
+                  <details>
+                    <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                      No GPS system assigned ({noGpsUnits.length}) — not expected on map yet
+                    </summary>
+                    <ul
+                      className="muted"
+                      style={{
+                        margin: "0.35rem 0 0",
+                        paddingLeft: "1.1rem",
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {noGpsUnits.map((c) => (
+                        <li key={c.vehicle_id}>
+                          <strong>Unit {c.unit_number}</strong>
+                          {c.assigned_driver ? ` · ${c.assigned_driver}` : ""}
+                          {c.status !== "active" ? ` · ${c.status}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.8rem" }}>
+                      Set GPS system to One Step or Verizon on Trucks, and name the tracker so it
+                      matches the unit or driver.
+                    </p>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../api";
+import { ApiError, api } from "../api";
 import { useAuth } from "../auth";
 
 type DropoffStatus = "waiting" | "received" | "cancelled";
@@ -20,11 +20,18 @@ interface Dropoff {
   for_unit: string | null;
   notes: string | null;
   status: DropoffStatus;
+  disposition?: string | null;
+  vehicle_unit?: string | null;
   dropped_by_name?: string | null;
   received_by_name?: string | null;
   received_at?: string | null;
   created_at: string;
   lines?: DropoffLine[];
+}
+
+interface MyVan {
+  id: number;
+  unit_number: string;
 }
 
 interface PendingPlacement {
@@ -85,6 +92,12 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const canReceive =
     user?.role === "admin" || user?.role === "warehouse" || user?.role === "office";
+  const canVanStock =
+    user?.role === "admin" ||
+    user?.role === "office" ||
+    user?.role === "driver" ||
+    user?.role === "mechanic" ||
+    user?.role === "supervisor";
 
   const [filter, setFilter] = useState<"waiting" | "all">("waiting");
   const [list, setList] = useState<Dropoff[]>([]);
@@ -95,6 +108,8 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(true);
   const [actingId, setActingId] = useState<number | null>(null);
+  const [vans, setVans] = useState<MyVan[]>([]);
+  const [pickFor, setPickFor] = useState<number | null>(null);
   const [fromPickup, setFromPickup] = useState(false);
   const [pickupTicketId, setPickupTicketId] = useState<number | null>(null);
   const [pickupLineId, setPickupLineId] = useState<number | null>(null);
@@ -185,7 +200,7 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
           : "other";
 
   const load = useCallback(async () => {
-    const [d, p] = await Promise.all([
+    const [d, p, mine] = await Promise.all([
       api<{
         dropoffs: Dropoff[];
         waiting?: number;
@@ -194,10 +209,14 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       api<{ pending?: PendingPlacement[]; count?: number }>(
         "/inventory/parts-dropoffs/pending-placement"
       ).catch(() => ({ pending: [] as PendingPlacement[] })),
+      api<{ vans?: MyVan[] }>("/inventory/parts-dropoffs/my-vans").catch(() => ({
+        vans: [] as MyVan[],
+      })),
     ]);
     setList(d.dropoffs || []);
     setWaiting(d.waiting ?? 0);
     setPending(p.pending || []);
+    setVans(mine.vans || []);
     if (d.error) setError(d.error);
     if ((p.pending || []).length) {
       window.dispatchEvent(new CustomEvent("notifications-changed"));
@@ -307,6 +326,69 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  async function putOnVan(d: Dropoff, vehicleId?: number) {
+    const label = dropoffJobPartLine(d);
+    setActingId(d.id);
+    setError("");
+    setOk("");
+    try {
+      const res = await api<{
+        vehicle?: { unit_number?: string };
+        stock_added?: number;
+        moved_from_shop?: number;
+      }>(`/inventory/parts-dropoffs/${d.id}/van-stock`, {
+        method: "POST",
+        body: JSON.stringify(vehicleId ? { vehicle_id: vehicleId } : {}),
+      });
+      const unit = res.vehicle?.unit_number || "";
+      const added = Number(res.stock_added) || 0;
+      const moved = Number(res.moved_from_shop) || 0;
+      const catalog =
+        added > 0
+          ? moved > 0
+            ? ` ${added} catalog part${added === 1 ? "" : "s"} on that van. ${moved} came off the shop shelf.`
+            : ` ${added} catalog part${added === 1 ? "" : "s"} added to that van.`
+          : "";
+      setOk(`On van ${unit}. ${label} left the shop counter.${catalog}`);
+      setPickFor(null);
+      await load();
+      window.dispatchEvent(new CustomEvent("parts-dropoffs-changed"));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const body = err.data as { vans?: MyVan[] } | undefined;
+        if (body?.vans?.length) setVans(body.vans);
+        setPickFor(d.id);
+        setError("Choose which van.");
+      } else {
+        setError(err instanceof Error ? err.message : "Could not put these on your van");
+      }
+    } finally {
+      setActingId(null);
+    }
+  }
+
+  function startVanStock(d: Dropoff) {
+    setError("");
+    setOk("");
+    if (vans.length > 1) {
+      setPickFor((cur) => (cur === d.id ? null : d.id));
+      return;
+    }
+    if (vans.length === 1) {
+      const yes = window.confirm(
+        `Put ${dropoffJobPartLine(d)} on van ${vans[0].unit_number}? They leave the shop counter.`
+      );
+      if (!yes) return;
+      void putOnVan(d, vans[0].id);
+      return;
+    }
+    const yes = window.confirm(
+      `Put ${dropoffJobPartLine(d)} on your van? They leave the shop counter.`
+    );
+    if (!yes) return;
+    void putOnVan(d);
+  }
+
   async function markReceived(id: number) {
     setActingId(id);
     setError("");
@@ -355,9 +437,10 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div className="page-header vendor-run-page-head">
           <div>
-            <h2 style={{ margin: 0 }}>Brought to shop</h2>
+            <h2 style={{ margin: 0 }}>Shop counter</h2>
             <p className="page-header-sub">
-              Record where vendor parts are at the shop ·{" "}
+              Record where vendor parts are at the shop.
+              {canVanStock ? " Taking them onto your van? Tap Van stock." : ""}{" "}
               <Link to="/part-pickup">Still at the store?</Link>
               {pending.length > 0
                 ? ` · ${pending.length} pickup${pending.length === 1 ? "" : "s"} need placement`
@@ -616,14 +699,28 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
                           {d.dropped_by_name
                             ? `${d.notes ? " · " : ""}${d.dropped_by_name}`
                             : ""}
-                          {d.status === "received" && d.received_by_name
-                            ? ` · received ${d.received_by_name}`
-                            : ""}
+                          {d.status === "received" && d.disposition === "van_stock"
+                            ? ` · van stock${d.vehicle_unit ? ` ${d.vehicle_unit}` : ""}${
+                                d.received_by_name ? ` · ${d.received_by_name}` : ""
+                              }`
+                            : d.status === "received" && d.received_by_name
+                              ? ` · received ${d.received_by_name}`
+                              : ""}
                           {d.status === "cancelled" ? " · cancelled" : ""}
                         </span>
                       </div>
                       {d.status === "waiting" && (
                         <div className="parts-dropoff-actions">
+                          {canVanStock && (
+                            <button
+                              type="button"
+                              className="btn btn-sm parts-dropoff-van"
+                              disabled={actingId === d.id}
+                              onClick={() => startVanStock(d)}
+                            >
+                              {actingId === d.id ? "..." : "Van stock"}
+                            </button>
+                          )}
                           {canReceive && (
                             <button
                               type="button"
@@ -642,6 +739,27 @@ export function PartsDropOffPanel({ compact = false }: { compact?: boolean }) {
                           >
                             Cancel
                           </button>
+                        </div>
+                      )}
+                      {d.status === "waiting" && pickFor === d.id && vans.length > 1 && (
+                        <div className="parts-dropoff-van-pick">
+                          {vans.map((v) => (
+                            <button
+                              key={v.id}
+                              type="button"
+                              className="btn secondary btn-sm"
+                              disabled={actingId === d.id}
+                              onClick={() => {
+                                const yes = window.confirm(
+                                  `Put ${dropoffJobPartLine(d)} on van ${v.unit_number}? They leave the shop counter.`
+                                );
+                                if (!yes) return;
+                                void putOnVan(d, v.id);
+                              }}
+                            >
+                              Van {v.unit_number}
+                            </button>
+                          ))}
                         </div>
                       )}
                     </li>

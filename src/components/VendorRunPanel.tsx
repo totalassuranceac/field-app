@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../api";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { api, can } from "../api";
 import { useAuth } from "../auth";
 
 type LineStatus =
@@ -44,6 +44,8 @@ interface Ticket {
   logged_by_name?: string | null;
   source: string;
   created_at: string;
+  updated_at?: string | null;
+  last_resolved_at?: string | null;
   line_count?: number;
   open_lines?: number;
   picked_lines?: number;
@@ -207,6 +209,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [showRunSheet, setShowRunSheet] = useState(false);
   const [runSheetFocus, setRunSheetFocus] = useState<string | null>(null);
   const focusHandled = useRef<number | null>(null);
+  /** History-only address typeahead (Chris lock: never group History by vendor) */
+  const [historyQ, setHistoryQ] = useState("");
+  const [historyQDebounced, setHistoryQDebounced] = useState("");
 
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -215,6 +220,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
   const [partDescription, setPartDescription] = useState("");
   const [jobAddress, setJobAddress] = useState("");
   const [contactUserId, setContactUserId] = useState("");
+  const [needsInstallSchedule, setNeedsInstallSchedule] = useState(false);
   const [contactName, setContactName] = useState("");
   /** First day warehouse should pick it up (future = on list but not for today's run). */
   const [readyDate, setReadyDate] = useState(() => localTodayIso());
@@ -237,7 +243,24 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
     return "other";
   }, [user?.role]);
 
+  useEffect(() => {
+    if (filter !== "history") {
+      setHistoryQDebounced("");
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setHistoryQDebounced(historyQ.trim());
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [historyQ, filter]);
+
   const load = useCallback(async () => {
+    const statusParam =
+      filter === "open" ? "open" : filter === "history" ? "history" : "all";
+    const qParam =
+      filter === "history" && historyQDebounced.length >= 2
+        ? `&q=${encodeURIComponent(historyQDebounced)}`
+        : "";
     const d = await api<{
       vendors: VendorGroup[];
       tickets: Ticket[];
@@ -245,22 +268,78 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       waiting: number;
       ready_today?: number;
       error?: string;
-    }>(
-      `/inventory/part-pickups?status=${
-        filter === "open" ? "open" : filter === "history" ? "history" : "all"
-      }`
-    );
+    }>(`/inventory/part-pickups?status=${statusParam}${qParam}`);
     setGroups(d.vendors || []);
     setTickets(d.tickets || []);
     if (d.vendor_names?.length) setVendorNames(d.vendor_names);
     setWaiting(d.waiting || 0);
     setReadyToday(d.ready_today ?? d.waiting ?? 0);
     if (d.error) setError(d.error);
-  }, [filter]);
+  }, [filter, historyQDebounced]);
 
   useEffect(() => {
     load().catch((e) => setError(e instanceof Error ? e.message : "Load failed"));
   }, [load]);
+
+  /** History: flat newest-first rows (never vendor-grouped). */
+  const historyFlat = useMemo(() => {
+    if (filter !== "history") return [];
+    type Flat = {
+      key: string;
+      ticket: Ticket;
+      line: TicketLine | null;
+      sortMs: number;
+      dateLabel: string;
+      address: string;
+      vendor: string;
+      part: string;
+      status: string;
+    };
+    const rows: Flat[] = [];
+    const source =
+      tickets.length > 0 ? tickets : groups.flatMap((g) => g.tickets);
+    for (const t of source) {
+      const addr = (t.notes || "").trim() || "—";
+      const lines = t.lines || [];
+      if (!lines.length) {
+        const raw = t.updated_at || t.created_at || "";
+        const ms = Date.parse(
+          String(raw).includes("T") ? String(raw) : String(raw).replace(" ", "T")
+        );
+        rows.push({
+          key: `t-${t.id}`,
+          ticket: t,
+          line: null,
+          sortMs: Number.isFinite(ms) ? ms : 0,
+          dateLabel: formatStamp(raw) || String(raw).slice(0, 10),
+          address: addr,
+          vendor: t.vendor_name || "—",
+          part: "—",
+          status: t.status || "done",
+        });
+        continue;
+      }
+      for (const line of lines) {
+        const raw = line.resolved_at || t.updated_at || t.created_at || "";
+        const ms = Date.parse(
+          String(raw).includes("T") ? String(raw) : String(raw).replace(" ", "T")
+        );
+        rows.push({
+          key: `l-${line.id}`,
+          ticket: t,
+          line,
+          sortMs: Number.isFinite(ms) ? ms : 0,
+          dateLabel: formatStamp(raw) || String(raw).slice(0, 10),
+          address: addr,
+          vendor: t.vendor_name || "—",
+          part: (line.part_name || line.part_code || "Part").trim(),
+          status: statusLabel(line.status),
+        });
+      }
+    }
+    rows.sort((a, b) => b.sortMs - a.sortMs || b.key.localeCompare(a.key));
+    return rows;
+  }, [filter, tickets, groups]);
 
   /**
    * Inbox deep-link ?ticket=12 — open Waiting first; if already picked, switch to
@@ -574,6 +653,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
             job_address: addr,
             contact_name: contact || undefined,
             contact_user_id: eid && eid > 0 ? eid : user?.id || undefined,
+            needs_install_schedule: needsInstallSchedule,
             needed_for_date: ready,
             source: defaultSource,
           }),
@@ -583,12 +663,13 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       setOk(
         later
           ? `Saved — arrives ${formatReadyDate(r.needed_for_date || ready)}. On the list for planning, not on today's driver run sheet.`
-          : "Part pickup request submitted — ready for pickup."
+          : "Will-call saved. Ready for pickup."
       );
       setVendor("");
       setPartDescription("");
       setJobAddress("");
       resetContactToSelf();
+      setNeedsInstallSchedule(false);
       setReadyDate(localTodayIso());
       setShowForm(false);
       await load();
@@ -827,7 +908,7 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div className="page-header vendor-run-page-head">
           <div>
-            <h2 style={{ margin: 0 }}>Part pickup request</h2>
+            <h2 style={{ margin: 0 }}>Will-call</h2>
             <p className="page-header-sub">
               Stay on <strong>Waiting</strong> until <strong>Picked up</strong> or{" "}
               <strong>Not needed</strong>. Later ready dates stay listed, off today&apos;s run.
@@ -881,7 +962,8 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
       {ok && <div className="success inv-flash">{ok}</div>}
 
       {/* Stops needed — every open vendor including future-ready (e.g. Carrier arrives later) */}
-      {(runSheet.length > 0 || groups.some((g) => g.waiting > 0)) && (
+      {filter !== "history" &&
+        (runSheet.length > 0 || groups.some((g) => g.waiting > 0)) && (
         <div className="vendor-run-summary card" aria-label="Vendors with open pickups">
           <button
             type="button"
@@ -1070,6 +1152,9 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
                               <span className="vendor-run-sheet-takeback">
                                 Take back to vendor
                               </span>
+                              {can(user, "recordVendorHandoff") ? (
+                                <Link to={`/warranties?q=${encodeURIComponent(w.log_number)}&handoff=1`}>Hand off</Link>
+                              ) : null}
                               <span className="muted vendor-run-sheet-meta">
                                 {w.part_name || "Warranty part"}
                                 {w.status === "delivered" ? " · marked delivered" : ""}
@@ -1267,6 +1352,17 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
               ))}
             </select>
           </label>
+          <label style={{ fontWeight: 600 }}>
+            <input
+              type="checkbox"
+              checked={needsInstallSchedule}
+              onChange={(e) => setNeedsInstallSchedule(e.target.checked)}
+            />{" "}
+            Needs install schedule
+            <span className="muted" style={{ display: "block", fontWeight: 500, fontSize: "0.8rem" }}>
+              For install only. After pickup, Chris Miller picks a tech. Leave off for a tech-only part - Miller is not notified.
+            </span>
+          </label>
           <label>
             Or type contact name
             <input
@@ -1284,18 +1380,87 @@ export function VendorRunPanel({ compact = false }: { compact?: boolean }) {
         </form>
       )}
 
+      <MillerScheduleQueue />
+
       <div className="vendor-run-groups" ref={listRef} id="part-pickup-list">
-        {!tickets.length && (
-          <div className="card muted">
-            {filter === "open"
-              ? "Nothing waiting for pickup. Use New pickup request — set Ready to pick on a future day if it is still arriving."
-              : filter === "history"
-                ? "No closed pickups yet. History shows who requested each part and who marked it picked up."
-                : "No recent pickup requests."}
+        {filter === "history" && (
+          <div className="card vendor-history-search" style={{ marginBottom: "0.75rem" }}>
+            <label style={{ display: "block", margin: 0 }}>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>
+                History search
+              </span>
+              <input
+                type="search"
+                value={historyQ}
+                onChange={(e) => setHistoryQ(e.target.value)}
+                placeholder="Search address"
+                autoComplete="off"
+                aria-label="Search history by address"
+                style={{ width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            {historyQ.trim().length > 0 && historyQ.trim().length < 2 ? (
+              <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.8rem" }}>
+                Type at least 2 characters
+              </p>
+            ) : null}
           </div>
         )}
 
-        {groups.map((g) => {
+        {filter === "history" ? (
+          !historyFlat.length ? (
+            <div className="card muted">
+              {historyQDebounced.length >= 2
+                ? `No history matching “${historyQDebounced}”.`
+                : "No closed pickups yet. History is a flat date list (not grouped by vendor)."}
+            </div>
+          ) : (
+            <div className="vendor-history-flat">
+              {historyFlat.map((row) => (
+                <article key={row.key} className="card vendor-history-row">
+                  <div className="vendor-history-line1">
+                    <span className="muted vendor-history-date">{row.dateLabel}</span>
+                    <span className="vendor-history-sep" aria-hidden>
+                      |
+                    </span>
+                    <strong className="vendor-history-addr">{row.address}</strong>
+                    <span className="vendor-history-sep" aria-hidden>
+                      |
+                    </span>
+                    <span className="vendor-history-vendor">{row.vendor}</span>
+                  </div>
+                  <div className="muted vendor-history-line2" style={{ fontSize: "0.85rem" }}>
+                    {row.part}
+                    <span aria-hidden> · </span>
+                    {row.status}
+                    {row.ticket.logged_by_name ? (
+                      <>
+                        <span aria-hidden> · </span>
+                        req {row.ticket.logged_by_name}
+                      </>
+                    ) : null}
+                    {row.line?.resolved_by_name ? (
+                      <>
+                        <span aria-hidden> · </span>
+                        picked {row.line.resolved_by_name}
+                      </>
+                    ) : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )
+        ) : null}
+
+        {filter !== "history" && !tickets.length && (
+          <div className="card muted">
+            {filter === "open"
+              ? "Nothing waiting for pickup. Use New pickup request — set Ready to pick on a future day if it is still arriving."
+              : "No recent pickup requests."}
+          </div>
+        )}
+
+        {filter !== "history" && groups.map((g) => {
           const isOpen = expanded[g.vendor_name] ?? g.waiting > 0;
           return (
             <section
@@ -1901,5 +2066,114 @@ function TicketCard({
         </div>
       )}
     </div>
+  );
+}
+
+type ScheduleItem = {
+  id: number;
+  notes: string | null;
+  vendor_name: string;
+  parts: string;
+  requester_name: string | null;
+  assigned_name: string | null;
+  schedule_status: string | null;
+};
+
+function MillerScheduleQueue() {
+  const { user } = useAuth();
+  const name = `${user?.display_name || ""} ${user?.username || ""}`.toLowerCase();
+  const show = user?.role === "admin" || user?.role === "office" || name.includes("miller");
+  const canAssign = user?.role === "admin" || name.includes("miller");
+  const [queue, setQueue] = useState<ScheduleItem[]>([]);
+  const [techs, setTechs] = useState<Array<{ id: number; name: string }>>([]);
+  const [pick, setPick] = useState<Record<number, string>>({});
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await api<{
+      queue: ScheduleItem[];
+      techs: Array<{ id: number; name: string }>;
+    }>("/inventory/part-pickups/schedule-queue");
+    setQueue(res.queue || []);
+    setTechs(res.techs || []);
+  }, []);
+
+  useEffect(() => {
+    if (!show) return;
+    void load().catch(() => setQueue([]));
+  }, [show, load]);
+
+  if (!show || !queue.length) return null;
+
+  async function assign(id: number) {
+    const tech = Number(pick[id]);
+    if (!tech) return;
+    setError("");
+    try {
+      await api(`/inventory/part-pickups/${id}/miller-assign`, {
+        method: "POST",
+        body: JSON.stringify({ tech_user_id: tech }),
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not assign");
+    }
+  }
+
+  async function close(id: number, kind: "booked" | "skip") {
+    const path = kind === "booked" ? "mark-booked" : "skip-schedule";
+    try {
+      await api(`/inventory/part-pickups/${id}/${path}`, { method: "POST", body: "{}" });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update");
+    }
+  }
+
+  return (
+    <section className="card" style={{ marginBottom: "0.75rem" }}>
+      <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Waiting on schedule ({queue.length})</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        All parts picked up. Pick who is available, then mark booked after it is on the board.
+      </p>
+      {error ? <div className="error">{error}</div> : null}
+      {queue.map((item) => (
+        <article key={item.id} style={{ marginBottom: "0.65rem" }}>
+          <strong>{item.notes || "Job"}</strong>
+          <div className="muted">
+            {item.vendor_name} - {item.parts} - {item.requester_name || "requester"} -{" "}
+            {item.schedule_status === "assigned"
+              ? `Assigned ${item.assigned_name || ""}`
+              : "Needs a tech"}
+          </div>
+          {canAssign && item.schedule_status === "needs_miller" ? (
+            <div className="toolbar" style={{ marginTop: "0.35rem" }}>
+              <select
+                value={pick[item.id] || ""}
+                onChange={(e) => setPick((p) => ({ ...p, [item.id]: e.target.value }))}
+              >
+                <option value="">Who is available</option>
+                {techs.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn btn-sm" onClick={() => void assign(item.id)}>
+                Assign tech
+              </button>
+              <button type="button" className="btn secondary btn-sm" onClick={() => void close(item.id, "skip")}>
+                Skip schedule
+              </button>
+            </div>
+          ) : null}
+          {item.schedule_status === "assigned" ? (
+            <button type="button" className="btn btn-sm" onClick={() => void close(item.id, "booked")}>
+              Mark booked
+            </button>
+          ) : null}
+        </article>
+      ))}
+    </section>
   );
 }

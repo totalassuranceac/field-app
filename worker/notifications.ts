@@ -28,7 +28,7 @@ export async function notifyUsers(
   }
 }
 
-/** Keep texts short — prefer one segment when possible. */
+/** Keep texts short - prefer one segment when possible. */
 export function shortSms(text: string, max = 280): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
@@ -36,7 +36,7 @@ export function shortSms(text: string, max = 280): string {
 }
 
 /**
- * Personal SMS only — never broadcast.
+ * Personal SMS only - never broadcast.
  * Texts only active users who have a phone on file, when Twilio is configured.
  * Dedupes the same context to the same user within 6 hours (efficient SMS).
  */
@@ -201,7 +201,7 @@ export async function coreFleetNotifyIds(db: D1Database): Promise<number[]> {
   return fallback;
 }
 
-/** Chris Marroquin (Operations Manager) — warranty Inbox always includes him. */
+/** Chris Marroquin (Operations Manager) - warranty Inbox always includes him. */
 export async function chrisMarroquinUserIds(db: D1Database): Promise<number[]> {
   const rows = await db
     .prepare(
@@ -335,7 +335,7 @@ export function shopTodayIso(): string {
 }
 
 /**
- * Morning (or first open) reminder: vans scheduled for *today* — tell the tech once per day.
+ * Morning (or first open) reminder: vans scheduled for *today* - tell the tech once per day.
  * Pass env to also SMS techs with phones on file.
  */
 export async function notifyShopBringInsToday(
@@ -424,7 +424,7 @@ export async function notifyShopBringInsToday(
       "Open Repairs in the app for details.",
     ]
       .filter(Boolean)
-      .join(" · ");
+      .join(" - ");
 
     for (const uid of notifyIds) {
       const existing = await db
@@ -515,7 +515,7 @@ export async function notifyWeeklyChecksDue(db: D1Database): Promise<number> {
         db,
         [d.id],
         "weekly_check",
-        `Weekly check due — unit ${v.unit_number}`,
+        `Weekly check due - unit ${v.unit_number}`,
         "Please complete your weekly vehicle check today. Open Weekly checks in the app.",
         { type: "vehicle", id: v.vehicle_id }
       );
@@ -526,7 +526,7 @@ export async function notifyWeeklyChecksDue(db: D1Database): Promise<number> {
 }
 
 /**
- * Ops action alerts (idempotent — one unread per entity):
+ * Ops action alerts (idempotent - one unread per entity):
  * - Warranties open 7+ / 14+ days → warehouse + admin
  * - Open part pickups → warehouse
  * - Equipment needing attention → warehouse + admin
@@ -538,28 +538,36 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
 
   // Aging open warranties
   try {
-    const rows = await db
-      .prepare(
-        `SELECT id, log_number, part_name, status, dropped_off_at,
+    const agingSelect = `SELECT id, log_number, part_name, status, dropped_off_at,
            CAST((julianday('now') - julianday(dropped_off_at)) AS INTEGER) as days_open
          FROM warranty_claims
-         WHERE status IN ('dropped_off','claim_submitted','return_to_vendor','delivered')
+         WHERE status IN ('dropped_off','claim_submitted','return_to_vendor','delivered')`;
+    const agingTail = `
            AND dropped_off_at <= datetime('now', '-7 days')
          ORDER BY dropped_off_at ASC
-         LIMIT 40`
-      )
-      .all<{
-        id: number;
-        log_number: string;
-        part_name: string;
-        status: string;
-        days_open: number;
-      }>();
+         LIMIT 40`;
+    type AgingWarranty = {
+      id: number;
+      log_number: string;
+      part_name: string;
+      status: string;
+      days_open: number;
+    };
+    let rows;
+    try {
+      rows = await db
+        .prepare(agingSelect + ` AND IFNULL(voided, 0) = 0` + agingTail)
+        .all<AgingWarranty>();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such column.*voided/i.test(msg)) throw e;
+      rows = await db.prepare(agingSelect + agingTail).all<AgingWarranty>();
+    }
     for (const w of rows.results || []) {
       const days = Number(w.days_open) || 0;
       const urgent = days >= 14;
       const kind = urgent ? "warranty_urgent" : "warranty_aging";
-      // Any prior row (read or unread) — sweep may auto-read non-File claims;
+      // Any prior row (read or unread) - sweep may auto-read non-File claims;
       // do not recreate every poll or the inbox table fills with read spam.
       const existing = await db
         .prepare(
@@ -577,7 +585,7 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
         urgent
           ? `Warranty ${w.log_number} urgent (${days}d)`
           : `Warranty ${w.log_number} aging (${days}d)`,
-        `${w.part_name} · ${w.status.replace(/_/g, " ")} — still open.`,
+        `${w.part_name} - ${w.status.replace(/_/g, " ")} - still open.`,
         { type: "warranty", id: w.id }
       );
       created += whAdmin.length;
@@ -610,7 +618,7 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
         whAdmin,
         "pickup_waiting",
         `Part pickup ${p.request_number}`,
-        `Status: ${p.status} — needs warehouse attention.`,
+        `Status: ${p.status} - needs warehouse attention.`,
         { type: "pickup", id: p.id }
       );
       created += whAdmin.length;
@@ -620,7 +628,7 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
   }
 
   // Vendor / store part pickup tickets still open (Waiting list).
-  // Weekday warehouse check: skip voided (and cancelled) — only pending/not_ready/partial.
+  // Weekday warehouse check: skip voided (and cancelled) - only pending/not_ready/partial.
   try {
     const tickets = await db
       .prepare(
@@ -656,15 +664,15 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
         .first();
       if (existing) continue;
       const part = (t.part_name || "Part").trim().slice(0, 60);
-      const when = t.needed_for_date ? ` · ready ${t.needed_for_date}` : "";
+      const when = t.needed_for_date ? ` - ready ${t.needed_for_date}` : "";
       const addr = (t.notes || "").trim().slice(0, 40);
       await notifyUsers(
         db,
         whAdmin,
         "vendor_run_waiting",
-        `Still need pickup · ${t.vendor_name.slice(0, 36)}`,
-        `${part}${addr ? ` · ${addr}` : ""}${when}${
-          t.purchase_order ? ` · contact ${t.purchase_order}` : ""
+        `Still need pickup - ${t.vendor_name.slice(0, 36)}`,
+        `${part}${addr ? ` - ${addr}` : ""}${when}${
+          t.purchase_order ? ` - contact ${t.purchase_order}` : ""
         }`,
         { type: "part_pickup", id: t.id }
       );
@@ -702,13 +710,13 @@ export async function notifyOpsActionItems(db: D1Database): Promise<number> {
         .bind(String(a.id))
         .first();
       if (existing) continue;
-      const tag = a.asset_tag ? `${a.asset_tag} · ` : "";
+      const tag = a.asset_tag ? `${a.asset_tag} - ` : "";
       await notifyUsers(
         db,
         whAdmin,
         "asset_attention",
         `Equipment attention: ${tag}${a.name}`,
-        `${a.condition.replace(/_/g, " ")} · ${a.status}`,
+        `${a.condition.replace(/_/g, " ")} - ${a.status}`,
         { type: "asset", id: a.id }
       );
       created += whAdmin.length;
@@ -736,7 +744,7 @@ export async function markNotificationRead(
 
 /**
  * Normalize entity_type aliases used when inserting notifications.
- * Returns a canonical key, or null for unknown types (leave unread — no guessing).
+ * Returns a canonical key, or null for unknown types (leave unread - no guessing).
  */
 function normalizeNotifEntityType(raw: string | null | undefined): string | null {
   const t = String(raw || "")
@@ -751,6 +759,8 @@ function normalizeNotifEntityType(raw: string | null | undefined): string | null
     return "part_pickup";
   if (t === "pickup" || t === "part_pickups") return "pickup";
   if (t === "parts_dropoff" || t === "parts_drop_off" || t === "dropoff") return "parts_dropoff";
+  if (t === "part_delivery" || t === "delivery") return "part_delivery";
+  if (t === "parts_run" || t === "parts_run_request") return "parts_run";
   return null;
 }
 
@@ -784,7 +794,7 @@ async function entityStillWaiting(
       if (status === "pending_office" || status === "pending_manager" || status.startsWith("pending_")) {
         return true;
       }
-      // Approved but not ordered yet — still waiting work
+      // Approved but not ordered yet - still waiting work
       if (status === "approved") {
         const part = String(row.part_status || "pending_order").toLowerCase() || "pending_order";
         return part === "pending_order";
@@ -798,17 +808,38 @@ async function entityStillWaiting(
       try {
         const row = await db
           .prepare(
-            `SELECT status, IFNULL(parked, 0) as parked FROM warranty_claims WHERE id = ?`
+            `SELECT status, IFNULL(parked, 0) as parked, IFNULL(voided, 0) as voided
+             FROM warranty_claims WHERE id = ?`
           )
           .bind(idNum)
-          .first<{ status: string; parked: number }>();
+          .first<{ status: string; parked: number; voided: number }>();
         if (!row) return null;
         return (
-          String(row.status || "").toLowerCase() === "dropped_off" && Number(row.parked || 0) === 0
+          String(row.status || "").toLowerCase() === "dropped_off" &&
+          Number(row.parked || 0) === 0 &&
+          Number(row.voided || 0) === 0
         );
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (/no such column.*parked/i.test(msg)) {
+        if (/no such column.*voided/i.test(msg)) {
+          try {
+            const row = await db
+              .prepare(
+                `SELECT status, IFNULL(parked, 0) as parked FROM warranty_claims WHERE id = ?`
+              )
+              .bind(idNum)
+              .first<{ status: string; parked: number }>();
+            if (!row) return null;
+            return (
+              String(row.status || "").toLowerCase() === "dropped_off" &&
+              Number(row.parked || 0) === 0
+            );
+          } catch (e2) {
+            const msg2 = e2 instanceof Error ? e2.message : String(e2);
+            if (!/no such column.*parked/i.test(msg2)) return null;
+          }
+        }
+        if (/no such column.*(parked|voided)/i.test(msg)) {
           const row = await db
             .prepare(`SELECT status FROM warranty_claims WHERE id = ?`)
             .bind(idNum)
@@ -848,7 +879,7 @@ async function entityStillWaiting(
     }
 
     if (kind === "part_pickup") {
-      // Speedy vendor-run tickets — waiting while open lines remain
+      // Speedy vendor-run tickets - waiting while open lines remain
       try {
         const ticket = await db
           .prepare(`SELECT status FROM part_pickup_tickets WHERE id = ?`)
@@ -909,6 +940,33 @@ async function entityStillWaiting(
         return null;
       }
     }
+
+    if (kind === "part_delivery") {
+      try {
+        const row = await db
+          .prepare(`SELECT status FROM part_deliveries WHERE id = ?`)
+          .bind(idNum)
+          .first<{ status: string }>();
+        if (!row) return null;
+        return String(row.status || "").toLowerCase() === "received";
+      } catch {
+        return null;
+      }
+    }
+
+    if (kind === "parts_run") {
+      try {
+        const row = await db
+          .prepare(`SELECT status FROM parts_run_requests WHERE id = ?`)
+          .bind(idNum)
+          .first<{ status: string }>();
+        if (!row) return null;
+        const st = String(row.status || "").toLowerCase();
+        return st === "requested" || st === "en_route";
+      } catch {
+        return null;
+      }
+    }
   } catch {
     return null;
   }
@@ -918,9 +976,74 @@ async function entityStillWaiting(
 
 /**
  * Auto-mark unread notifications read when their linked card is no longer waiting.
- * Only SET read_at — never DELETE. Missing/unknown entities stay unread.
+ * Only SET read_at - never DELETE. Missing/unknown entities stay unread.
  * Called from GET /notifications so bell + inbox stay honest without a cron.
  */
+
+/**
+ * Self-noise off (DEFERRED_4b): mark unread alerts that echo the current
+ * user's own completed actions (body/title "by Name" / "dropped by Name" /
+ * "Updated by Name"). Keeps real office alerts from others (warranties,
+ * fuel, others' drop-offs). Only SET read_at - never DELETE.
+ */
+/**
+ * Self-noise off (DEFERRED_4b): mark unread alerts that echo the current
+ * user's own completed actions (body/title contains "by Name" /
+ * "dropped by Name" / "Updated by Name"). Keeps real office alerts
+ * from others (warranties, fuel, others' drop-offs). Only SET read_at.
+ */
+export async function clearSelfActorNoise(
+  db: D1Database,
+  user: { id: number; display_name?: string | null }
+): Promise<number> {
+  const name = String(user.display_name || "").trim();
+  if (!name || name.length < 2) return 0;
+
+  let rows: Array<{ id: number; title: string; body: string | null }> = [];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, title, body FROM notifications
+         WHERE user_id = ?
+           AND read_at IS NULL
+           AND kind NOT LIKE 'message%'
+         ORDER BY id ASC
+         LIMIT 200`
+      )
+      .bind(user.id)
+      .all<{ id: number; title: string; body: string | null }>();
+    rows = res.results || [];
+  } catch {
+    return 0;
+  }
+
+  const nameLower = name.toLowerCase();
+  const needles = [
+    `by ${nameLower}`,
+    `dropped by ${nameLower}`,
+    `updated by ${nameLower}`,
+  ];
+
+  let marked = 0;
+  for (const n of rows) {
+    const textLower = `${n.title || ""} ${n.body || ""}`.toLowerCase();
+    if (!needles.some((needle) => textLower.includes(needle))) continue;
+    try {
+      await db
+        .prepare(
+          `UPDATE notifications SET read_at = datetime('now')
+           WHERE id = ? AND user_id = ? AND read_at IS NULL`
+        )
+        .bind(n.id, user.id)
+        .run();
+      marked += 1;
+    } catch {
+      /* ignore single-row failure */
+    }
+  }
+  return marked;
+}
+
 export async function sweepUnreadNotifications(
   db: D1Database,
   userId: number
@@ -946,6 +1069,24 @@ export async function sweepUnreadNotifications(
   }
 
   let marked = 0;
+  try {
+    const cleared = await db
+      .prepare(
+        `UPDATE notifications SET read_at = datetime('now')
+         WHERE user_id = ?
+           AND read_at IS NULL
+           AND lower(entity_type) IN ('parts_run', 'parts_run_request')
+           AND entity_id IN (
+             SELECT CAST(id AS TEXT) FROM parts_run_requests
+             WHERE status NOT IN ('requested', 'en_route')
+           )`
+      )
+      .bind(userId)
+      .run();
+    marked += Number(cleared.meta.changes || 0);
+  } catch {
+    /* table optional */
+  }
   for (const n of rows) {
     // Skip types we don't know how to evaluate (leave unread)
     if (!normalizeNotifEntityType(n.entity_type)) continue;
@@ -995,7 +1136,7 @@ export async function ensureOilChangeScheduled(
     nextDue = last.odometer + last.interval_miles;
   }
   if (nextDue == null) {
-    // No oil history — don't auto-open until first oil change is logged by mechanic
+    // No oil history - don't auto-open until first oil change is logged by mechanic
     return { scheduled: false, next_due: null };
   }
 
@@ -1029,7 +1170,7 @@ export async function ensureOilChangeScheduled(
     .first<{ id: number }>();
   if (!reporter) return { scheduled: false, next_due: nextDue };
 
-  const title = `Oil change due — unit ${unit?.unit_number || vehicleId}`;
+  const title = `Oil change due - unit ${unit?.unit_number || vehicleId}`;
   const desc = `Auto-scheduled: odometer ${odometer.toLocaleString()} mi reached next oil service at ${nextDue.toLocaleString()} mi. Mechanic can adjust interval when completing.`;
 
   const ins = await db

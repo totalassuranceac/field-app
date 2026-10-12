@@ -1,0 +1,817 @@
+/* Day Board ST-mirror (Build 1) — scoped page CSS */
+
+/* Header: Reload + status stay clear of the native date calendar */
+.day-board-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+}
+.day-board-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.day-board-reload {
+  margin-left: 0 !important;
+  white-space: nowrap;
+}
+.day-board-status-bar {
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #1e3a8a;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  white-space: nowrap;
+}
+[data-theme="dark"] .day-board-status-bar {
+  color: #dbeafe;
+  background: #1e3a5f;
+  border-color: #3b82f6;
+}
+
+/* Date row alone — calendar may cover board briefly, never covers Reload */
+.day-board-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0 0 0.75rem;
+}
+.day-board-date-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.day-board-date-face {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  min-width: 11rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: #1a2b4a;
+  color: #f8fafc;
+}
+.day-board-date-label {
+  font-weight: 700;
+  font-size: 0.9rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.day-board-date-wrap {
+  position: absolute;
+  inset: 0;
+  opacity: 0.01; /* still clickable / opens native picker */
+  cursor: pointer;
+}
+.day-board-date {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+}
+
+.day-board-guide,
+.day-board-legend-chips,
+.day-board-legend-line,
+.day-board-chip-legend,
+.day-board-reminders {
+  display: none !important;
+}
+
+.day-board-arrive-sub {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.2;
+  opacity: 0.92;
+  margin-top: 0.1rem;
+}
+
+/*
+ * ST Dispatch Status fills — MUST beat cream Install rules:
+ *   .day-board-section.crew-install .day-board-bar { background:#faf3e0 !important }
+ * Those are 3-class selectors; our st-* rules need the same or higher specificity.
+ */
+.day-board-page .day-board-section .day-board-cell.st-scheduled,
+.day-board-page .day-board-section .day-board-bar.st-scheduled,
+.day-board-page .day-board-section button.day-board-bar.st-scheduled,
+.day-board-page .day-board-section button.day-board-cell.st-scheduled {
+  background: #2f80ed !important;
+  border-color: #2563eb !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-confirmed,
+.day-board-page .day-board-section .day-board-bar.st-confirmed,
+.day-board-page .day-board-section button.day-board-bar.st-confirmed {
+  background: #2d9cdb !important;
+  border-color: #2b8fc7 !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-dispatched,
+.day-board-page .day-board-section .day-board-bar.st-dispatched,
+.day-board-page .day-board-section button.day-board-bar.st-dispatched {
+  background: #bb6bd9 !important;
+  border-color: #9b51c7 !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-arrived,
+.day-board-page .day-board-section .day-board-bar.st-arrived,
+.day-board-page .day-board-section .day-board-cell.st-working,
+.day-board-page .day-board-section .day-board-bar.st-working,
+.day-board-page .day-board-section button.day-board-bar.st-arrived,
+.day-board-page .day-board-section button.day-board-bar.st-working {
+  background: #27ae60 !important;
+  border-color: #219653 !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-finished,
+.day-board-page .day-board-section .day-board-cell.st-done,
+.day-board-page .day-board-section .day-board-cell.is-done,
+.day-board-page .day-board-section .day-board-bar.st-finished,
+.day-board-page .day-board-section .day-board-bar.st-done,
+.day-board-page .day-board-section .day-board-bar.is-done,
+.day-board-page .day-board-section button.day-board-bar.st-finished,
+.day-board-page .day-board-section button.day-board-bar.is-done,
+.day-board-page .day-board-section .day-board-cell.st-finished.is-done,
+.day-board-page .day-board-section .day-board-bar.st-finished.is-done,
+.day-board-page .day-board-section button.day-board-bar.st-finished.is-done {
+  /* Chris HARD LOCK: gray = done (beats working green) */
+  background: #6b7280 !important;
+  border-color: #4b5563 !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-canceled,
+.day-board-page .day-board-section .day-board-bar.st-canceled,
+.day-board-page .day-board-section button.day-board-bar.st-canceled {
+  background: #eb5757 !important;
+  border-color: #cf4c4c !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-hold,
+.day-board-page .day-board-section .day-board-bar.st-hold,
+.day-board-page .day-board-section button.day-board-bar.st-hold {
+  background: #f2994a !important;
+  border-color: #de8535 !important;
+  color: #111827 !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-nonjob,
+.day-board-page .day-board-section .day-board-bar.st-nonjob,
+.day-board-page .day-board-section button.day-board-bar.st-nonjob {
+  background: #828282 !important;
+  border-color: #6b6b6b !important;
+  color: #fff !important;
+}
+
+/* Kill ink-st blue text / cream ink on ST-colored bars */
+.day-board-page .day-board-section .day-board-cell[class*="st-"] .day-board-cell-main,
+.day-board-page .day-board-section .day-board-cell[class*="st-"] .day-board-cell-meta,
+.day-board-page .day-board-section .day-board-cell[class*="st-"] .day-board-cell-work,
+.day-board-page .day-board-section .day-board-cell[class*="st-"] .day-board-arrive-sub,
+.day-board-page .day-board-section .day-board-bar[class*="st-"] .day-board-miller-street,
+.day-board-page .day-board-section .day-board-bar[class*="st-"] .day-board-miller-detail,
+.day-board-page .day-board-section .day-board-bar[class*="st-"] .day-board-arrive-sub,
+.day-board-page .day-board-section .day-board-cell.is-done .day-board-cell-main,
+.day-board-page .day-board-section .day-board-cell.is-done .day-board-cell-meta,
+.day-board-page .day-board-section .day-board-bar.is-done .day-board-miller-street,
+.day-board-page .day-board-section .day-board-bar.is-done .day-board-miller-detail {
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-hold .day-board-cell-main,
+.day-board-page .day-board-section .day-board-cell.st-hold .day-board-cell-meta,
+.day-board-page .day-board-section .day-board-bar.st-hold .day-board-miller-street,
+.day-board-page .day-board-section .day-board-bar.st-hold .day-board-miller-detail {
+  color: #111827 !important;
+}
+
+.day-board-page .day-board-section .day-board-cell.is-off,
+.day-board-page .day-board-section .day-board-cell.is-pto-full,
+.day-board-page .day-board-section .day-board-bar.st-off {
+  background: #fecaca !important;
+  border-color: #f87171 !important;
+  color: #7f1d1d !important;
+}
+.day-board-page .day-board-section .day-board-cell.is-off .day-board-cell-main,
+.day-board-page .day-board-section .day-board-cell.is-pto-full .day-board-cell-main {
+  color: #7f1d1d !important;
+}
+
+/* ULTIMATE HARD LOCK: gray = done (beats working green + cream/yellow leftovers) */
+.day-board-page .day-board-section .day-board-cell.st-finished,
+.day-board-page .day-board-section .day-board-cell.st-done,
+.day-board-page .day-board-section .day-board-cell.is-done,
+.day-board-page .day-board-section .day-board-bar.st-finished,
+.day-board-page .day-board-section .day-board-bar.st-done,
+.day-board-page .day-board-section .day-board-bar.is-done,
+.day-board-page .day-board-section button.day-board-bar.st-finished,
+.day-board-page .day-board-section button.day-board-bar.st-done,
+.day-board-page .day-board-section button.day-board-bar.is-done,
+.day-board-page .day-board-section.crew-install .day-board-bar.st-finished,
+.day-board-page .day-board-section.crew-install .day-board-bar.is-done,
+.day-board-page .day-board-section.crew-service .day-board-cell.st-finished,
+.day-board-page .day-board-section.crew-service .day-board-cell.is-done {
+  background: #6b7280 !important;
+  border-color: #4b5563 !important;
+  color: #fff !important;
+}
+.day-board-page .day-board-section .day-board-cell.st-finished .day-board-cell-main,
+.day-board-page .day-board-section .day-board-cell.st-finished .day-board-cell-meta,
+.day-board-page .day-board-section .day-board-cell.is-done .day-board-cell-main,
+.day-board-page .day-board-section .day-board-bar.st-finished .day-board-miller-street,
+.day-board-page .day-board-section .day-board-bar.is-done .day-board-miller-street,
+.day-board-page .day-board-section .day-board-bar.st-finished .day-board-miller-detail,
+.day-board-page .day-board-section .day-board-bar.is-done .day-board-miller-detail {
+  color: #fff !important;
+}
+
+
+/* —— Miller Install quick-add (bottom of Day Board) —— */
+.day-board-miller-quick {
+  margin: 1rem 0 1.5rem;
+  padding: 0.75rem 0.9rem 0.9rem;
+  border: 1px solid var(--border, #2a3340);
+  border-radius: 10px;
+  background: var(--card, rgba(255, 255, 255, 0.03));
+}
+.day-board-miller-quick-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.25rem;
+}
+.day-board-miller-quick-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+}
+.day-board-miller-mode {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.day-board-miller-mode.is-dry {
+  color: #8a6d1d;
+  background: #f5e7b5;
+  border-color: #e0c56a;
+}
+.day-board-miller-mode.is-live {
+  color: #fff;
+  background: #b42318;
+  border-color: #912018;
+}
+.day-board-miller-quick-hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+}
+.day-board-miller-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.55rem 0.65rem;
+  align-items: end;
+}
+.day-board-miller-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  min-width: 0;
+}
+.day-board-miller-field input,
+.day-board-miller-field select {
+  font-weight: 500;
+  font-size: 0.9rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a3340);
+  background: var(--input-bg, #0f141b);
+  color: inherit;
+  width: 100%;
+}
+.day-board-miller-addr {
+  grid-column: 1 / -1;
+  position: relative;
+}
+.day-board-miller-hits {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  max-height: 10rem;
+  overflow: auto;
+  border: 1px solid var(--border, #2a3340);
+  border-radius: 6px;
+  background: var(--card, #121820);
+  z-index: 5;
+}
+.day-board-miller-hits button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.day-board-miller-hits button:hover,
+.day-board-miller-hits button:focus {
+  background: rgba(80, 140, 255, 0.12);
+}
+.day-board-miller-searching,
+.day-board-miller-picked {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.day-board-miller-techs {
+  grid-column: 1 / -1;
+}
+.day-board-miller-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+  align-items: center;
+  margin: 0.15rem 0 0.3rem;
+}
+.day-board-miller-presets-label {
+  font-size: 0.78em;
+  margin-right: 0.25rem;
+  color: #334155;
+  font-weight: 600;
+}
+.day-board-miller-preset-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+.day-board-miller-preset {
+  border: 1.5px solid #1e293b;
+  background: #f8fafc;
+  color: #0f172a;
+  border-radius: 999px;
+  padding: 0.28rem 0.55rem;
+  min-height: 2rem;
+  font-size: 0.82em;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1.1;
+  -webkit-touch-callout: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+.day-board-miller-preset.is-on {
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #ffffff;
+  font-weight: 800;
+}
+.day-board-miller-preset-del {
+  border: 1px solid #94a3b8;
+  background: #fff;
+  color: #7f1d1d;
+  border-radius: 999px;
+  width: 1.75rem;
+  height: 1.75rem;
+  line-height: 1;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0;
+}
+.day-board-miller-preset-save {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  width: 100%;
+  margin-top: 0.25rem;
+}
+.day-board-miller-preset-save input {
+  flex: 1 1 10rem;
+  min-height: 2rem;
+  padding: 0.28rem 0.5rem;
+  border: 1.5px solid #334155;
+  border-radius: 7px;
+  color: #0f172a;
+  background: #fff;
+  font-weight: 600;
+  font-size: 0.88em;
+}
+.day-board-miller-preset-save-btn {
+  min-height: 2rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 7px;
+  border: 1.5px solid #1e293b;
+  background: #e2e8f0;
+  color: #0f172a;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+.day-board-miller-preset-save-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.day-board-miller-preset-toast {
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.92em;
+  border: 2px solid #1e293b;
+}
+.day-board-miller-preset-toast.is-ok {
+  background: #ecfdf5;
+  color: #065f46;
+  border-color: #059669;
+}
+.day-board-miller-preset-toast.is-bad {
+  background: #fef2f2;
+  color: #7f1d1d;
+  border-color: #b91c1c;
+}
+.day-board-miller-preset-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.25);
+}
+.day-board-miller-preset-menu {
+  position: fixed;
+  z-index: 1201;
+  min-width: 11.5rem;
+  max-width: 16rem;
+  background: #fff;
+  color: #0f172a;
+  border: 2px solid #1e293b;
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.day-board-miller-preset-menu-title {
+  font-weight: 800;
+  font-size: 0.88em;
+  padding: 0.35rem 0.55rem 0.25rem;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 0.15rem;
+}
+.day-board-miller-preset-menu button {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: #0f172a;
+  font-weight: 700;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  min-height: 2.4rem;
+}
+.day-board-miller-preset-menu button:hover {
+  background: #f1f5f9;
+}
+.day-board-miller-preset-menu button.is-danger {
+  color: #991b1b;
+}
+.day-board-miller-preset-menu button.is-danger:hover {
+  background: #fef2f2;
+}
+.day-board-miller-preset-menu-locked {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.85em;
+  line-height: 1.35;
+}
+.day-board-miller-tech-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+  max-height: none;
+  overflow: visible;
+  padding: 0.2rem 0.05rem;
+  border: none;
+  background: transparent;
+}
+.day-board-miller-tech-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.05rem;
+  min-width: 3.4rem;
+  padding: 0.28rem 0.5rem;
+  border-radius: 8px;
+  border: 1.5px solid #1e293b;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 0.85rem;
+  font-weight: 800;
+  cursor: pointer;
+  line-height: 1.1;
+}
+.day-board-miller-tech-chip.is-on {
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #ffffff;
+}
+.day-board-miller-tech-chip.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.day-board-miller-tech-count {
+  font-size: 0.8em;
+  margin-top: 0.2rem;
+  color: #334155;
+}
+
+.day-board-miller-custom {
+  display: flex;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+}
+.day-board-miller-custom label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.day-board-miller-custom input {
+  font-weight: 500;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a3340);
+  background: var(--input-bg, #0f141b);
+  color: inherit;
+  width: 7rem;
+}
+.day-board-miller-submit {
+  justify-self: start;
+  white-space: nowrap;
+}
+.day-board-miller-result {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.day-board-miller-result.is-ok {
+  background: rgba(40, 140, 80, 0.15);
+  border: 1px solid rgba(40, 140, 80, 0.4);
+}
+.day-board-miller-result.is-bad {
+  background: rgba(180, 40, 40, 0.12);
+  border: 1px solid rgba(180, 40, 40, 0.35);
+}
+@media (max-width: 640px) {
+  .day-board-miller-form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .day-board-miller-submit {
+    grid-column: 1 / -1;
+  }
+}
+
+/* —— Install book auto-When —— */
+.day-board-miller-form-auto-when {
+  grid-template-columns: 1fr;
+}
+.day-board-miller-when-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  padding: 0.4rem 0.55rem;
+  margin: 0 0 0.25rem;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+  box-shadow: none;
+}
+.day-board-miller-when-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+.day-board-miller-when-summary {
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.day-board-miller-when-change {
+  align-self: center;
+  margin-top: 0;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid #475569;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.day-board-miller-when-change:hover {
+  background: #1e293b;
+  color: #fff;
+}
+.day-board-miller-when-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #334155;
+}
+.day-board-miller-when-manual .day-board-miller-field {
+  color: #e2e8f0;
+}
+.day-board-miller-when-manual select,
+.day-board-miller-when-manual input {
+  background: #020617;
+  color: #f8fafc;
+  border-color: #475569;
+}
+.day-board-miller-when-reset {
+  align-self: flex-start;
+}
+.day-board-miller-tech-chip.is-off-wed {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-style: dashed;
+  background: #e2e8f0;
+  color: #475569;
+}
+.day-board-miller-off-wed {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  background: #334155;
+  color: #f8fafc;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.install-book-page .day-board-miller-when-sticky {
+  top: 0.35rem;
+}
+
+.day-board-miller-not-listed {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0 0.75rem;
+  font-weight: 700;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+.day-board-miller-not-listed input {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: #b91c1c;
+}
+.day-board-miller-not-listed.is-on,
+.day-board-miller-form:has(.day-board-miller-not-listed input:checked) .day-board-miller-not-listed {
+  color: #991b1b;
+}
+
+
+.day-board-miller-unit-ask {
+  margin: 0.35rem 0 0.25rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+.day-board-miller-addr-hint {
+  margin: 0.25rem 0 0.15rem;
+  font-size: 0.82rem;
+}
+.day-board-miller-unit-field {
+  margin-top: 0.35rem;
+}
+
+/* Miller anti-dupe: already-on-board banner */
+.day-board-miller-existing-banner {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #b45309;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+.day-board-miller-existing-banner.is-red {
+  border-color: #b91c1c;
+  background: #fef2f2;
+  color: #7f1d1d;
+}
+.day-board-miller-existing-banner.is-amber {
+  border-color: #b45309;
+  background: #fff7ed;
+  color: #7c2d12;
+}
+.day-board-miller-existing-banner strong {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+.day-board-miller-existing-banner ul,
+.day-board-miller-existing-list {
+  margin: 0.25rem 0 0.4rem;
+  padding-left: 1.15rem;
+}
+.day-board-miller-force {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.day-board-miller-existing-loading {
+  margin: 0.35rem 0;
+  font-size: 0.85rem;
+}
+
+
+/* Miller signed-proposal HARD LOCK */
+.day-board-miller-proposal-banner strong {
+  display: block;
+}
+.day-board-miller-proposal-ok {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.85rem;
+  color: #166534;
+  font-weight: 650;
+}
+
+/* Day Board pending service chips (No Cool) */
+.day-board-add-pending {
+  margin-top: 0.2rem;
+  min-width: 1.6rem;
+  padding: 0.1rem 0.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.day-board-cell.is-pending-chip,
+.day-board-cell.st-pending {
+  border-style: dashed !important;
+  opacity: 0.95;
+}
+.day-board-cell.st-pending-linking {
+  border-style: dashed !important;
+  opacity: 0.75;
+}
+.day-board-cell.st-pending-failed {
+  border-style: dashed !important;
+  border-color: #b45309 !important;
+}
+
+.day-board-usual {
+  display: block;
+  margin-top: 0.08rem;
+  font-size: 0.68rem;
+  font-weight: 500;
+  line-height: 1.2;
+  opacity: 0.92;
+}

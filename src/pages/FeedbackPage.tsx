@@ -126,7 +126,11 @@ export function FeedbackPage() {
         body: JSON.stringify({
           category,
           message: msg,
-          page_context: typeof window !== "undefined" ? window.location.pathname : null,
+          page_context:
+            (typeof window !== "undefined" &&
+              (new URLSearchParams(window.location.search).get("from") ||
+                sessionStorage.getItem("fieldapp-last-path"))) ||
+            null,
         }),
       });
       setOk("Thanks — your feedback was sent. We read every one.");

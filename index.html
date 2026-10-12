@@ -12,8 +12,8 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="format-detection" content="telephone=no" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-    <title>Field App · Total Assurance</title>
-    <!-- build: 2026-08-31-warranty-piles-v2 -->
+    <title>Field App - Total Assurance</title>
+    <!-- build: 2026-09-23-home-ascii -->
     <script>
       // Apply saved theme before paint so dark mode is not a white flash
       try {
@@ -29,7 +29,7 @@
 
       // Drop stuck service workers / caches so phones don't keep an old broken app shell
       (function () {
-        var BUILD = "2026-08-31-warranty-piles-v2";
+        var BUILD = "2026-09-23-home-ascii";
         try {
           var prev = localStorage.getItem("ta_app_build");
           if (prev !== BUILD) {
@@ -146,7 +146,7 @@
         <div class="boot-inner">
           <img
             class="boot-logo"
-            src="/logo-boot.png"
+            src="/logo-form-primary.png"
             alt="Total Assurance A/C &amp; Heating"
             width="800"
             height="159"
@@ -154,7 +154,7 @@
             fetchpriority="high"
           />
           <h1>Field App</h1>
-          <p id="boot-msg">Starting…</p>
+          <p id="boot-msg">Starting...</p>
           <p class="muted" id="boot-url"></p>
         </div>
       </div>
@@ -174,14 +174,14 @@
         var shell = document.getElementById("boot-shell");
         var msg = document.getElementById("boot-msg");
         if (!shell || !msg) return;
-        msg.textContent = "Still starting…";
+        msg.textContent = "Still starting...";
         // One automatic reload if the bundle never mounts (stuck cache / flaky load).
         try {
           var key = "ta_boot_autoreload";
           var last = Number(sessionStorage.getItem(key) || "0");
           if (Date.now() - last > 60_000) {
             sessionStorage.setItem(key, String(Date.now()));
-            msg.textContent = "Reloading once to clear a stuck start…";
+            msg.textContent = "Reloading once to clear a stuck start...";
             location.replace("/?reload=" + Date.now());
             return;
           }

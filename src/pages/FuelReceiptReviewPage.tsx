@@ -1,7 +1,8 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { repairUtf8Mojibake } from "../lib/utf8Mojibake";
 
 type OcrSnap = {
   fuel_date?: string | null;
@@ -35,6 +36,7 @@ type ReviewEntry = {
     ocr?: OcrSnap | null;
     final?: OcrSnap | null;
     raw_text?: string | null;
+    store_review_reason?: string | null;
   } | null;
 };
 
@@ -64,6 +66,10 @@ export function FuelReceiptReviewPage() {
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<ReviewEntry | null>(null);
+  /** Big receipt parked beside the form. Null means the photo stays in the card. */
+  const [dock, setDock] = useState<{ x: number; y: number; w: number } | null>(null);
+  const [photoBeside, setPhotoBeside] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState({
     fuel_date: "",
     fuel_time: "",
@@ -83,7 +89,7 @@ export function FuelReceiptReviewPage() {
       total_cost: e.total_cost != null ? String(e.total_cost) : "",
       store_number: e.store_number || "",
       card_last4: e.card_last4 || "",
-      station_notes: e.station_notes || "",
+      station_notes: repairUtf8Mojibake(e.station_notes || ""),
       odometer: e.odometer != null ? String(e.odometer) : "",
     });
   }
@@ -132,6 +138,62 @@ export function FuelReceiptReviewPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!dock && !photoBeside) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        setDock(null);
+        setPhotoBeside(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dock, photoBeside]);
+
+  function parkReceipt() {
+    const rect = formRef.current?.getBoundingClientRect();
+    const space = rect ? rect.left - 16 : 0;
+    if (space >= 300) {
+      const w = Math.min(560, Math.max(320, space - 8));
+      setPhotoBeside(false);
+      setDock({ x: 8, y: 12, w });
+      return;
+    }
+    setDock(null);
+    setPhotoBeside(true);
+  }
+
+  function putPhotoBack() {
+    setDock(null);
+    setPhotoBeside(false);
+  }
+
+  function startDockDrag(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!dock) return;
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+    const bar = e.currentTarget;
+    bar.setPointerCapture(e.pointerId);
+    const originX = dock.x;
+    const originY = dock.y;
+    const w = dock.w;
+    const move = (ev: PointerEvent) => {
+      const maxX = Math.max(8, window.innerWidth - w - 8);
+      const maxY = Math.max(8, window.innerHeight - 120);
+      setDock({
+        w,
+        x: Math.min(maxX, Math.max(8, originX + ev.clientX - e.clientX)),
+        y: Math.min(maxY, Math.max(8, originY + ev.clientY - e.clientY)),
+      });
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }
+
   function openEntry(e: ReviewEntry) {
     setSelected(e);
     setOk("");
@@ -142,6 +204,8 @@ export function FuelReceiptReviewPage() {
 
   function closeEntry() {
     setSelected(null);
+    setDock(null);
+    setPhotoBeside(false);
     if (params.has("id")) {
       setParams({}, { replace: true });
     }
@@ -184,6 +248,29 @@ export function FuelReceiptReviewPage() {
     }
   }
 
+  const queueGroups = useMemo(() => {
+    const map = new Map<string, ReviewEntry[]>();
+    for (const entry of entries) {
+      const unit = (entry.unit_number || "").trim() || "Unknown";
+      const rows = map.get(unit) || [];
+      rows.push(entry);
+      map.set(unit, rows);
+    }
+    return [...map.entries()]
+      .map(([unit, rows]) => ({
+        unit,
+        rows: rows
+          .slice()
+          .sort(
+            (a, b) =>
+              String(a.created_at || a.fuel_date || "").localeCompare(
+                String(b.created_at || b.fuel_date || "")
+              ) || a.id - b.id
+          ),
+      }))
+      .sort((a, b) => a.unit.localeCompare(b.unit, undefined, { numeric: true }));
+  }, [entries]);
+
   if (!canReview) {
     return (
       <div className="page">
@@ -201,7 +288,7 @@ export function FuelReceiptReviewPage() {
     <div className="page fuel-ocr-review-page">
       <div className="page-header">
         <div>
-          <h1>Fuel receipts</h1>
+          <h1>Verify fuel</h1>
           <p>
             Open a receipt photo, correct any wrong fields, then <strong>Save &amp; verify</strong>.
             Corrections teach the app for the next scan.
@@ -260,36 +347,43 @@ export function FuelReceiptReviewPage() {
                 : "No receipts in this view."}
             </p>
           ) : (
-            <ul className="fuel-ocr-entry-list">
-              {entries.map((e) => (
-                <li key={e.id}>
-                  <button
-                    type="button"
-                    className={`fuel-ocr-entry${selected?.id === e.id ? " is-selected" : ""}`}
-                    onClick={() => openEntry(e)}
-                  >
-                    <strong>
-                      Unit {e.unit_number}
-                      {e.ocr_reviewed_at ? " · verified" : " · needs verify"}
-                    </strong>
-                    <span className="muted">
-                      {e.fuel_date}
-                      {e.gallons != null ? ` · ${e.gallons} gal` : ""}
-                      {e.total_cost != null ? ` · $${Number(e.total_cost).toFixed(2)}` : ""}
-                    </span>
-                    <span className="muted fuel-ocr-entry-who">
-                      {e.employee_name}
-                      {e.entered_by_name ? ` · by ${e.entered_by_name}` : ""}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            queueGroups.map((group) => (
+              <div key={group.unit}>
+                <p className="muted" style={{ margin: "0.65rem 0 0.2rem" }}>
+                  Unit {group.unit}
+                </p>
+                <ul className="fuel-ocr-entry-list">
+                  {group.rows.map((e) => (
+                    <li key={e.id}>
+                      <button
+                        type="button"
+                        className={`fuel-ocr-entry${selected?.id === e.id ? " is-selected" : ""}`}
+                        onClick={() => openEntry(e)}
+                      >
+                        <strong>
+                          Unit {e.unit_number}
+                          {e.ocr_reviewed_at ? " · verified" : " · needs verify"}
+                        </strong>
+                        <span className="muted">
+                          {e.fuel_date}
+                          {e.gallons != null ? ` · ${e.gallons} gal` : ""}
+                          {e.total_cost != null ? ` · $${Number(e.total_cost).toFixed(2)}` : ""}
+                        </span>
+                        <span className="muted fuel-ocr-entry-who">
+                          {e.employee_name}
+                          {e.entered_by_name ? ` · by ${e.entered_by_name}` : ""}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
           )}
         </div>
 
         {selected && (
-          <div className="fuel-ocr-detail card">
+          <div className={`fuel-ocr-detail card${photoBeside ? " is-photo-beside" : ""}`}>
             <div className="fuel-ocr-detail-head">
               <h2 style={{ margin: 0 }}>
                 Unit {selected.unit_number} · #{selected.id}
@@ -298,7 +392,7 @@ export function FuelReceiptReviewPage() {
                 Close
               </button>
             </div>
-            <p className="muted" style={{ margin: "0.25rem 0 0.65rem", fontSize: "0.85rem" }}>
+            <p className="muted fuel-ocr-detail-meta" style={{ margin: "0.25rem 0 0.65rem", fontSize: "0.85rem" }}>
               {selected.employee_name} · submitted{" "}
               {String(selected.created_at).replace("T", " ").slice(0, 16)}
               {selected.reviewed_by_name
@@ -306,22 +400,48 @@ export function FuelReceiptReviewPage() {
                 : " · not verified yet"}
             </p>
 
-            <div className="fuel-ocr-photo-wrap">
-              <a
-                href={`/api/uploads/${encodeURIComponent(selected.receipt_key)}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <img
-                  src={`/api/uploads/${encodeURIComponent(selected.receipt_key)}`}
-                  alt={`Fuel receipt unit ${selected.unit_number}`}
-                  className="fuel-ocr-photo"
-                />
-              </a>
-              <p className="muted" style={{ fontSize: "0.75rem", margin: "0.25rem 0 0" }}>
-                Tap photo to open full size — compare every field to the paper
+            {dock ? (
+              <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.65rem" }}>
+                Receipt is parked beside this form. Drag its top bar if you need it somewhere else.
               </p>
-            </div>
+            ) : (
+              <div className="fuel-ocr-photo-wrap">
+                <button
+                  type="button"
+                  className="fuel-ocr-photo-btn"
+                  onClick={parkReceipt}
+                  aria-label="Enlarge receipt photo beside the form"
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    padding: 0,
+                    border: "none",
+                    background: "transparent",
+                    cursor: "zoom-in",
+                  }}
+                >
+                  <img
+                    src={`/api/uploads/${encodeURIComponent(selected.receipt_key)}`}
+                    alt={`Fuel receipt unit ${selected.unit_number}`}
+                    className="fuel-ocr-photo"
+                  />
+                </button>
+                <div className="toolbar" style={{ marginTop: "0.35rem" }}>
+                  <p className="muted" style={{ fontSize: "0.75rem", margin: 0 }}>
+                    {photoBeside
+                      ? "Photo is beside the numbers. Scroll the picture if the receipt is long."
+                      : "Tap the photo to open it beside the numbers. You can drag it."}
+                  </p>
+                  {photoBeside ? (
+                    <button type="button" className="btn secondary btn-sm" onClick={putPhotoBack}>
+                      Put photo back
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            )}
+
+            <div className="fuel-ocr-verify">
 
             {ocr && (
               <div className="fuel-ocr-readout">
@@ -351,7 +471,7 @@ export function FuelReceiptReviewPage() {
               </p>
             )}
 
-            <form className="form" onSubmit={saveReview}>
+            <form className="form" onSubmit={saveReview} ref={formRef}>
               <h3 className="fuel-ocr-subhead">Correct / verify values</h3>
               <div className="form row">
                 <label>
@@ -413,6 +533,9 @@ export function FuelReceiptReviewPage() {
                     value={form.store_number}
                     onChange={(e) => setForm({ ...form, store_number: e.target.value })}
                   />
+                  {selected?.ocr_payload?.store_review_reason ? (
+                    <span className="fuel-ocr-diff">Store #: {selected.ocr_payload.store_review_reason}</span>
+                  ) : null}
                 </label>
                 <label>
                   Card last 4
@@ -460,6 +583,7 @@ export function FuelReceiptReviewPage() {
                 marks the receipt checked. Wrong fields you fix here train future scans.
               </p>
             </form>
+            </div>
           </div>
         )}
 
@@ -472,6 +596,29 @@ export function FuelReceiptReviewPage() {
           </div>
         )}
       </div>
+
+      {dock && selected ? (
+        <div
+          className="receipt-dock"
+          style={{ left: dock.x, top: dock.y, width: dock.w, height: `calc(100dvh - ${dock.y + 8}px)` }}
+          role="dialog"
+          aria-label="Receipt photo"
+        >
+          <div className="receipt-dock-bar" onPointerDown={startDockDrag}>
+            <strong>Receipt</strong>
+            <span className="muted">Drag to move</span>
+            <button type="button" className="btn secondary btn-sm" onClick={putPhotoBack}>
+              Put back
+            </button>
+          </div>
+          <div className="receipt-dock-scroll">
+            <img
+              src={`/api/uploads/${encodeURIComponent(selected.receipt_key)}`}
+              alt={`Fuel receipt unit ${selected.unit_number}`}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

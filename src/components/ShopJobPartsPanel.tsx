@@ -114,7 +114,7 @@ export function ShopJobPartsPanel({
   const openOrders = orders.filter((r) =>
     ["needed", "ordered", "arriving"].includes(r.status)
   );
-  const orderLink = `/parts-orders?vehicle=${vehicleId}&unit=${encodeURIComponent(
+  const orderLink = `/parts-orders?vehicle_id=${vehicleId}&issue_id=${issueId}&vehicle=${vehicleId}&unit=${encodeURIComponent(
     unitNumber
   )}&issue=${issueId}&desc=${encodeURIComponent((issueTitle || "").slice(0, 80))}`;
 
@@ -123,7 +123,7 @@ export function ShopJobPartsPanel({
       <div className="shop-job-parts-head">
         <strong>Parts for unit {unitNumber}</strong>
         <Link className="btn secondary btn-sm" to={orderLink}>
-          Order parts
+          Order part
         </Link>
       </div>
 
@@ -153,34 +153,9 @@ export function ShopJobPartsPanel({
                   ) : null}
                 </div>
                 <div className="toolbar shop-job-order-actions">
-                  {r.status === "needed" && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={actingId === r.id}
-                      onClick={() => void setOrderStatus(r.id, "ordered")}
-                    >
-                      Ordered
-                    </button>
-                  )}
-                  {(r.status === "needed" || r.status === "ordered") && (
-                    <button
-                      type="button"
-                      className="btn secondary btn-sm"
-                      disabled={actingId === r.id}
-                      onClick={() => void setOrderStatus(r.id, "arriving")}
-                    >
-                      Arriving
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn secondary btn-sm"
-                    disabled={actingId === r.id}
-                    onClick={() => void setOrderStatus(r.id, "received")}
-                  >
-                    Received
-                  </button>
+                  <span className="muted" style={{ fontSize: "0.8rem" }}>
+                    Warehouse orders and receives this on Order for shop.
+                  </span>
                   <button
                     type="button"
                     className="btn secondary btn-sm"

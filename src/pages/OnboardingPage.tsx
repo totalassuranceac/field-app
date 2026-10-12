@@ -161,8 +161,6 @@ export function OnboardingPage() {
   const [position, setPosition] = useState("");
   const [startDate, setStartDate] = useState("");
   const [preparedOn, setPreparedOn] = useState(todayIso);
-  const preparedBy = user?.display_name || user?.username || "Office";
-
   const [forms, setForms] = useState<Record<string, FormMeta>>({});
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
@@ -174,6 +172,7 @@ export function OnboardingPage() {
   const [i9Ver, setI9Ver] = useState("Expires 05/31/2027");
   const [printBusy, setPrintBusy] = useState(false);
   const officialPrintRef = useRef<HTMLDivElement | null>(null);
+  const preparedBy = user?.display_name || user?.username || "Office";
 
   const loadForms = useCallback(async () => {
     const d = await api<{ forms: Record<string, FormMeta> }>("/onboarding/forms");
@@ -267,6 +266,12 @@ export function OnboardingPage() {
   }
 
   async function printPacket() {
+    if (!hireName.trim()) {
+      setError("Type the new hire name.");
+      setOk("");
+      document.getElementById("hire-name-input")?.focus();
+      return;
+    }
     setError("");
     setOk("");
     setPrintBusy(true);
@@ -346,7 +351,16 @@ export function OnboardingPage() {
     <div className="page onboard-page">
       <div className="page-header no-print">
         <div>
-          <h1>New hire packet</h1>
+          <h1>Company forms</h1>
+          <p className="muted">
+            <Link to="/onboarding">New hire packet</Link>
+            {" · "}
+            <Link to="/hr/writeups">Write-ups</Link>
+            {" · "}
+            <Link to="/termination">Separation</Link>
+            {" · "}
+            <Link to="/responsibility">Card and vehicle forms</Link>
+          </p>
           <p>
             One print job = company forms <strong>+ official W-4 + official I-9</strong>. Collect DL +
             SSN copies before they leave.
@@ -362,7 +376,7 @@ export function OnboardingPage() {
             disabled={printBusy}
             onClick={() => void printPacket()}
           >
-            {printBusy ? "Loading W-4 & I-9…" : "Print full hire packet"}
+            {printBusy ? "Loading W-4 & I-9…" : "Print New Hire Packet"}
           </button>
         </div>
       </div>
@@ -376,6 +390,7 @@ export function OnboardingPage() {
           <label>
             New hire name
             <input
+              id="hire-name-input"
               value={hireName}
               onChange={(e) => setHireName(e.target.value)}
               placeholder="Full legal name"
@@ -411,7 +426,7 @@ export function OnboardingPage() {
             disabled={printBusy}
             onClick={() => void printPacket()}
           >
-            {printBusy ? "Loading W-4 & I-9…" : "Print full hire packet"}
+            {printBusy ? "Loading W-4 & I-9…" : "Print New Hire Packet"}
           </button>
           <button type="button" className="btn secondary" onClick={openOfficialPdfs}>
             Open W-4 &amp; I-9 only
@@ -924,7 +939,15 @@ export function OnboardingPage() {
             <li>
               Use your <strong>Field App invite</strong> → open <strong>Handbook</strong> → confirm.
             </li>
-            <li>Ask your manager about safety orientation, tools, truck, and first-week schedule.</li>
+            <li>
+              Open <strong>Field App</strong> and finish the <strong>Safety essentials for your job</strong> before
+              tools, the truck, and the first week. Your stamp is the record. Refresh each course before
+              the year is up.
+            </li>
+            <li>
+              Sign the <strong>company vehicle form</strong> before driving a company truck. If you are issued a
+              company card, sign the <strong>card form</strong> before you use it.
+            </li>
           </ol>
 
           <div className="onboard-keep onboard-sign-bottom">

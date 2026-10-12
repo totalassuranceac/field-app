@@ -334,6 +334,8 @@ export function PartsReceiptUploadPanel({
           <PhotoCapture
             required
             compact
+            alignPaper
+            sheetOnly
             label="Receipt photo"
             hint={scanning ? "Reading…" : "Invoice or packing slip"}
             previewUrl={preview}

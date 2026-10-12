@@ -172,7 +172,7 @@ type TechListCache = {
 };
 
 export type MatchResult =
-  | { status: "matched"; stId: number; via: "stored" | "phone" | "name" | "alias" }
+  | { status: "matched"; stId: number; via: "stored" | "phone" | "email" | "name" | "alias" }
   | { status: "no_match" }
   | { status: "ambiguous"; count: number };
 
@@ -267,6 +267,13 @@ export function matchUserToStTechnician(
   if (uPhone) {
     const hits = active.filter((t) => normPhone(t.phone) === uPhone);
     if (hits.length === 1) return { status: "matched", stId: hits[0].id, via: "phone" };
+    if (hits.length > 1) return { status: "ambiguous", count: hits.length };
+  }
+
+  const uEmail = normEmail(user.email);
+  if (uEmail) {
+    const hits = active.filter((t) => normEmail(t.email) === uEmail);
+    if (hits.length === 1) return { status: "matched", stId: hits[0].id, via: "email" };
     if (hits.length > 1) return { status: "ambiguous", count: hits.length };
   }
 
@@ -669,7 +676,8 @@ export async function loadInvoiceTotalsForJobIds(
   const unique = [...new Set(jobIds.filter((id) => id > 0))];
   if (!unique.length) return { ok: true, byJobId };
 
-  const chunkSize = 8;
+  // Higher concurrency — Ops sales was the slow path (one ST invoice call per job)
+  const chunkSize = 20;
   for (let i = 0; i < unique.length; i += chunkSize) {
     const chunk = unique.slice(i, i + chunkSize);
     const results = await Promise.all(
@@ -804,7 +812,7 @@ async function salesForTechnicianMonth(
  * Cache a unique auto-match onto the user row.
  * Never overwrites a non-null st_technician_id (Admin override / prior cache).
  */
-async function cacheStTechnicianId(
+export async function cacheStTechnicianId(
   db: D1Database,
   userId: number,
   current: number | null,
@@ -2182,3 +2190,166 @@ export async function buildZeroChargePayload(
     payloadFromRows(empty, access, withSales, user.id, { sales_pending: false })
   );
 }
+
+
+export type StTechAutoMatchRow = {
+  user_id: number;
+  display_name: string;
+  username: string | null;
+  email: string | null;
+  role: string;
+  st_technician_id: number | null;
+  outcome: "already_linked" | "matched" | "ambiguous" | "no_match";
+  via?: string | null;
+  st_name?: string | null;
+  detail?: string | null;
+};
+
+export type StTechAutoMatchReport = {
+  ok: boolean;
+  dry_run: boolean;
+  st_techs_loaded: number;
+  already_linked: StTechAutoMatchRow[];
+  matched: StTechAutoMatchRow[];
+  ambiguous: StTechAutoMatchRow[];
+  no_match: StTechAutoMatchRow[];
+  summary: {
+    already_linked: number;
+    matched: number;
+    needs_manual: number;
+  };
+  error?: string;
+};
+
+
+/**
+ * Fill-empty auto-link Field App users -> ST technician IDs.
+ * Unique phone/email/name/alias only. Never overwrites existing st_technician_id.
+ * Soft: no ST writes / no money.
+ */
+export async function autoMatchUsersToStTechnicians(
+  env: Env,
+  db: D1Database,
+  opts?: { dryRun?: boolean }
+): Promise<StTechAutoMatchReport> {
+  const dryRun = Boolean(opts?.dryRun);
+  const empty: StTechAutoMatchReport = {
+    ok: false,
+    dry_run: dryRun,
+    st_techs_loaded: 0,
+    already_linked: [],
+    matched: [],
+    ambiguous: [],
+    no_match: [],
+    summary: { already_linked: 0, matched: 0, needs_manual: 0 },
+  };
+  const tenantId = await stTenantId(env, db);
+  if (!tenantId) {
+    return { ...empty, error: "ServiceTitan tenant missing" };
+  }
+  const techLoad = await loadStTechnicians(env, db, tenantId);
+  if (!techLoad.ok) {
+    return {
+      ...empty,
+      error: `ST technicians unavailable (${techLoad.status})`,
+    };
+  }
+  const stTechs = techLoad.techs;
+  const byId = new Map(stTechs.map((t) => [t.id, t]));
+
+  const users = await db
+    .prepare(
+      `SELECT id, display_name, username, email, phone, st_technician_id, role
+       FROM users
+       WHERE active = 1
+       ORDER BY display_name COLLATE NOCASE`
+    )
+    .all<{
+      id: number;
+      display_name: string;
+      username: string | null;
+      email: string | null;
+      phone: string | null;
+      st_technician_id: number | null;
+      role: string;
+    }>();
+
+  const report: StTechAutoMatchReport = {
+    ok: true,
+    dry_run: dryRun,
+    st_techs_loaded: stTechs.length,
+    already_linked: [],
+    matched: [],
+    ambiguous: [],
+    no_match: [],
+    summary: { already_linked: 0, matched: 0, needs_manual: 0 },
+  };
+
+  for (const u of users.results || []) {
+    const current =
+      u.st_technician_id != null && Number(u.st_technician_id) > 0
+        ? Number(u.st_technician_id)
+        : null;
+    const base = {
+      user_id: u.id,
+      display_name: u.display_name,
+      username: u.username,
+      email: u.email,
+      role: u.role,
+      st_technician_id: current,
+    };
+    if (current) {
+      const st = byId.get(current);
+      report.already_linked.push({
+        ...base,
+        outcome: "already_linked",
+        via: "stored",
+        st_name: st?.name || null,
+      });
+      continue;
+    }
+    const match = matchUserToStTechnician(
+      {
+        display_name: u.display_name,
+        username: u.username,
+        email: u.email,
+        phone: u.phone,
+        st_technician_id: u.st_technician_id,
+      },
+      stTechs
+    );
+    if (match.status === "matched") {
+      const stId = dryRun
+        ? match.stId
+        : await cacheStTechnicianId(db, u.id, current, match);
+      const st = byId.get(match.stId);
+      report.matched.push({
+        ...base,
+        st_technician_id: stId,
+        outcome: "matched",
+        via: match.via,
+        st_name: st?.name || null,
+        detail: dryRun ? "dry-run: not written" : null,
+      });
+    } else if (match.status === "ambiguous") {
+      report.ambiguous.push({
+        ...base,
+        outcome: "ambiguous",
+        detail: `${match.count} ST techs matched`,
+      });
+    } else {
+      report.no_match.push({
+        ...base,
+        outcome: "no_match",
+        detail: "no unique phone/email/name/alias match",
+      });
+    }
+  }
+  report.summary = {
+    already_linked: report.already_linked.length,
+    matched: report.matched.length,
+    needs_manual: report.ambiguous.length + report.no_match.length,
+  };
+  return report;
+}
+

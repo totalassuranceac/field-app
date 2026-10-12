@@ -385,12 +385,21 @@ export interface User {
   role: Role;
   /** Warehouse is stored as office + is_warehouse in DB */
   is_warehouse?: boolean;
-  /** Real role when admin is previewing another role */
+  /** Real role when admin is previewing another role or viewing-as a person */
   real_role?: Role;
+  /** True when admin session is impersonating another login (server view-as) */
+  viewing_as?: boolean;
   employee_id: number | null;
   phone?: string | null;
+  st_technician_id?: number | null;
   must_change_password?: boolean;
 }
+
+export type ViewAsInfo = {
+  user_id: number;
+  display_name: string;
+  role?: Role;
+};
 
 /** All permission keys used by the UI (admin always has every one). */
 export const ALL_PERMISSIONS = [
@@ -421,10 +430,38 @@ export const ALL_PERMISSIONS = [
   "openStudio",
   /** Job clock (Dispatch → Arrive → Complete) — field + admin */
   "useJobClock",
+  "manageInstallPermit",
   /** Ops Performance — office / admin / supervisor */
   "viewOpsPerformance",
   /** Day Board — office all rows; field own day */
   "viewDayBoard",
+  "viewDeliveries",
+  "receiveDeliveries",
+  "scheduleDeliveries",
+  "pickupDeliveries",
+  "manageDeliveries",
+  "recordVendorHandoff",
+  "viewVendorHandoffs",
+  "viewFleetShop",
+  "workFleetShop",
+  "managePm",
+  "viewFleetBoard",
+  "reportTruckProblem",
+  "manageFleetShopSettings",
+  "viewDoneToday",
+  "viewDoneTodayAll",
+  "viewJobLengths",
+  "viewSafetyStatus",
+  /** Who is ready to schedule a NATE test. Office eyes. Not a ranking. */
+  "viewNateStatus",
+  /** Open tool borrows. Office eyes. Not a ranking. */
+  "viewToolCustody",
+  /** Mark a gas bottle as the company's or an employee's. */
+  "manageGasBottleOwners",
+  /** Saved employee write-ups. Private HR. Not field, shop, or viewer. */
+  "manageWriteups",
+  /** Company card and vehicle signature forms for other people. */
+  "viewResponsibility",
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -446,7 +483,18 @@ const WRITE_PERMISSIONS = new Set<string>([
   "manageInventory",
   "manageInventoryLevels",
   "manageCompanyAssets",
+  "manageGasBottleOwners",
   "useJobClock",
+  "receiveDeliveries",
+  "scheduleDeliveries",
+  "pickupDeliveries",
+  "manageDeliveries",
+  "recordVendorHandoff",
+  "workFleetShop",
+  "managePm",
+  "reportTruckProblem",
+  "manageFleetShopSettings",
+  "manageWriteups",
 ]);
 
 /** True for the explorer role — same UI as admin, no mutations. */
@@ -467,6 +515,27 @@ export function usesAdminShell(user: User | null | undefined): boolean {
 }
 
 /**
+ * Fleet map named exceptions. Field techs stay off the map.
+ * Chuck is mechanic. Speedy is warehouse (office + is_warehouse).
+ * Keep the same usernames in worker/auth.ts isNamedFleetMapUser.
+ */
+const FLEET_MAP_USERNAMES = new Set(["chuckdickerson", "speedy.marroquin"]);
+const FLEET_MAP_NAMES = new Set(["chuck dickerson", "speedy marroquin"]);
+
+export function isNamedFleetMapUser(
+  user: { username?: string | null; display_name?: string | null } | null | undefined
+): boolean {
+  if (!user) return false;
+  const username = String(user.username || "").trim().toLowerCase();
+  if (username && FLEET_MAP_USERNAMES.has(username)) return true;
+  const name = String(user.display_name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return FLEET_MAP_NAMES.has(name);
+}
+
+/**
  * UI permission check.
  * - Effective role "admin" → superuser (all features).
  * - "viewer" → same browse surface as admin, but never write actions
@@ -484,10 +553,13 @@ export function can(user: User | null, action: string): boolean {
   if (r === "viewer") {
     if (WRITE_PERMISSIONS.has(action)) return false;
     // Ops board / day board office tools — not the explorer role
-    if (action === "viewOpsPerformance" || action === "viewDayBoard") return false;
+    if (action === "viewOpsPerformance" || action === "viewDayBoard" || action === "viewDoneToday" || action === "viewJobLengths" || action === "viewSafetyStatus" || action === "viewNateStatus" || action === "viewToolCustody" || action === "manageWriteups" || action === "viewResponsibility") return false;
     // All other non-write capabilities (view*, browse) are allowed
     return true;
   }
+
+  // Chuck (mechanic) and Speedy (warehouse). Field techs stay off the map.
+  if (action === "viewLiveMap" && isNamedFleetMapUser(user)) return true;
 
   const map: Record<string, Role[]> = {
     manageUsers: ["admin"],
@@ -513,7 +585,7 @@ export function can(user: User | null, action: string): boolean {
       "viewer",
       "supervisor",
     ],
-    logDumpRuns: ["admin", "warehouse", "mechanic"],
+    logDumpRuns: ["admin", "warehouse", "mechanic", "supervisor"],
     viewDumpRuns: ["admin", "warehouse", "mechanic", "viewer", "supervisor"],
     viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"],
     manageAlerts: ["admin", "office", "mechanic", "supervisor"],
@@ -542,16 +614,43 @@ export function can(user: User | null, action: string): boolean {
       "supervisor",
     ],
     manageCompanyAssets: ["admin", "warehouse"],
-    /** Fleet GPS map — not for field techs (privacy / focus) */
-    viewLiveMap: ["admin", "office", "mechanic", "warehouse", "supervisor", "viewer"],
+    /** Fleet GPS map — admin, office (manager login), supervisor. Chuck and Speedy are named below. */
+    viewLiveMap: ["admin", "office", "supervisor"],
     /** Studio door — office only here; admin already short-circuits. Named extras use canOpenStudio(). */
     openStudio: ["admin", "office"],
     /** Job clock — field techs; admin short-circuits above */
     useJobClock: ["admin", "driver"],
+  manageInstallPermit: ["admin", "office", "supervisor"],
     /** Ops Performance — office eyes only */
-    viewOpsPerformance: ["admin", "office", "supervisor"],
+    viewOpsPerformance: ["admin", "office", "supervisor", "driver", "mechanic", "warehouse"],
     /** Day Board — office + field (self scoped on API) */
     viewDayBoard: ["admin", "office", "supervisor", "driver"],
+    viewDeliveries: ["admin", "office", "warehouse", "driver", "mechanic", "supervisor", "viewer"],
+    receiveDeliveries: ["admin", "warehouse"],
+    scheduleDeliveries: ["admin", "office"],
+    pickupDeliveries: ["admin", "office", "warehouse", "driver", "mechanic", "supervisor"],
+    manageDeliveries: ["admin", "office", "warehouse"],
+    recordVendorHandoff: ["admin", "office", "warehouse", "mechanic", "supervisor", "driver"],
+    viewVendorHandoffs: ["admin", "office", "warehouse", "mechanic", "supervisor", "driver", "viewer"],
+    viewFleetShop: ["admin", "mechanic", "supervisor", "office", "viewer"],
+    workFleetShop: ["admin", "mechanic"],
+    managePm: ["admin", "mechanic", "supervisor"],
+    viewFleetBoard: ["admin", "supervisor", "office", "viewer"],
+    reportTruckProblem: ["admin", "office", "driver", "mechanic", "supervisor", "warehouse"],
+    manageFleetShopSettings: ["admin"],
+    viewDoneToday: ["admin", "office", "warehouse", "mechanic", "supervisor", "driver"],
+    viewDoneTodayAll: ["admin"],
+    /** Job lengths — office and supervisors. Not field, shop, or warehouse. */
+    viewJobLengths: ["admin", "office", "supervisor"],
+    /** Safety team status — office and supervisors. Not field, shop, or warehouse. */
+    viewSafetyStatus: ["admin", "office", "supervisor"],
+    viewNateStatus: ["admin", "office", "supervisor"],
+    viewToolCustody: ["admin", "office", "supervisor"],
+    manageGasBottleOwners: ["admin", "office", "warehouse", "supervisor"],
+    /** Saved write-ups. Supervisors can save and read. Void is admin and office only. */
+    manageWriteups: ["admin", "office", "supervisor"],
+    /** Card and vehicle forms for other people. Field signs their own without this. */
+    viewResponsibility: ["admin", "office", "supervisor"],
   };
   return (map[action] || []).includes(r);
 }
@@ -623,13 +722,19 @@ export function permissionsForRole(role: Role): Record<string, boolean> {
   return out;
 }
 
-/** Short role guide for UI copy (internal codes stay: driver = field) */
+/** Void a saved write-up. Supervisors can save and read, not void. */
+export function canVoidWriteups(user: User | null | undefined): boolean {
+  if (!user) return false;
+  return user.role === "admin" || user.role === "office";
+}
+
+/** Short role guide for UI copy (internal codes stay: driver = field, office = office manager) */
 export function roleLabel(role: Role | string | undefined): string {
   switch (role) {
     case "admin":
       return "Admin";
     case "office":
-      return "Office";
+      return "Office manager";
     case "driver":
       return "Field";
     case "mechanic":

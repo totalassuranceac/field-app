@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
+import { plainAuditSummary } from "../lib/utf8Mojibake";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 
@@ -13,8 +15,23 @@ interface Log {
   created_at: string;
 }
 
+/** Links use employee, vehicle, and writeup. Audit rows store hr_writeup. */
+function entityAliases(raw: string): string[] {
+  const key = raw.trim().toLowerCase();
+  if (!key) return [];
+  if (key === "writeup" || key === "write-up" || key === "hr_writeup" || key === "hr-writeup") {
+    return ["hr_writeup", "writeup"];
+  }
+  if (key === "vehicle" || key === "vehicles" || key === "unit" || key === "fleet") return ["vehicle"];
+  if (key === "employee" || key === "employees") return ["employee"];
+  return [key];
+}
+
 export function AuditPage() {
   const { user } = useAuth();
+  const [params] = useSearchParams();
+  const entityParam = (params.get("entity") || "").trim();
+  const idParam = (params.get("id") || params.get("entity_id") || "").trim();
   const [logs, setLogs] = useState<Log[]>([]);
   const [error, setError] = useState("");
 
@@ -24,6 +41,18 @@ export function AuditPage() {
       .then((d) => setLogs(d.logs))
       .catch((e) => setError(e.message));
   }, [user]);
+
+  const shown = useMemo(() => {
+    const aliases = entityAliases(entityParam);
+    return logs.filter((row) => {
+      if (aliases.length) {
+        const kind = String(row.entity_type || "").toLowerCase();
+        if (!aliases.includes(kind)) return false;
+      }
+      if (idParam && String(row.entity_id || "") !== idParam) return false;
+      return true;
+    });
+  }, [logs, entityParam, idParam]);
 
   if (!can(user, "viewAudit")) {
     return <div className="error">Admin only.</div>;
@@ -37,9 +66,16 @@ export function AuditPage() {
           <p>Who changed what, and when — tap a row for the full summary.</p>
         </div>
       </div>
+      {(entityParam || idParam) && (
+        <p className="muted">
+          Filtered to {entityParam || "record"}
+          {idParam ? ` #${idParam}` : ""}. Latest loaded history only.{" "}
+          <Link to="/audit">Show all</Link>
+        </p>
+      )}
       {error && <div className="error">{error}</div>}
-      <LogList empty="No audit events yet.">
-        {logs.map((l) => (
+      <LogList empty={entityParam || idParam ? "No changes for this record in the latest history." : "No audit events yet."}>
+        {shown.map((l) => (
           <LogItem
             key={l.id}
             summary={
@@ -56,7 +92,7 @@ export function AuditPage() {
               </>
             }
           >
-            <div>{l.summary}</div>
+            <div>{plainAuditSummary(l.summary)}</div>
             <div className="muted">
               {l.entity_type}
               {l.entity_id ? ` #${l.entity_id}` : ""} · {l.user_display}

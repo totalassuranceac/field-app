@@ -71,7 +71,7 @@ export async function hashPassword(password: string, saltHex?: string): Promise<
   const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
-      salt,
+      salt: salt as BufferSource,
       iterations: 100_000,
       hash: "SHA-256",
     },
@@ -80,7 +80,7 @@ export async function hashPassword(password: string, saltHex?: string): Promise<
   );
   return {
     hash: bufToHex(bits),
-    salt: saltHex ?? bufToHex(salt.buffer),
+    salt: saltHex ?? bufToHex(salt.buffer as ArrayBuffer),
   };
 }
 
@@ -148,6 +148,27 @@ export function roleAtLeast(role: Role, allowed: Role[]): boolean {
   return allowed.includes(role);
 }
 
+/**
+ * Fleet map named exceptions. Field techs stay off the map.
+ * Chuck is mechanic. Speedy is warehouse (office + is_warehouse).
+ * Keep the same usernames in src/api.ts isNamedFleetMapUser.
+ */
+const FLEET_MAP_USERNAMES = new Set(["chuckdickerson", "speedy.marroquin"]);
+const FLEET_MAP_NAMES = new Set(["chuck dickerson", "speedy marroquin"]);
+
+export function isNamedFleetMapUser(
+  user: { username?: string | null; display_name?: string | null } | null | undefined
+): boolean {
+  if (!user) return false;
+  const username = String(user.username || "").trim().toLowerCase();
+  if (username && FLEET_MAP_USERNAMES.has(username)) return true;
+  const name = String(user.display_name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return FLEET_MAP_NAMES.has(name);
+}
+
 export const ROLE_PERMS = {
   /** Login accounts / role assignment — admin only */
   manageUsers: ["admin"] as Role[],
@@ -187,7 +208,7 @@ export const ROLE_PERMS = {
     "supervisor",
   ] as Role[],
   /** Dump / landfill ticket logs — warehouse + fleet mechanic */
-  logDumpRuns: ["admin", "warehouse", "mechanic"] as Role[],
+  logDumpRuns: ["admin", "warehouse", "mechanic", "supervisor"] as Role[],
   viewDumpRuns: ["admin", "warehouse", "mechanic", "viewer", "supervisor"] as Role[],
   /** Read mileage flags + tracking health (viewers browse-only) */
   viewAlerts: ["admin", "office", "mechanic", "viewer", "supervisor"] as Role[],
@@ -220,17 +241,11 @@ export const ROLE_PERMS = {
   manageInventoryLevels: ["admin", "warehouse"] as Role[],
   /**
    * Live GPS map (OneStep + Verizon).
-   * Supervisors, warehouse, fleet mechanic, office (+ admin/viewer).
-   * Field drivers are excluded — they do not need to see where others are.
+   * Admin, office (manager login), and supervisor only.
+   * There is no separate manager role. Field techs do not see others.
+   * Chuck and Speedy are named exceptions (see isNamedFleetMapUser).
    */
-  viewLiveMap: [
-    "admin",
-    "office",
-    "mechanic",
-    "warehouse",
-    "supervisor",
-    "viewer",
-  ] as Role[],
+  viewLiveMap: ["admin", "office", "supervisor"] as Role[],
   /**
    * Company assets (bottles, ladders, tools) — outside pricebook
    * - view: broad; manage: warehouse + admin only
@@ -256,13 +271,60 @@ export const ROLE_PERMS = {
    * Phase 1 queues locally — does not write ServiceTitan appointment status.
    */
   useJobClock: ["admin", "driver"] as Role[],
+  manageInstallPermit: ["admin", "office", "supervisor"] as Role[],
   /** Ops Performance board — office eyes only (not field / warehouse / mechanic). */
-  viewOpsPerformance: ["admin", "office", "supervisor"] as Role[],
+  viewOpsPerformance: ["admin", "office", "supervisor", "driver", "mechanic", "warehouse"] as Role[],
   /**
    * Day Board (ST schedule read-only).
    * Office/admin/supervisor = all rows; driver = own day (enforced in handler).
    */
   viewDayBoard: ["admin", "office", "supervisor", "driver"] as Role[],
+  /** How long each ServiceTitan job type takes. Office and supervisors only. */
+  viewJobLengths: ["admin", "office", "supervisor"] as Role[],
+  /** Deliveries (parts in -> staged -> picked up). Page + list. */
+  viewDeliveries: ["admin", "office", "warehouse", "driver", "mechanic", "supervisor", "viewer"] as Role[],
+  /** Receive a delivery + add a staging spot at receive time (Speedy). Also Void. */
+  receiveDeliveries: ["admin", "warehouse"] as Role[],
+  /** Office marks Scheduled / un-schedules. */
+  scheduleDeliveries: ["admin", "office"] as Role[],
+  /** Anyone working can tap Picked up (techs included). */
+  pickupDeliveries: ["admin", "office", "warehouse", "driver", "mechanic", "supervisor"] as Role[],
+  /** Undo pickup, move spot, retire a spot. */
+  manageDeliveries: ["admin", "office", "warehouse"] as Role[],
+  /** Vendor hand-off proof (vendor rep signs on the phone). Anyone who carries a part back. */
+  recordVendorHandoff: ["admin", "office", "warehouse", "mechanic", "supervisor", "driver"] as Role[],
+  /** See Proof of hand-off on cards + print the receipt. */
+  viewVendorHandoffs: ["admin", "office", "warehouse", "mechanic", "supervisor", "driver", "viewer"] as Role[],
+  /** Fleet Shop page, queue, vehicles, work order detail. */
+  viewFleetShop: ["admin", "mechanic", "supervisor", "office", "viewer"] as Role[],
+  /** Timer, schedule, notes, parts, photos, Done, clock. */
+  workFleetShop: ["admin", "mechanic"] as Role[],
+  /** PM intervals and last-done. */
+  managePm: ["admin", "mechanic", "supervisor"] as Role[],
+  /** Manager board. */
+  viewFleetBoard: ["admin", "supervisor", "office", "viewer"] as Role[],
+  /** 3-tap truck problem. Every working role. */
+  reportTruckProblem: ["admin", "office", "driver", "mechanic", "supervisor", "warehouse"] as Role[],
+  /** Fleet Shop settings and segment time fixes. */
+  manageFleetShopSettings: ["admin"] as Role[],
+  /** Done today: see every person. */
+  viewDoneTodayAll: ["admin"] as Role[],
+  /** Who still needs which safety topic. Read only. Not field, shop, or warehouse. */
+  viewSafetyStatus: ["admin", "office", "supervisor"] as Role[],
+  /** Who is ready to schedule a NATE test. Not a ranking. Not field. */
+  viewNateStatus: ["admin", "office", "supervisor"] as Role[],
+  /** Open tool borrows. Office eyes. Not a ranking and not shown to field. */
+  viewToolCustody: ["admin", "office", "supervisor"] as Role[],
+  /** Mark a gas bottle as the company's or an employee's. */
+  manageGasBottleOwners: ["admin", "office", "warehouse", "supervisor"] as Role[],
+  /**
+   * Saved employee write-ups. Private HR.
+   * Admin, office, and supervisor can save and read. Void is admin and office only
+   * (checked in the write-up route). Field, shop, warehouse, and viewer never see them.
+   */
+  manageWriteups: ["admin", "office", "supervisor"] as Role[],
+  /** Company card and company vehicle signature forms. Office eyes. Not field. */
+  viewResponsibility: ["admin", "office", "supervisor"] as Role[],
 };
 
 function normName(s: string): string {
@@ -498,7 +560,7 @@ export async function ensureBootstrapAdmin(env: Env): Promise<void> {
     for (const u of seedUsers.results || []) {
       const { hash, salt } = await hashPassword("ChangeMe123!");
       await env.DB.prepare(
-        "UPDATE users SET password_hash = ?, password_salt = ?, updated_at = datetime('now') WHERE id = ?"
+        "UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1, updated_at = datetime('now') WHERE id = ?"
       )
         .bind(hash, salt, u.id)
         .run();
@@ -509,16 +571,16 @@ export async function ensureBootstrapAdmin(env: Env): Promise<void> {
 
   const { hash, salt } = await hashPassword("ChangeMe123!");
   await env.DB.prepare(
-    `INSERT INTO users (email, username, display_name, password_hash, password_salt, role, auth_provider, active)
-     VALUES (?, ?, ?, ?, ?, 'admin', 'password', 1)`
+    `INSERT INTO users (email, username, display_name, password_hash, password_salt, role, auth_provider, active, must_change_password)
+     VALUES (?, ?, ?, ?, ?, 'admin', 'password', 1, 1)`
   )
     .bind("admin@example.com", "admin", "Fleet Admin", hash, salt)
     .run();
 
   const mech = await hashPassword("ChangeMe123!");
   await env.DB.prepare(
-    `INSERT INTO users (email, username, display_name, password_hash, password_salt, role, auth_provider, active)
-     VALUES (?, ?, ?, ?, ?, 'mechanic', 'password', 1)`
+    `INSERT INTO users (email, username, display_name, password_hash, password_salt, role, auth_provider, active, must_change_password)
+     VALUES (?, ?, ?, ?, ?, 'mechanic', 'password', 1, 1)`
   )
     .bind("mechanic@example.com", "mechanic", "Fleet Mechanic", mech.hash, mech.salt)
     .run();
@@ -542,4 +604,169 @@ export function isGoogleEmailAllowed(env: Env, email: string): boolean {
     return true;
   }
   return lower.endsWith(`@${domain}`);
+}
+
+
+/** True admin account (not warehouse-as-office, not role-preview). */
+export function isTrueAdminUser(u: Pick<PublicUser, "role" | "is_warehouse"> | UserRow | null | undefined): boolean {
+  if (!u) return false;
+  const role = u.role;
+  const isWh = Boolean((u as PublicUser).is_warehouse) || Boolean((u as UserRow).is_warehouse);
+  return role === "admin" && !isWh;
+}
+
+export type SessionAuth = {
+  token: string;
+  realUser: UserRow;
+  effectiveUser: UserRow;
+  viewAsUserId: number | null;
+};
+
+/**
+ * Resolve session with optional admin view-as.
+ * Real identity stays sessions.user_id; UX identity is view_as_user_id when set.
+ */
+export async function resolveSessionAuth(
+  db: D1Database,
+  token: string | null
+): Promise<SessionAuth | null> {
+  if (!token) return null;
+
+  type SessRow = UserRow & { view_as_user_id?: number | null };
+  let row: SessRow | null = null;
+  try {
+    row =
+      (await db
+        .prepare(
+          `SELECT u.*, s.view_as_user_id as view_as_user_id
+           FROM sessions s
+           JOIN users u ON u.id = s.user_id
+           WHERE s.id = ? AND s.expires_at > datetime('now') AND u.active = 1`
+        )
+        .bind(token)
+        .first<SessRow>()) ?? null;
+  } catch {
+    // Pre-migration 086: no view_as_user_id column
+    const u = await getUserFromSession(db, token);
+    if (!u) return null;
+    return { token, realUser: u, effectiveUser: u, viewAsUserId: null };
+  }
+  if (!row) return null;
+
+  const viewAsId =
+    row.view_as_user_id != null && Number(row.view_as_user_id) > 0
+      ? Number(row.view_as_user_id)
+      : null;
+
+  // Strip session-only field from user row shape
+  const { view_as_user_id: _ignored, ...realUser } = row as SessRow;
+  void _ignored;
+
+  if (!viewAsId || !isTrueAdminUser(realUser)) {
+    if (viewAsId && !isTrueAdminUser(realUser)) {
+      // Non-admin somehow has view_as set — clear it
+      try {
+        await db
+          .prepare("UPDATE sessions SET view_as_user_id = NULL WHERE id = ?")
+          .bind(token)
+          .run();
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      token,
+      realUser: realUser as UserRow,
+      effectiveUser: realUser as UserRow,
+      viewAsUserId: null,
+    };
+  }
+
+  const target = await db
+    .prepare("SELECT * FROM users WHERE id = ? AND active = 1")
+    .bind(viewAsId)
+    .first<UserRow>();
+  if (!target) {
+    try {
+      await db
+        .prepare("UPDATE sessions SET view_as_user_id = NULL WHERE id = ?")
+        .bind(token)
+        .run();
+    } catch {
+      /* ignore */
+    }
+    return {
+      token,
+      realUser: realUser as UserRow,
+      effectiveUser: realUser as UserRow,
+      viewAsUserId: null,
+    };
+  }
+
+  return {
+    token,
+    realUser: realUser as UserRow,
+    effectiveUser: target,
+    viewAsUserId: viewAsId,
+  };
+}
+
+export async function setSessionViewAs(
+  db: D1Database,
+  token: string,
+  viewAsUserId: number | null
+): Promise<void> {
+  await db
+    .prepare("UPDATE sessions SET view_as_user_id = ? WHERE id = ?")
+    .bind(viewAsUserId, token)
+    .run();
+}
+
+export async function endOpenViewAsAudit(
+  db: D1Database,
+  adminUserId: number,
+  targetUserId?: number | null
+): Promise<void> {
+  try {
+    if (targetUserId != null) {
+      await db
+        .prepare(
+          `UPDATE view_as_audit
+           SET ended_at = datetime('now')
+           WHERE admin_user_id = ? AND target_user_id = ? AND ended_at IS NULL`
+        )
+        .bind(adminUserId, targetUserId)
+        .run();
+    } else {
+      await db
+        .prepare(
+          `UPDATE view_as_audit
+           SET ended_at = datetime('now')
+           WHERE admin_user_id = ? AND ended_at IS NULL`
+        )
+        .bind(adminUserId)
+        .run();
+    }
+  } catch {
+    /* table may not exist yet */
+  }
+}
+
+export async function startViewAsAudit(
+  db: D1Database,
+  admin: PublicUser,
+  target: PublicUser
+): Promise<void> {
+  try {
+    await endOpenViewAsAudit(db, admin.id);
+    await db
+      .prepare(
+        `INSERT INTO view_as_audit (admin_user_id, admin_display, target_user_id, target_display)
+         VALUES (?, ?, ?, ?)`
+      )
+      .bind(admin.id, admin.display_name, target.id, target.display_name)
+      .run();
+  } catch {
+    /* table may not exist yet */
+  }
 }

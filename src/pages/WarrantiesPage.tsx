@@ -1,7 +1,11 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api, ApiError, OfflineQueuedError } from "../api";
+import { FormEvent, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api, ApiError, can, OfflineQueuedError } from "../api";
 import { useAuth } from "../auth";
+import { WarrantyHandoffSheet, type HandoffAction } from "../components/WarrantyHandoffSheet";
+import { compressPhoto } from "../lib/compressPhoto";
+import { fmtCt, openReceipt } from "../vendorHandoff";
+import { repairUtf8Mojibake } from "../lib/utf8Mojibake";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
 import {
@@ -64,6 +68,9 @@ interface Warranty {
   tracking_number?: string | null;
   parked?: number | null;
   parked_reason?: string | null;
+  voided?: number | null;
+  void_reason?: string | null;
+  voided_at?: string | null;
   days_open: number;
   working_days_since_submit?: number;
   needs_attention?: boolean;
@@ -71,11 +78,14 @@ interface Warranty {
   urgent?: boolean;
   claim_submitted_by_user_id?: number | null;
   claim_submitted_by_name?: string | null;
+  handoff_count?: number;
+  handoff_last_at?: string | null;
+  handoff_last_id?: number | null;
 }
 
 const STATUS_LABEL: Record<string, string> = {
   dropped_off: "File",
-  claim_submitted: "Hold · waiting on vendor",
+  claim_submitted: "Hold - waiting vendor credit (do not dispose)",
   return_to_vendor: "Return to vendor",
   delivered: "Return · delivered",
   approved: "Approved",
@@ -113,6 +123,30 @@ function shortStreet(addr: string | null | undefined): string {
   const raw = String(addr || "").trim();
   if (!raw) return "—";
   return (raw.split(/[\n,]/)[0] || raw).trim().slice(0, 60);
+}
+
+function ClaimChip({ rma }: { rma: string | null | undefined }) {
+  const value = (rma || "").trim();
+  if (!value) {
+    return <span className="warranty-rma-chip is-empty">No claim # yet</span>;
+  }
+  return (
+    <span className="warranty-rma-chip">
+      <span>Claim / RMA # {value}</span>
+      <button
+        type="button"
+        className="warranty-rma-copy"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const clip = navigator.clipboard;
+          if (clip?.writeText) void clip.writeText(value);
+        }}
+      >
+        Copy
+      </button>
+    </span>
+  );
 }
 
 function notesSuggestReturn(notes: string | null | undefined): boolean {
@@ -153,18 +187,21 @@ function filedLabel(w: Warranty): "Yes" | "No" {
 }
 
 /**
- * Warehouse box action.
+ * Warehouse box action (also drives Hold / Dispose / Return SMS stages).
  * SAVE = File only (not filed) / Parked.
- * HOLD = claim submitted waiting credit, or rejected (filed, no toss).
- * TOSS = approved (credit $ not required).
- * RETURN = Return pile / Johnstone / Solar / send-back notes.
+ * HOLD = claim submitted waiting credit, or rejected (filed, no dispose).
+ * DISPOSE = approved, no return flag (default after Approved).
+ * RETURN = return_to_vendor / delivered / needs_vendor_return / Johnstone / Solar.
  */
-function boxDisposition(w: Warranty): "TOSS" | "RETURN" | "SAVE" | "HOLD" {
+function boxDisposition(w: Warranty): "DISPOSE" | "RETURN" | "SAVE" | "HOLD" {
+  if (w.voided) return "SAVE";
   const st = normalizeStatus(String(w.status));
   const parked = !!w.parked;
+  const returnFlag = Number(w.needs_vendor_return || 0) === 1;
 
-  // Return first — never toss send-backs
+  // Return first — never dispose send-backs
   if (st === "return_to_vendor" || st === "delivered") return "RETURN";
+  if (returnFlag) return "RETURN";
   if (isJohnstone(w.vendor_name) || isSolarSupply(w.vendor_name)) return "RETURN";
   if (notesSuggestReturn(w.notes)) return "RETURN";
 
@@ -172,7 +209,7 @@ function boxDisposition(w: Warranty): "TOSS" | "RETURN" | "SAVE" | "HOLD" {
   if (st === "dropped_off") return "SAVE";
   if (st === "claim_submitted") return "HOLD";
   if (st === "rejected") return "HOLD";
-  if (st === "approved") return "TOSS";
+  if (st === "approved") return "DISPOSE";
   return "SAVE";
 }
 
@@ -212,39 +249,38 @@ function isOpenStatus(s: string): boolean {
   return OPEN_STATUSES.includes(normalizeStatus(s));
 }
 
-/** Shrink phone photos for D1 blob storage (~900KB). */
-async function compressPhoto(file: File, maxBytes = 850_000): Promise<File> {
-  if (file.size <= maxBytes && file.type.startsWith("image/")) return file;
-  try {
-    const bmp = await createImageBitmap(file);
-    const maxW = 1600;
-    let w = bmp.width;
-    let h = bmp.height;
-    if (w > maxW) {
-      h = Math.round((h * maxW) / w);
-      w = maxW;
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return file;
-    ctx.drawImage(bmp, 0, 0, w, h);
-    bmp.close?.();
+function pileOf(w: Warranty): PileFilter {
+  if (w.voided) return "closed";
+  if (w.parked) return "parked";
+  const st = normalizeStatus(String(w.status));
+  if (st === "claim_submitted") return "hold";
+  if (st === "return_to_vendor" || st === "delivered") return "return";
+  if (st === "approved" || st === "rejected" || st === "not_warranty") return "closed";
+  return "file";
+}
 
-    let quality = 0.82;
-    let blob: Blob | null = await new Promise((res) =>
-      canvas.toBlob(res, "image/jpeg", quality)
-    );
-    while (blob && blob.size > maxBytes && quality > 0.45) {
-      quality -= 0.12;
-      blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
-    }
-    if (!blob) return file;
-    return new File([blob], "dropoff.jpg", { type: "image/jpeg" });
-  } catch {
-    return file;
-  }
+function pileName(p: PileFilter): string {
+  if (p === "file") return "File";
+  if (p === "hold") return "Hold";
+  if (p === "return") return "Return";
+  if (p === "parked") return "Parked";
+  return "Closed";
+}
+
+/** Other outcomes for this pile. The card already shows the one next step. */
+function WarrantyMore({ children }: { children: ReactNode }) {
+  return (
+    <details className="warranty-more">
+      <summary
+        className="btn ghost btn-sm"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        More
+      </summary>
+      <div className="warranty-more-list">{children}</div>
+    </details>
+  );
 }
 
 export function WarrantiesPage() {
@@ -259,7 +295,7 @@ export function WarrantiesPage() {
   const [list, setList] = useState<Warranty[]>([]);
   const [attentionCount, setAttentionCount] = useState(0);
   const [filter, setFilter] = useState<PileFilter>("file");
-  const [searchQ, setSearchQ] = useState("");
+  const [searchQ, setSearchQ] = useState(() => new URLSearchParams(window.location.search).get("q") || "");
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
@@ -276,12 +312,27 @@ export function WarrantiesPage() {
   >({});
   /** Per-claim status note draft (append) */
   const [noteDraft, setNoteDraft] = useState<Record<number, string>>({});
+  const [handoffCfg, setHandoffCfg] = useState<{
+    ready: boolean;
+    proof_required_warranty: boolean;
+    proof_required_arrival_return: boolean;
+  } | null>(null);
+  const [handoffFor, setHandoffFor] = useState<{
+    id: number;
+    action: HandoffAction;
+    supersedes?: { id: number };
+  } | null>(null);
+  const [deepLinkId, setDeepLinkId] = useState<number | null>(null);
+  const [deepNotice, setDeepNotice] = useState("");
+  const deepOnce = useRef(false);
 
   const [partName, setPartName] = useState("");
   const [partCode, setPartCode] = useState("");
   const [model, setModel] = useState("");
   const [serial, setSerial] = useState("");
-  const [address, setAddress] = useState("");
+  const [address, setAddress] = useState(
+    () => new URLSearchParams(window.location.search).get("address") || ""
+  );
   const [customer, setCustomer] = useState("");
   const [vendor, setVendor] = useState("");
   const [notes, setNotes] = useState("");
@@ -343,7 +394,44 @@ export function WarrantiesPage() {
   useEffect(() => {
     void warmOcrEngine();
     loadOcrHints((path) => api(path)).then(setOcrHints).catch(() => null);
+    api<{ ready: boolean; proof_required_warranty: boolean; proof_required_arrival_return: boolean }>("/handoffs/config")
+      .then(setHandoffCfg)
+      .catch(() => setHandoffCfg(null));
   }, []);
+
+  useEffect(() => {
+    if (deepOnce.current || !list.length) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("handoff") !== "1") return;
+    const q = (params.get("q") || "").trim().toLowerCase();
+    const hits = list.filter((w) => w.log_number.toLowerCase() === q);
+    if (hits.length !== 1) return;
+    deepOnce.current = true;
+    const w = hits[0];
+    const pile = pileOf(w);
+    setFilter(pile);
+    setDeepLinkId(w.id);
+    const st = normalizeStatus(String(w.status));
+    const canRecord = can(user, "recordVendorHandoff");
+    if (!canRecord) {
+      setDeepNotice("");
+    } else if (pile !== "return") {
+      setDeepNotice(`${w.log_number} is in the ${pileName(pile)} pile. The hand-off sheet opens when it is on the Return pile.`);
+    } else if (st === "return_to_vendor" && !w.handoff_count) {
+      setHandoffFor({
+        id: w.id,
+        action: isSolarSupply(w.vendor_name) ? "solar_invoice_deleted" : "delivered",
+      });
+    } else if (!w.handoff_count && (st === "return_to_vendor" || st === "delivered")) {
+      setHandoffFor({ id: w.id, action: "record_only" });
+    }
+    params.delete("handoff");
+    const next = params.toString();
+    window.history.replaceState(null, "", next ? `${window.location.pathname}?${next}` : window.location.pathname);
+    window.setTimeout(() => {
+      document.querySelector(".warranty-deep")?.scrollIntoView({ block: "start" });
+    }, 50);
+  }, [list, user]);
 
   useEffect(() => {
     return () => {
@@ -617,7 +705,7 @@ export function WarrantiesPage() {
     const logNo = r.write_on_box || r.warranty.log_number;
     setWriteOnBox(logNo);
     setOk(
-      `Logged ${logNo}. Write this number on the box now, then leave the part where you photographed.`
+      `Logged ${logNo}. Warehouse has it. Write this number on the box, then you are done with this part.`
     );
     resetForm();
     loadOcrHints((path) => api(path)).then(setOcrHints).catch(() => null);
@@ -670,12 +758,44 @@ export function WarrantiesPage() {
     } catch (err) {
       if (err instanceof OfflineQueuedError) {
         setOk(err.message);
+      } else if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        (err.data as { code?: string } | undefined)?.code === "handoff_required"
+      ) {
+        const card = list.find((x) => x.id === id);
+        if (card) {
+          setHandoffFor({
+            id: card.id,
+            action: status === "approved" ? "approved_returned" : status === "delivered" ? "delivered" : "record_only",
+          });
+        }
       } else {
         setError(err instanceof Error ? err.message : "Update failed");
       }
     } finally {
       setBusy(false);
     }
+  }
+
+  function needsSignature(w: Warranty): boolean {
+    const st = normalizeStatus(String(w.status));
+    return (
+      st === "return_to_vendor" &&
+      Boolean(handoffCfg?.ready && handoffCfg.proof_required_warranty) &&
+      !Number(w.handoff_count || 0)
+    );
+  }
+
+  function patchBody(w: Warranty, extra: Record<string, unknown>): Record<string, unknown> {
+    const d = draftFor(w);
+    const body: Record<string, unknown> = { ...extra };
+    if (d.rma.trim()) body.rma_number = d.rma.trim();
+    if (d.tracking.trim()) body.tracking_number = d.tracking.trim();
+    if (d.credit.trim() !== "") body.credit_amount = Number(d.credit);
+    if (d.vendor.trim()) body.vendor_name = d.vendor.trim();
+    if (d.address.trim()) body.service_address = d.address.trim();
+    return body;
   }
 
   /**
@@ -754,9 +874,35 @@ export function WarrantiesPage() {
     }
   }
 
-  async function solarInvoiceDeleted(w: Warranty) {
+  async function voidClaim(w: Warranty) {
+    const why = window.prompt(
+      `Void ${w.log_number}?\n\nKeeps the record and takes it off the open piles. Why? (required)`
+    );
+    if (why == null) return;
+    if (why.trim().length < 3) {
+      setError("Void needs a short reason.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/warranties/${w.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ voided: true, void_reason: why.trim() }),
+      });
+      setOk(`Voided ${w.log_number}. Find it on Closed or by search. No text was sent.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not void");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function solarInvoiceDeleted(w: Warranty, skipConfirm = false) {
     if (!isSolarSupply(w.vendor_name)) return;
     if (
+      !skipConfirm &&
       !window.confirm(
         `${w.log_number}: Solar received the return and deleted the invoice?\n\nThis sets Approved with credit $0. Never scrap Solar parts.`
       )
@@ -773,7 +919,15 @@ export function WarrantiesPage() {
       setOk(`${w.log_number} · Solar invoice deleted (Approved $0)`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not close Solar return");
+      if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        (err.data as { code?: string } | undefined)?.code === "handoff_required"
+      ) {
+        setHandoffFor({ id: w.id, action: "solar_invoice_deleted" });
+      } else {
+        setError(err instanceof Error ? err.message : "Could not close Solar return");
+      }
     } finally {
       setBusy(false);
     }
@@ -814,7 +968,7 @@ export function WarrantiesPage() {
 
   /** Latest status line for collapsed list preview */
   function latestNotePreview(notes: string | null | undefined): string {
-    const t = (notes || "").trim();
+    const t = repairUtf8Mojibake(notes || "").trim();
     if (!t) return "";
     const blocks = t.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
     const last = blocks[blocks.length - 1] || t;
@@ -868,7 +1022,7 @@ export function WarrantiesPage() {
 
       // File + Hold + Return (exclude Parked — stay on shelf intentionally)
       const openRows = (openRes.warranties || []).filter((w) => {
-        if (w.parked) return false;
+        if (w.voided || w.parked) return false;
         const st = normalizeStatus(String(w.status));
         return (
           st === "dropped_off" ||
@@ -881,6 +1035,7 @@ export function WarrantiesPage() {
       // Newest Closed first, cap 10 so the sheet stays short
       const closedRows = (closedRes.warranties || [])
         .filter((w) => {
+          if (w.voided) return false;
           const st = normalizeStatus(String(w.status));
           return st === "approved" || st === "rejected";
         })
@@ -929,9 +1084,7 @@ export function WarrantiesPage() {
         <div>
           <h1>Warranties</h1>
           <p>
-            Piles: <strong>File</strong> (file the claim) · <strong>Hold</strong> (waiting on
-            vendor — do not scrap) · <strong>Return</strong> (Johnstone / Solar / send-back) ·{" "}
-            <strong>Parked</strong> (do not file) · <strong>Closed</strong> (approved + rejected).
+            Piles: <strong>File</strong> (start the claim) · <strong>Hold</strong> (waiting on vendor - do not dispose) · <strong>Dispose</strong> (approved - scrap OK) · <strong>Return</strong> (send back to vendor) · <strong>Parked</strong> (do not file) · <strong>Closed</strong> (approved, rejected, and voided).
             Badge / Home count = File only
             {attentionCount > 0 ? ` · ${attentionCount} to file` : ""}. ACES = email Victoria (never
             portal); Goodman/Daikin = Warranty Express; Lennox = LennoxPros; Ferguson = Ferguson.com.
@@ -1344,14 +1497,19 @@ export function WarrantiesPage() {
           All statuses · “{searchQ.trim()}”
         </p>
       ) : null}
+      {user?.role === "admin" && handoffCfg && !handoffCfg.ready ? (
+        <p className="muted">Hand-off proof: run migration 110</p>
+      ) : null}
 
       {(() => {
         function renderWarrantyItem(w: Warranty) {
           const st = normalizeStatus(String(w.status));
           const parked = !!w.parked;
+          const voided = !!w.voided;
           const solar = isSolarSupply(w.vendor_name);
-          const tone =
-            st === "approved"
+          const tone = voided
+            ? "done"
+            : st === "approved"
               ? "done"
               : st === "not_warranty"
                 ? "done"
@@ -1363,6 +1521,7 @@ export function WarrantiesPage() {
                       ? "overdue"
                       : undefined;
           const ageLabel = (() => {
+            if (voided) return w.void_reason ? ` - voided: ${w.void_reason}` : " - voided";
             if (parked) return w.parked_reason ? ` · parked: ${w.parked_reason}` : " · parked";
             if (!isOpenStatus(st)) return "";
             if (st === "dropped_off") {
@@ -1381,17 +1540,53 @@ export function WarrantiesPage() {
             w.credit_amount != null &&
             Number.isFinite(Number(w.credit_amount)) &&
             !solar;
+          const boxAction = boxDisposition(w);
+          const voidDuplicate = (
+            <button
+              type="button"
+              className="btn secondary warranty-void-btn"
+              disabled={busy}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void voidClaim(w);
+              }}
+            >
+              Void duplicate
+            </button>
+          );
+          const statusMore =
+            !parked &&
+            (st === "dropped_off" ||
+              st === "claim_submitted" ||
+              st === "return_to_vendor" ||
+              st === "delivered" ||
+              (canScrapComplete && can(user, "recordVendorHandoff") && boxAction === "RETURN"));
           return (
             <LogItem
               key={w.id}
               tone={tone}
-              defaultOpen={false}
+              className={w.id === deepLinkId ? "warranty-deep" : ""}
+              defaultOpen={w.id === deepLinkId}
               summary={
                 <>
                   <strong className="warranty-log">{w.log_number}</strong>
                   <span className={`log-item-badge warranty-status-${st}`}>
-                    {parked ? "Parked" : STATUS_LABEL[st] || st}
+                    {voided ? "Voided" : parked ? "Parked" : STATUS_LABEL[st] || st}
                   </span>
+                  <ClaimChip rma={w.rma_number} />
+                  {!voided && !parked && (boxAction === "HOLD" || boxAction === "DISPOSE" || boxAction === "RETURN") ? (
+                    <span
+                      className={`log-item-badge warranty-box-${boxAction.toLowerCase()}`}
+                      title="Warehouse box action"
+                    >
+                      {boxAction === "DISPOSE" ? "Dispose" : boxAction === "HOLD" ? "Hold" : "Return"}
+                    </span>
+                  ) : null}
                   <span className="log-item-meta">
                     {w.part_name}
                     {ageLabel}
@@ -1417,6 +1612,15 @@ export function WarrantiesPage() {
                 <div className="warranty-key-fact">
                   <span className="warranty-fact-label">Job address</span>
                   <strong>{w.service_address?.trim() || "—"}</strong>
+                  {w.service_address &&
+                  w.service_address.trim().length >= 3 &&
+                  (user?.role === "admin" || user?.role === "office" || user?.role === "supervisor") ? (
+                    <div>
+                      <Link to={`/invoice-lookup?q=${encodeURIComponent(w.service_address.trim())}`}>
+                        Invoice lookup
+                      </Link>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="warranty-key-fact">
                   <span className="warranty-fact-label">Vendor claim submitted to</span>
@@ -1437,15 +1641,16 @@ export function WarrantiesPage() {
 
               <div className="warranty-status-notes">
                 <div className="warranty-status-notes-label">Status notes</div>
-                {w.notes?.trim() ? (
-                  <pre className="warranty-status-notes-body">{w.notes.trim()}</pre>
+                {repairUtf8Mojibake(w.notes || "").trim() ? (
+                  <pre className="warranty-status-notes-body">{repairUtf8Mojibake(w.notes || "").trim()}</pre>
                 ) : (
                   <p className="muted warranty-status-notes-empty">
                     No updates yet. Add a note so the team knows this claim is being worked
                     (vendor help, waiting on RMA, etc.).
                   </p>
                 )}
-                {(canProcess ||
+                {!voided &&
+                (canProcess ||
                   (w.dropped_off_by_user_id != null &&
                     w.dropped_off_by_user_id === user?.id)) && (
                   <div className="warranty-status-notes-add">
@@ -1499,6 +1704,21 @@ export function WarrantiesPage() {
                   ) : null
                 )}
               </div>
+              {deepNotice && w.id === deepLinkId ? <div className="vho-notice">{deepNotice}</div> : null}
+              {!voided && !Number(w.handoff_count || 0) &&
+              (st === "return_to_vendor" || st === "delivered" || (st === "approved" && Number(w.needs_vendor_return) === 1)) ? (
+                <div className="vho-badge-missing">No hand-off proof</div>
+              ) : null}
+              {Number(w.handoff_count || 0) > 0 ? (
+                <HandoffProof
+                  id={w.id}
+                  logNumber={w.log_number}
+                  canCopy={user?.role === "admin" || user?.role === "office"}
+                  canCorrect={can(user, "recordVendorHandoff")}
+                  onOpen={(src, label) => openLightbox(src, label)}
+                  onCorrect={(proofId) => setHandoffFor({ id: w.id, action: "record_only", supersedes: { id: proofId } })}
+                />
+              ) : null}
               {(w.old_compressor_serial || w.new_compressor_serial || w.compressor_seals_ok) && (
                 <div className="muted" style={{ fontSize: "0.82rem" }}>
                   {w.compressor_seals_ok ? "Compressor seals confirmed" : null}
@@ -1513,6 +1733,12 @@ export function WarrantiesPage() {
               {parked && w.parked_reason ? (
                 <div className="muted" style={{ fontSize: "0.85rem" }}>
                   <strong>Parked:</strong> {w.parked_reason}
+                </div>
+              ) : null}
+              {voided ? (
+                <div className="muted" style={{ fontSize: "0.85rem" }}>
+                  <strong>Voided:</strong> {w.void_reason || "duplicate"}
+                  {w.voided_at ? ` · ${w.voided_at.replace("T", " ").slice(0, 16)}` : ""}
                 </div>
               ) : null}
               <div className="muted">
@@ -1531,7 +1757,7 @@ export function WarrantiesPage() {
                   : ""}
                 {w.processed_by_name ? ` by ${w.processed_by_name}` : ""}
               </div>
-              {canProcess && isOpenStatus(st) && (
+              {canProcess && !voided && isOpenStatus(st) && (
                   <div className="warranty-vendor-fields">
                     <label className="span-2">
                       Job address
@@ -1551,18 +1777,18 @@ export function WarrantiesPage() {
                         autoComplete="organization"
                       />
                     </label>
+                    <label>
+                      Claim / RMA #
+                      <input
+                        value={draftFor(w).rma}
+                        onChange={(e) => patchDraft(w.id, w, { rma: e.target.value })}
+                        placeholder="Claim or vendor RMA"
+                      />
+                    </label>
                     {(st === "return_to_vendor" ||
                       st === "delivered" ||
                       st === "claim_submitted") && (
                       <>
-                        <label>
-                          RMA #
-                          <input
-                            value={draftFor(w).rma}
-                            onChange={(e) => patchDraft(w.id, w, { rma: e.target.value })}
-                            placeholder="Vendor RMA"
-                          />
-                        </label>
                         <label>
                           Tracking #
                           <input
@@ -1594,13 +1820,12 @@ export function WarrantiesPage() {
                     </button>
                   </div>
                 )}
-              {(w.rma_number || w.tracking_number || w.credit_amount != null) && (
+              {(w.tracking_number || w.credit_amount != null) && (
                 <div className="muted" style={{ fontSize: "0.82rem" }}>
-                  {w.rma_number ? `RMA ${w.rma_number}` : ""}
-                  {w.tracking_number ? ` · Track ${w.tracking_number}` : ""}
+                  {w.tracking_number ? `Track ${w.tracking_number}` : ""}
                   {w.credit_amount != null ? (
                     <>
-                      {" · "}
+                      {w.tracking_number ? " · " : ""}
                       <strong>Credit ${Number(w.credit_amount).toFixed(2)}</strong>
                     </>
                   ) : null}
@@ -1611,12 +1836,12 @@ export function WarrantiesPage() {
                   Credit <strong>${Number(w.credit_amount).toFixed(2)}</strong>
                 </div>
               ) : null}
-              {canProcess && (
+              {canProcess && !voided && (
                 <div className="log-item-actions warranty-actions">
                   {parked ? (
                     <button
                       type="button"
-                      className="btn secondary"
+                      className="btn"
                       disabled={busy}
                       onClick={() => void unparkClaim(w)}
                     >
@@ -1624,15 +1849,115 @@ export function WarrantiesPage() {
                     </button>
                   ) : null}
                   {!parked && st === "dropped_off" && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() =>
+                        void setStatus(w.id, "claim_submitted", {
+                          needs_vendor_return: false,
+                        })
+                      }
+                    >
+                      Claim submitted
+                    </button>
+                  )}
+                  {!parked && st === "claim_submitted" && (
                     <>
+                      <span className="muted warranty-hold-banner">
+                        Waiting on vendor — do not scrap
+                      </span>
                       <button
                         type="button"
-                        className="btn secondary"
+                        className="btn"
                         disabled={busy}
-                        onClick={() => void setStatus(w.id, "claim_submitted")}
+                        onClick={() =>
+                          void setStatus(w.id, "approved", {
+                            needs_vendor_return: false,
+                          })
+                        }
                       >
-                        Claim submitted
+                        Approved — dispose
                       </button>
+                    </>
+                  )}
+                  {!parked && (st === "return_to_vendor" || st === "delivered") && solar && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() => {
+                        if (needsSignature(w)) setHandoffFor({ id: w.id, action: "solar_invoice_deleted" });
+                        else void solarInvoiceDeleted(w);
+                      }}
+                    >
+                      {needsSignature(w)
+                        ? "Solar received return - invoice deleted - get signature"
+                        : "Solar received return — invoice deleted"}
+                    </button>
+                  )}
+                  {!parked && st === "return_to_vendor" && !solar && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() => {
+                        if (needsSignature(w)) setHandoffFor({ id: w.id, action: "delivered" });
+                        else void setStatus(w.id, "delivered", { needs_vendor_return: false });
+                      }}
+                    >
+                      {needsSignature(w) ? "Delivered - get signature" : "Delivered"}
+                    </button>
+                  )}
+                  {!parked && st === "delivered" && !solar && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() => {
+                        if (needsSignature(w)) setHandoffFor({ id: w.id, action: "approved_returned" });
+                        else
+                          void setStatus(w.id, "approved", {
+                            needs_vendor_return: true,
+                          });
+                      }}
+                    >
+                      {needsSignature(w) ? "Approved (returned) - get signature" : "Approved (returned)"}
+                    </button>
+                  )}
+                  {!parked &&
+                  st !== "dropped_off" &&
+                  st !== "claim_submitted" &&
+                  st !== "return_to_vendor" &&
+                  st !== "delivered" &&
+                  can(user, "recordVendorHandoff") &&
+                  boxAction === "RETURN" ? (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={() => setHandoffFor({ id: w.id, action: "record_only" })}
+                    >
+                      Vendor hand-off
+                    </button>
+                  ) : !parked &&
+                    st !== "dropped_off" &&
+                    st !== "claim_submitted" &&
+                    st !== "return_to_vendor" &&
+                    st !== "delivered" &&
+                    canScrapComplete ? (
+                    <button
+                      type="button"
+                      className="btn ghost warranty-not-warranty-btn"
+                      disabled={busy}
+                      title="Complete after Approved with credit (not Solar / not returns)"
+                      onClick={() => void markNotWarranty(w)}
+                    >
+                      Complete / scrap
+                    </button>
+                  ) : null}
+                  {!parked && st === "dropped_off" ? (
+                    <WarrantyMore>
                       <button
                         type="button"
                         className="btn secondary"
@@ -1649,13 +1974,11 @@ export function WarrantiesPage() {
                       >
                         Park
                       </button>
-                    </>
-                  )}
-                  {!parked && st === "claim_submitted" && (
-                    <>
-                      <span className="muted warranty-hold-banner">
-                        Waiting on vendor — do not scrap
-                      </span>
+                      {voidDuplicate}
+                    </WarrantyMore>
+                  ) : null}
+                  {!parked && st === "claim_submitted" ? (
+                    <WarrantyMore>
                       <button
                         type="button"
                         className="btn secondary"
@@ -1668,9 +1991,13 @@ export function WarrantiesPage() {
                         type="button"
                         className="btn secondary"
                         disabled={busy}
-                        onClick={() => void setStatus(w.id, "approved")}
+                        onClick={() =>
+                          void setStatus(w.id, "approved", {
+                            needs_vendor_return: true,
+                          })
+                        }
                       >
-                        Approved
+                        Approved — return part
                       </button>
                       <button
                         type="button"
@@ -1680,39 +2007,62 @@ export function WarrantiesPage() {
                       >
                         Rejected
                       </button>
-                    </>
-                  )}
-                  {!parked && (st === "return_to_vendor" || st === "delivered") && (
-                    <>
-                      {st === "return_to_vendor" && (
+                      {voidDuplicate}
+                    </WarrantyMore>
+                  ) : null}
+                  {!parked && (st === "return_to_vendor" || st === "delivered") ? (
+                    <WarrantyMore>
+                      {solar && st === "return_to_vendor" ? (
                         <button
                           type="button"
                           className="btn secondary"
                           disabled={busy}
-                          onClick={() => void setStatus(w.id, "delivered")}
+                          onClick={() => {
+                            if (needsSignature(w)) setHandoffFor({ id: w.id, action: "delivered" });
+                            else void setStatus(w.id, "delivered", { needs_vendor_return: false });
+                          }}
                         >
-                          Delivered
+                          {needsSignature(w) ? "Delivered - get signature" : "Delivered"}
                         </button>
-                      )}
-                      {solar ? (
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={busy}
-                          onClick={() => void solarInvoiceDeleted(w)}
-                        >
-                          Solar received return — invoice deleted
-                        </button>
-                      ) : (
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={busy}
+                        onClick={() => void parkClaim(w)}
+                      >
+                        Park (stage in WH)
+                      </button>
+                      {!solar ? (
                         <>
                           <button
                             type="button"
                             className="btn secondary"
                             disabled={busy}
-                            onClick={() => void setStatus(w.id, "approved")}
+                            onClick={() =>
+                              void setStatus(w.id, "claim_submitted", {
+                                needs_vendor_return: false,
+                              })
+                            }
                           >
-                            Approved
+                            Taken care of / Hold
                           </button>
+                          {st === "return_to_vendor" ? (
+                            <button
+                              type="button"
+                              className="btn secondary"
+                              disabled={busy}
+                              onClick={() => {
+                                if (needsSignature(w)) setHandoffFor({ id: w.id, action: "approved_returned" });
+                                else
+                                  void setStatus(w.id, "approved", {
+                                    needs_vendor_return: true,
+                                  });
+                              }}
+                            >
+                              {needsSignature(w) ? "Approved (returned) - get signature" : "Approved (returned)"}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className="btn secondary"
@@ -1722,22 +2072,82 @@ export function WarrantiesPage() {
                             Rejected
                           </button>
                         </>
-                      )}
-                    </>
-                  )}
-                  {canScrapComplete ? (
-                    <button
-                      type="button"
-                      className="btn ghost warranty-not-warranty-btn"
-                      disabled={busy}
-                      title="Complete after Approved with credit (not Solar / not returns)"
-                      onClick={() => void markNotWarranty(w)}
-                    >
-                      Complete / scrap
-                    </button>
+                      ) : null}
+                      {can(user, "recordVendorHandoff") && boxAction === "RETURN" ? (
+                        <button
+                          type="button"
+                          className="btn secondary btn-sm"
+                          disabled={busy}
+                          onClick={() => setHandoffFor({ id: w.id, action: "record_only" })}
+                        >
+                          Vendor hand-off
+                        </button>
+                      ) : null}
+                      {voidDuplicate}
+                    </WarrantyMore>
                   ) : null}
+                  {!parked &&
+                  st !== "dropped_off" &&
+                  st !== "claim_submitted" &&
+                  st !== "return_to_vendor" &&
+                  st !== "delivered" &&
+                  canScrapComplete &&
+                  can(user, "recordVendorHandoff") &&
+                  boxAction === "RETURN" ? (
+                    <WarrantyMore>
+                      <button
+                        type="button"
+                        className="btn ghost warranty-not-warranty-btn"
+                        disabled={busy}
+                        title="Complete after Approved with credit (not Solar / not returns)"
+                        onClick={() => void markNotWarranty(w)}
+                      >
+                        Complete / scrap
+                      </button>
+                      {voidDuplicate}
+                    </WarrantyMore>
+                  ) : null}
+                  {!statusMore ? <WarrantyMore>{voidDuplicate}</WarrantyMore> : null}
                 </div>
               )}
+              {handoffFor?.id === w.id ? (
+                <WarrantyHandoffSheet
+                  card={w}
+                  action={handoffFor.action}
+                  handoffType="counter_dropoff"
+                  supersedes={handoffFor.supersedes}
+                  runAction={async () => {
+                    if (handoffFor.action === "record_only") return;
+                    const extra =
+                      handoffFor.action === "solar_invoice_deleted"
+                        ? { solar_invoice_deleted: true }
+                        : handoffFor.action === "approved_returned"
+                          ? { status: "approved", needs_vendor_return: true }
+                          : { status: "delivered", needs_vendor_return: false };
+                    await api(`/warranties/${w.id}`, { method: "PATCH", body: JSON.stringify(patchBody(w, extra)) });
+                  }}
+                  onAdminSkip={
+                    user?.role === "admin" && handoffFor.action !== "record_only"
+                      ? async (reason) => {
+                          const extra =
+                            handoffFor.action === "solar_invoice_deleted"
+                              ? { solar_invoice_deleted: true, handoff_override_reason: reason }
+                              : handoffFor.action === "approved_returned"
+                                ? { status: "approved", needs_vendor_return: true, handoff_override_reason: reason }
+                                : { status: "delivered", needs_vendor_return: false, handoff_override_reason: reason };
+                          await api(`/warranties/${w.id}`, { method: "PATCH", body: JSON.stringify(patchBody(w, extra)) });
+                          setHandoffFor(null);
+                          await load();
+                        }
+                      : undefined
+                  }
+                  onDone={() => {
+                    setHandoffFor(null);
+                    void load();
+                  }}
+                  onCancel={() => setHandoffFor(null)}
+                />
+              ) : null}
             </LogItem>
           );
         }
@@ -1783,7 +2193,7 @@ export function WarrantiesPage() {
             })}
           </p>
           <p className="warranty-processed-print-warn">
-            SAVE = not filed. HOLD = submitted, waiting credit. RETURN = send back. TOSS =
+            SAVE = not filed. HOLD = submitted, waiting credit. RETURN = send back. DISPOSE =
             approved, box can go.
           </p>
         </header>
@@ -1821,10 +2231,79 @@ export function WarrantiesPage() {
           </table>
         )}
         <p className="warranty-processed-print-legend">
-          Sorted by log # · File + Hold + Return + up to 10 newest Closed · Never TOSS File / HOLD /
-          Parked / Return / Johnstone / Solar
+          Sorted by log # · File + Hold + Return + up to 10 newest Closed · Never DISPOSE File /
+          HOLD / Parked / Return / Johnstone / Solar
         </p>
       </div>
+    </div>
+  );
+}
+
+function HandoffProof({
+  id,
+  logNumber,
+  canCopy,
+  canCorrect,
+  onOpen,
+  onCorrect,
+}: {
+  id: number;
+  logNumber: string;
+  canCopy: boolean;
+  canCorrect: boolean;
+  onOpen: (src: string, label: string) => void;
+  onCorrect: (proofId: number) => void;
+}) {
+  const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
+  useEffect(() => {
+    api<{ handoffs: Array<Record<string, unknown>> }>(`/handoffs?source_type=warranty&source_id=${id}`)
+      .then((d) => setRows(d.handoffs || []))
+      .catch(() => setRows([]));
+  }, [id]);
+  if (!rows.length) return null;
+  return (
+    <div className="vho-strip">
+      {rows.map((row) => {
+        const proofId = Number(row.id);
+        return (
+          <div key={proofId}>
+            <strong>Proof of hand-off #{proofId}</strong>
+            {row.superseded_by_id ? <div className="vho-meta">Superseded by #{String(row.superseded_by_id)}</div> : null}
+            <button type="button" className="vho-sig-thumb" onClick={() => onOpen(String(row.signature_url || ""), "Signature")}>
+              <img src={String(row.signature_url || "")} alt="Signature" />
+            </button>
+            <button type="button" onClick={() => onOpen(String(row.photo_url || ""), "Part at the counter")}>
+              <img src={String(row.photo_url || "")} alt="Part at the counter" />
+            </button>
+            <div className="vho-meta">
+              {String(row.vendor_name || "")}
+              {row.vendor_branch ? ` / ${String(row.vendor_branch)}` : ""}
+              {` · Signed by ${String(row.rep_name || "")}`}
+              {` · Handed off by ${String(row.handed_by_name || "")}`}
+              {` · ${String(row.recorded_at_ct || fmtCt(String(row.recorded_at || "")))}`}
+              {row.sent_offline ? ` · phone ${String(row.client_captured_at_ct || "")}` : ""}
+              {row.gps_status === "ok" ? " · location shared" : " · not shared"}
+            </div>
+            <button type="button" className="btn secondary btn-sm" onClick={() => openReceipt(proofId)}>
+              Print receipt
+            </button>
+            {canCorrect ? (
+              <button type="button" className="btn secondary btn-sm" onClick={() => onCorrect(proofId)}>
+                Correct
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+      {canCopy ? (
+        <button
+          type="button"
+          className="btn ghost btn-sm"
+          onClick={() => void navigator.clipboard.writeText(`${window.location.origin}/warranties?q=${encodeURIComponent(logNumber)}&handoff=1`)}
+        >
+          Copy hand-off link
+        </button>
+      ) : null}
     </div>
   );
 }

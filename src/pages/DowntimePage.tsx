@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 
 interface Downtime {
@@ -51,7 +52,7 @@ export function DowntimePage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Trucks down</h1>
+          <h1>Out of service</h1>
           <p>Accountability for units out of service — duration, reason, and ownership</p>
         </div>
         <button className="btn secondary no-print" type="button" onClick={() => window.print()}>
@@ -89,7 +90,9 @@ export function DowntimePage() {
               {summary.map((s) => (
                 <tr key={s.vehicle_id}>
                   <td>
-                    <strong>{s.unit_number}</strong>
+                    <Link to={`/issues?vehicle=${s.vehicle_id}`}>
+                      <strong>{s.unit_number}</strong>
+                    </Link>
                   </td>
                   <td>
                     {s.currently_down ? (
@@ -125,7 +128,11 @@ export function DowntimePage() {
             <tbody>
               {events.map((e) => (
                 <tr key={e.id}>
-                  <td>{e.unit_number}</td>
+                  <td>
+                    <Link to={e.issue_id ? `/fleet-shop?wo=${e.issue_id}` : `/issues?vehicle=${e.vehicle_id}`}>
+                      {e.unit_number}
+                    </Link>
+                  </td>
                   <td>
                     {e.issue_title || e.reason || "—"}
                     {e.notes && <div className="muted">{e.notes}</div>}

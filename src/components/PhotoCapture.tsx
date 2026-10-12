@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import { PaperAlign } from "./PaperAlign";
 
 /**
  * Mobile-friendly photo picker with explicit actions.
@@ -23,6 +24,8 @@ export function PhotoCapture({
   onClear,
   disabled,
   compact,
+  alignPaper,
+  sheetOnly,
 }: {
   onPick: (file: File | null) => void;
   required?: boolean;
@@ -35,14 +38,38 @@ export function PhotoCapture({
   disabled?: boolean;
   /** Inline small upload (secondary style — not the red primary CTA) */
   compact?: boolean;
+  /** Straighten invoices, packing slips, and receipts before the photo is saved. */
+  alignPaper?: boolean;
+  /** Invoices and packing slips use a standard sheet. Receipts may be a long strip. */
+  sheetOnly?: boolean;
 }) {
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
+  const [alignFile, setAlignFile] = useState<File | null>(null);
 
   function handle(files: FileList | null) {
     const f = files?.[0] || null;
+    if (alignPaper && f) {
+      setAlignFile(f);
+      return;
+    }
+    setAlignFile(null);
     onPick(f);
   }
+
+  function clearPhoto() {
+    setAlignFile(null);
+    onClear?.();
+  }
+
+  const aligner = alignPaper && alignFile ? (
+    <PaperAlign
+      file={alignFile}
+      sheetOnly={sheetOnly}
+      onApply={(f) => onPick(f)}
+      onKeepOriginal={(f) => onPick(f)}
+    />
+  ) : null;
 
   const inputs = (
     <>
@@ -99,7 +126,7 @@ export function PhotoCapture({
               type="button"
               className="btn ghost btn-sm"
               disabled={disabled}
-              onClick={onClear}
+              onClick={clearPhoto}
               title="Remove photo"
             >
               ✕
@@ -107,7 +134,8 @@ export function PhotoCapture({
           ) : null}
         </div>
         {inputs}
-        {previewUrl ? (
+        {aligner}
+        {previewUrl && !aligner ? (
           <div className="photo-capture-preview photo-capture-preview-compact">
             <img src={previewUrl} alt="Selected preview" />
           </div>
@@ -148,13 +176,14 @@ export function PhotoCapture({
           Choose from gallery
         </button>
         {previewUrl && onClear ? (
-          <button type="button" className="btn ghost" disabled={disabled} onClick={onClear}>
+          <button type="button" className="btn ghost" disabled={disabled} onClick={clearPhoto}>
             Remove
           </button>
         ) : null}
       </div>
       {inputs}
-      {previewUrl ? (
+      {aligner}
+      {previewUrl && !aligner ? (
         <div className="photo-capture-preview">
           <img src={previewUrl} alt="Selected preview" />
         </div>

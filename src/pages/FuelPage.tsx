@@ -5,8 +5,10 @@ import { useAuth } from "../auth";
 import { CollapsibleSection, LogItem, LogList } from "../components/CollapsibleLog";
 import { PhotoCapture, PHOTO_TIPS } from "../components/PhotoCapture";
 import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
+import { repairFuelEntryTextFields } from "../lib/utf8Mojibake";
 import {
   applyOcrLearning,
+  applyReceiptStore,
   clearOcrHintsCache,
   formatGallonsDisplay,
   loadOcrHints,
@@ -115,6 +117,7 @@ export function FuelPage() {
     total: number | null;
     alertCount: number;
     learned: number;
+    retake: boolean;
   } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [ocrNote, setOcrNote] = useState("");
@@ -128,12 +131,18 @@ export function FuelPage() {
   const [employeeId, setEmployeeId] = useState("");
   const [crewNote, setCrewNote] = useState("");
   const [vehicleId, setVehicleId] = useState("");
+  /** When FA has exactly one assigned unit, hide picker until "Change unit". */
+  const [forceShowVehiclePick, setForceShowVehiclePick] = useState(false);
   const [odometer, setOdometer] = useState("");
   const [gallons, setGallons] = useState("");
   const [totalCost, setTotalCost] = useState("");
   const [fuelDate, setFuelDate] = useState(new Date().toISOString().slice(0, 10));
   const [fuelTime, setFuelTime] = useState("");
   const [storeNumber, setStoreNumber] = useState("");
+  const [storeReview, setStoreReview] = useState<{ flag: boolean; reason: string | null }>({
+    flag: false,
+    reason: null,
+  });
   const [cardLast4, setCardLast4] = useState("");
   const [cardCheckNote, setCardCheckNote] = useState("");
   const [notes, setNotes] = useState("");
@@ -145,6 +154,16 @@ export function FuelPage() {
   const [odoExplain, setOdoExplain] = useState("");
 
   const isDriver = user?.role === "driver";
+
+  /** Prepaid slips rarely print gallons. Techs type what the pump showed. */
+  function prepayGallonsProblem(raw: string): string | null {
+    const s = raw.trim();
+    if (!s) return "Enter the gallons the pump showed.";
+    const n = Number(s);
+    if (!Number.isFinite(n) || n <= 0) return "Enter the gallons the pump showed.";
+    if (n > 50) return "Those gallons look too high for a van tank. Enter what the pump showed.";
+    return null;
+  }
 
   /** Obvious placeholder / junk odometer readings — not normal fleet miles */
   function isSuspiciousOdometer(raw: string): boolean {
@@ -249,7 +268,11 @@ export function FuelPage() {
       entries: FuelEntry[];
       totals: { gallons: number; total_cost: number; count: number };
     }>(`/fuel${q}`);
-    setEntries(fuel.entries || []);
+    setEntries(
+      (fuel.entries || []).map((e) =>
+        repairFuelEntryTextFields(e as unknown as Record<string, unknown>) as unknown as FuelEntry
+      )
+    );
     setTotals(fuel.totals || null);
   }
 
@@ -268,23 +291,40 @@ export function FuelPage() {
     await loadFuel(unitFilter);
     if (user?.employee_id) setEmployeeId(String(user.employee_id));
 
-    // Default to usual unit (first is_my_default / default_vehicle_ids)
+    // Default: FA assignment (is_my_default) > learned localStorage pick > first default id
     const defaults = new Set(
       (vehs.default_vehicle_ids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
     );
+    let learnedId: number | null = null;
+    try {
+      const raw = localStorage.getItem("fa_fuel_last_vehicle_id");
+      const n = raw ? Number(raw) : NaN;
+      if (Number.isFinite(n) && n > 0 && list.some((v) => v.id === n)) learnedId = n;
+    } catch {
+      /* ignore */
+    }
     const preferred =
       list.find((v) => v.is_my_default) ||
+      (learnedId != null ? list.find((v) => v.id === learnedId) : null) ||
       list.find((v) => defaults.has(v.id)) ||
       null;
     if (preferred) {
-      // Defer crew note until vehicles state is set — apply directly
       setVehicleId(String(preferred.id));
       const driverLabel = preferred.driver_name || preferred.assigned_driver;
-      if (preferred.is_my_default || defaults.has(preferred.id)) {
+      const assignedOnly = list.filter((v) => v.is_my_default);
+      if (assignedOnly.length === 1 && preferred.is_my_default) {
+        setCrewNote(
+          `Assigned unit ${preferred.unit_number}${driverLabel ? ` (${driverLabel})` : ""}. Tap Change unit only if you rode another van.`
+        );
+      } else if (preferred.is_my_default || defaults.has(preferred.id)) {
         setCrewNote(
           driverLabel
-            ? `Your usual unit ${preferred.unit_number}${driverLabel ? ` (${driverLabel})` : ""}. Change below if you rode with someone else today.`
+            ? `Your usual unit ${preferred.unit_number} (${driverLabel}). Change below if you rode with someone else today.`
             : `Your usual unit ${preferred.unit_number}. Change below if you rode another van today.`
+        );
+      } else if (learnedId === preferred.id) {
+        setCrewNote(
+          `Last used unit ${preferred.unit_number}. Change if this stop was a different van.`
         );
       }
     }
@@ -419,7 +459,15 @@ export function FuelPage() {
       src.fuel_time = "scan";
     } else src.fuel_time = "missing";
 
-    if (parsed.gallons != null) {
+    const rawSlip = parsed.raw_text || "";
+    const labeledGallons =
+      /\bGALLONS?\s*[:#]\s*\d/i.test(rawSlip) || /\d+\.\d{2,4}\s*G(?:AL)?\b/i.test(rawSlip);
+    // Prepaid slips often have dollars only. A guessed gallon number stays off the form.
+    const gallonsForForm = parsed.is_prepay && !labeledGallons ? null : parsed.gallons;
+    if (parsed.is_prepay && !labeledGallons) {
+      setGallons("");
+      src.gallons = "missing";
+    } else if (parsed.gallons != null) {
       // Keep pump thousandths: 16.290 not 16.29
       setGallons(formatGallonsDisplay(parsed.gallons));
       src.gallons = "scan";
@@ -430,16 +478,18 @@ export function FuelPage() {
       src.total_cost = "scan";
     } else src.total_cost = "missing";
 
-    // Never accept letter-only garbage (e.g. OCR of Store # **** → "KKK")
-    const storeOk =
-      parsed.store_number &&
-      /\d/.test(parsed.store_number) &&
-      !/^(.)\1{2,}$/i.test(parsed.store_number.trim()) &&
-      !/^[A-Za-z*#]+$/i.test(parsed.store_number.trim());
+    const storeOk = Boolean(parsed.store_number && /\d{3,}/.test(parsed.store_number));
     if (storeOk) {
       setStoreNumber(parsed.store_number!);
       src.store_number = "scan";
-    } else src.store_number = "missing";
+    } else {
+      setStoreNumber(""); // never keep a value from an earlier scan
+      src.store_number = "missing";
+    }
+    setStoreReview({
+      flag: Boolean(parsed.store_needs_review),
+      reason: parsed.store_review_reason || null,
+    });
 
     // Drivers have personal gas cards — verify receipt last-4 against their usual card
     src.card_last4 = applyCardVerification(parsed.card_last4, employeeId);
@@ -449,7 +499,7 @@ export function FuelPage() {
       raw_text: parsed.raw_text || "",
       fuel_date: parsed.fuel_date,
       fuel_time: parsed.fuel_time,
-      gallons: parsed.gallons,
+      gallons: gallonsForForm,
       total_cost: parsed.total_cost,
       store_number: storeOk ? parsed.store_number : null,
       card_last4: parsed.card_last4,
@@ -471,12 +521,12 @@ export function FuelPage() {
     if (storeOk && parsed.store_number) parts.push(`store ${parsed.store_number}`);
     if (parsed.card_last4) parts.push(`card ••${parsed.card_last4}`);
     else if (expectedCardFor(employeeId)) parts.push(`card ••${expectedCardFor(employeeId)} (expected)`);
-    if (parsed.gallons != null) parts.push(`${formatGallonsDisplay(parsed.gallons)} gal`);
+    if (gallonsForForm != null) parts.push(`${formatGallonsDisplay(gallonsForForm)} gal`);
     if (parsed.total_cost != null) parts.push(`$${Number(parsed.total_cost).toFixed(2)}`);
 
     let note = "";
     if (parsed.is_prepay) {
-      note = `Prepay / pre-auth receipt: ${parts.join(" · ") || "total only"}. Please note why (we prefer pump-then-pay). Then odometer & save.`;
+      note = `Prepaid receipt: ${parts.join(" · ") || "dollars only"}. Type the gallons the pump showed, and a short reason. Then enter the odometer and save.`;
     } else if (parts.length) {
       note = `Read: ${parts.join(" · ")}. Tap the photo to verify, then enter odometer and save.`;
     } else {
@@ -490,6 +540,9 @@ export function FuelPage() {
     } else if (parsed.card_last4 && expected && parsed.card_last4 === expected) {
       note += ` ✓ Card matches driver’s gas card.`;
     }
+    if (parsed.store_needs_review && parsed.store_review_reason) {
+      note += ` Store #: ${parsed.store_review_reason}. Leave it blank if it is not printed - the office will check it.`;
+    }
     setOcrNote(note);
   }
 
@@ -498,6 +551,7 @@ export function FuelPage() {
     setOcrNote("");
     setOcrSource({});
     setLastOcr(null);
+    setStoreReview({ flag: false, reason: null });
     setNeedsRetake(false);
     setIsPrepay(false);
     setPrepayReason("");
@@ -513,10 +567,12 @@ export function FuelPage() {
         loadOcrHints((path) => api<OcrHints>(path)).catch(() => null),
         ocrReceiptImage(f, null),
       ]);
-      const parsed =
-        hints != null
-          ? { ...applyOcrLearning(rawParsed, rawParsed.raw_text || "", hints), raw_text: rawParsed.raw_text }
-          : rawParsed;
+      const learned =
+        hints != null ? applyOcrLearning(rawParsed, rawParsed.raw_text || "", hints) : rawParsed;
+      const parsed = {
+        ...applyReceiptStore(learned, rawParsed.raw_text || "", hints),
+        raw_text: rawParsed.raw_text,
+      };
       applyParsed(parsed);
     } catch (e) {
       setLastOcr(null);
@@ -544,6 +600,7 @@ export function FuelPage() {
     setOcrNote("");
     setOcrSource({});
     setLastOcr(null);
+    setStoreReview({ flag: false, reason: null });
     setNeedsRetake(false);
     setIsPrepay(false);
     setPrepayReason("");
@@ -609,9 +666,16 @@ export function FuelPage() {
       setError("Enter the odometer reading — that’s the main thing we need from you.");
       return;
     }
-    if (isPrepay && prepayReason.trim().length < 3) {
-      setError("This looks like a prepaid receipt — briefly say why (we prefer not to prepay).");
-      return;
+    if (isPrepay) {
+      const galProblem = prepayGallonsProblem(gallons);
+      if (galProblem) {
+        setError(galProblem);
+        return;
+      }
+      if (prepayReason.trim().length < 3) {
+        setError("Prepaid receipt: briefly say why (we prefer pump first, then pay).");
+        return;
+      }
     }
     if (isSuspiciousOdometer(odometer) && odoExplain.trim().length < 3) {
       setError("That odometer doesn’t look real (e.g. 0 or 1234) — briefly explain.");
@@ -659,6 +723,9 @@ export function FuelPage() {
               card_last4: lastOcr.card_last4,
             },
             final: finalSnap,
+            store_needs_review: ocrSource.store_number === "manual" ? true : storeReview.flag,
+            store_review_reason:
+              ocrSource.store_number === "manual" ? "Store # typed by hand" : storeReview.reason,
           }
         : undefined;
 
@@ -709,6 +776,11 @@ export function FuelPage() {
         }
       }
 
+      try {
+        if (vehicleId) localStorage.setItem("fa_fuel_last_vehicle_id", String(vehicleId));
+      } catch {
+        /* ignore */
+      }
       setSuccess({
         unit: unitLabel,
         odometer: odoNum,
@@ -716,6 +788,7 @@ export function FuelPage() {
         total: totNum,
         alertCount: (res.alerts || []).length,
         learned,
+        retake: needsRetake,
       });
     } catch (err) {
       // Offline queue holds the failed step (photo or fuel save) until signal returns
@@ -735,7 +808,7 @@ export function FuelPage() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Fuel log</h1>
+          <h1>Log fuel</h1>
           <p>
             {canReviewReceipts ? (
               <>
@@ -802,6 +875,11 @@ export function FuelPage() {
                 </li>
               )}
             </ul>
+            {success.retake ? (
+              <p className="error" style={{ fontSize: "0.88rem", margin: "0 0 0.75rem" }}>
+                This photo needs a retake. Take a clearer picture of the receipt.
+              </p>
+            ) : null}
             {success.alertCount > 0 && (
               <p className="muted" style={{ fontSize: "0.88rem", margin: "0 0 0.75rem" }}>
                 Office was flagged on mileage — nothing else for you to do.
@@ -827,23 +905,51 @@ export function FuelPage() {
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2>New fuel stop</h2>
           <form className="form" onSubmit={onSubmit}>
-            {/* STEP 1 — plate or unit (usual vans still in dropdown) */}
+            {/* STEP 1 — FA assigned truck preferred; hide picker when single assignment */}
             <div>
               <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>1. Vehicle</p>
-              <VehicleQuickPick
-                value={vehicleId}
-                vehicles={vehicles}
-                onChange={(id) => applyVehicleCrew(id)}
-                required
-                label="License plate or unit #"
-                placeholder="Type plate to auto-fill unit…"
-              />
+              {usualVehicles.length === 1 && vehicleId === String(usualVehicles[0].id) && !forceShowVehiclePick ? (
+                <div className="fuel-assigned-unit">
+                  <strong>Unit {usualVehicles[0].unit_number}</strong>
+                  {(usualVehicles[0].driver_name || usualVehicles[0].assigned_driver) && (
+                    <span className="muted">
+                      {" "}
+                      · {usualVehicles[0].driver_name || usualVehicles[0].assigned_driver}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    style={{ marginLeft: "0.65rem" }}
+                    onClick={() => setForceShowVehiclePick(true)}
+                  >
+                    Change unit
+                  </button>
+                </div>
+              ) : (
+                <VehicleQuickPick
+                  value={vehicleId}
+                  vehicles={vehicles}
+                  onChange={(id) => {
+                    applyVehicleCrew(id);
+                    try {
+                      if (id) localStorage.setItem("fa_fuel_last_vehicle_id", String(id));
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  required
+                  label="License plate or unit #"
+                  placeholder="Type plate to auto-fill unit…"
+                  showDropdown={usualVehicles.length !== 1 || forceShowVehiclePick}
+                />
+              )}
             </div>
             {crewNote && <div className="info-banner">{crewNote}</div>}
-            {isDriver && (
+            {isDriver && usualVehicles.length !== 1 && (
               <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
-                Default is your usual van. Type a plate or pick another unit if you rode with someone
-                else.
+                Default is your Field App assigned van. Type a plate or pick another unit if you rode
+                with someone else.
               </p>
             )}
 
@@ -872,6 +978,7 @@ export function FuelPage() {
             <div style={{ marginTop: "0.5rem" }} className="receipt-drop">
               <PhotoCapture
                 required
+                alignPaper
                 label="2. Receipt photo"
                 hint={
                   scanning
@@ -1007,7 +1114,7 @@ export function FuelPage() {
                           setStoreNumber(e.target.value);
                           markManual("store_number");
                         }}
-                        placeholder="From receipt"
+                        placeholder="Blank if not printed on receipt"
                         className={ocrSource.store_number === "missing" ? "needs-manual" : undefined}
                       />
                     </label>
@@ -1134,8 +1241,26 @@ export function FuelPage() {
               >
                 <strong style={{ fontSize: "0.9rem" }}>Prepaid receipt</strong>
                 <p className="muted" style={{ margin: "0.25rem 0 0.4rem", fontSize: "0.85rem" }}>
-                  Prefer pump first, then pay. Prepay should be rare — short reason required.
+                  The slip usually shows dollars only. Type the gallons the pump showed, then a short reason.
                 </p>
+                <label style={{ margin: "0 0 0.55rem" }}>
+                  Gallons filled
+                  <input
+                    className={prepayGallonsProblem(gallons) ? "input-hero needs-manual" : "input-hero"}
+                    type="number"
+                    step="0.001"
+                    min="0.001"
+                    max="50"
+                    value={gallons}
+                    onChange={(e) => {
+                      setGallons(e.target.value);
+                      markManual("gallons");
+                    }}
+                    inputMode="decimal"
+                    placeholder="What the pump showed"
+                    required
+                  />
+                </label>
                 <label style={{ margin: 0 }}>
                   Why was this prepaid?
                   <input
@@ -1157,7 +1282,7 @@ export function FuelPage() {
                 !file ||
                 !vehicleId ||
                 !employeeId ||
-                (isPrepay && prepayReason.trim().length < 3) ||
+                (isPrepay && (Boolean(prepayGallonsProblem(gallons)) || prepayReason.trim().length < 3)) ||
                 (odoLooksFake && odoExplain.trim().length < 3)
               }
               type="submit"

@@ -20,6 +20,32 @@ interface PartsRun {
   employee_name?: string | null;
   delivered_by_name?: string | null;
   vehicle_unit?: string | null;
+  lines?: PartsRunLine[];
+  inventory_transferred?: number;
+}
+
+interface PartsRunLine {
+  id: number;
+  part_id: number | null;
+  part_code: string | null;
+  part_name: string;
+  qty: number;
+  transferred: number;
+  transfer_note: string | null;
+  warehouse_qty?: number | null;
+}
+
+interface PartHit {
+  id: number;
+  code: string;
+  name: string;
+  warehouse_qty?: number | null;
+}
+
+interface InventoryResult {
+  transferred: number;
+  blocked?: { part: string; have: number; need: number }[];
+  errors?: string[];
 }
 
 interface SummaryRow {
@@ -68,6 +94,130 @@ function formatWhen(iso: string | null | undefined): string {
   }
 }
 
+function PartsRunLines(props: {
+  run: PartsRun;
+  canEdit: boolean;
+  busy: boolean;
+  onAdd: (partId: number, qty: number) => void;
+  onRemove: (lineId: number) => void;
+}) {
+  const { run, canEdit, busy, onAdd, onRemove } = props;
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<PartHit[]>([]);
+  const [qty, setQty] = useState("1");
+  const [pick, setPick] = useState<PartHit | null>(null);
+
+  useEffect(() => {
+    const text = q.trim();
+    if (text.length < 2) {
+      setHits([]);
+      return;
+    }
+    let cancel = false;
+    const timer = window.setTimeout(() => {
+      void api<{ parts: PartHit[] }>(`/parts-runs/part-search?q=${encodeURIComponent(text)}`)
+        .then((d) => {
+          if (!cancel) setHits(d.parts || []);
+        })
+        .catch(() => {
+          if (!cancel) setHits([]);
+        });
+    }, 250);
+    return () => {
+      cancel = true;
+      window.clearTimeout(timer);
+    };
+  }, [q]);
+
+  const lines = run.lines || [];
+  return (
+    <div className="parts-run-lines">
+      {lines.length > 0 && (
+        <ul className="parts-run-line-list">
+          {lines.map((line) => (
+            <li key={line.id}>
+              <span>
+                {line.part_code ? `${line.part_code} ` : ""}
+                {line.part_name} × {line.qty}
+                {line.part_id != null && (
+                  <span className="muted"> Warehouse: {line.warehouse_qty ?? 0}</span>
+                )}
+                {line.transfer_note ? <span className="parts-run-line-note"> {line.transfer_note}</span> : null}
+              </span>
+              {canEdit && (
+                <button
+                  type="button"
+                  className="btn secondary btn-sm"
+                  disabled={busy}
+                  onClick={() => onRemove(line.id)}
+                >
+                  Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {canEdit && (
+        <div className="parts-run-line-add">
+          <input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPick(null);
+            }}
+            placeholder="Search the catalog"
+            aria-label="Search catalog parts"
+          />
+          <input
+            value={qty}
+            onChange={(e) => setQty(e.target.value)}
+            inputMode="decimal"
+            aria-label="Quantity"
+            style={{ width: "4.5rem" }}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy || !pick}
+            onClick={() => {
+              const n = Number(qty);
+              if (!pick || !(n > 0) || n > 999) return;
+              onAdd(pick.id, n);
+              setQ("");
+              setPick(null);
+              setHits([]);
+              setQty("1");
+            }}
+          >
+            Add line
+          </button>
+          {hits.length > 0 && !pick && (
+            <ul className="parts-run-part-hits">
+              {hits.map((hit) => (
+                <li key={hit.id}>
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    onClick={() => {
+                      setPick(hit);
+                      setQ(`${hit.code} ${hit.name}`);
+                      setHits([]);
+                    }}
+                  >
+                    {hit.code} {hit.name}
+                    <span className="muted"> Warehouse: {hit.warehouse_qty ?? 0}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Warehouse delivery request — three simple fields:
  * what they need, why it wasn’t on the truck, delivery address.
@@ -81,7 +231,15 @@ export function PartsRunPage() {
     user?.role === "mechanic";
   const canReport = isDispatcher || user?.role === "viewer";
 
-  const [tab, setTab] = useState<"request" | "mine" | "open" | "report">("request");
+  const [tab, setTab] = useState<"request" | "mine" | "open" | "report">(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "open" || t === "mine" || t === "report" || t === "request") return t;
+    return "request";
+  });
+  const [tabPicked, setTabPicked] = useState(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    return t === "open" || t === "mine" || t === "report" || t === "request";
+  });
   const [mine, setMine] = useState<PartsRun[]>([]);
   const [open, setOpen] = useState<PartsRun[]>([]);
   const [summary, setSummary] = useState<SummaryRow[]>([]);
@@ -96,24 +254,31 @@ export function PartsRunPage() {
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
   const [actingId, setActingId] = useState<number | null>(null);
+  const [stockMovesOn, setStockMovesOn] = useState(false);
+  const [deliverFor, setDeliverFor] = useState<number | null>(null);
+  const [skipMove, setSkipMove] = useState(false);
 
   const [partNeeded, setPartNeeded] = useState("");
   const [whyNotOnTruck, setWhyNotOnTruck] = useState("");
-  const [jobAddress, setJobAddress] = useState("");
+  const [jobAddress, setJobAddress] = useState(
+    () => new URLSearchParams(window.location.search).get("address") || ""
+  );
 
   const loadMine = useCallback(async () => {
     const d = await api<{
       requests: PartsRun[];
       stats: MyStats;
-    }>("/parts-runs?view=mine");
+    } & { stock_moves_enabled?: boolean }>("/parts-runs?view=mine");
     setMine(d.requests || []);
     if (d.stats) setStats(d.stats);
+    if (typeof d.stock_moves_enabled === "boolean") setStockMovesOn(d.stock_moves_enabled);
   }, []);
 
   const loadOpen = useCallback(async () => {
     if (!isDispatcher && user?.role !== "viewer") return;
-    const d = await api<{ requests: PartsRun[] }>("/parts-runs?view=open");
+    const d = await api<{ requests: PartsRun[]; stock_moves_enabled?: boolean }>("/parts-runs?view=open");
     setOpen(d.requests || []);
+    if (typeof d.stock_moves_enabled === "boolean") setStockMovesOn(d.stock_moves_enabled);
   }, [isDispatcher, user?.role]);
 
   const loadReport = useCallback(async () => {
@@ -126,28 +291,32 @@ export function PartsRunPage() {
     setReportLog(d.requests || []);
   }, [canReport]);
 
+  const canSeeOpen = isDispatcher || user?.role === "viewer";
+
   const refresh = useCallback(async () => {
     setError("");
     try {
       await loadMine();
-      if (tab === "open") await loadOpen();
+      if (canSeeOpen) await loadOpen();
       if (tab === "report") await loadReport();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load");
     }
-  }, [loadMine, loadOpen, loadReport, tab]);
+  }, [loadMine, loadOpen, loadReport, tab, canSeeOpen]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
-    const q = new URLSearchParams(window.location.search);
-    const t = q.get("tab");
-    if (t === "open" || t === "mine" || t === "report" || t === "request") {
-      setTab(t);
-    }
-  }, []);
+    if (tabPicked || !canSeeOpen) return;
+    if (open.length > 0) setTab("open");
+  }, [open.length, tabPicked, canSeeOpen]);
+
+  function chooseTab(next: "request" | "mine" | "open" | "report") {
+    setTabPicked(true);
+    setTab(next);
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -184,19 +353,37 @@ export function PartsRunPage() {
     }
   }
 
-  async function setStatus(id: number, status: RunStatus) {
+  function inventorySentence(inv: InventoryResult | null | undefined, fallback: string): string {
+    if (!inv) return fallback;
+    const blocked = inv.blocked || [];
+    const bits = [`Moved ${inv.transferred}.`];
+    if (blocked.length) {
+      const b = blocked[0];
+      bits.push(
+        `Short: ${blocked.length} (warehouse shows ${b.have}, needs ${b.need}). Fix the count, then Retry move.`
+      );
+    }
+    if (inv.errors && inv.errors.length) bits.push(inv.errors[0]);
+    return bits.join(" ");
+  }
+
+  async function setStatus(id: number, status: RunStatus, transfer = false) {
     setActingId(id);
     setError("");
     try {
-      await api(`/parts-runs/${id}/status`, {
+      const res = await api<{ inventory?: InventoryResult | null }>(`/parts-runs/${id}/status`, {
         method: "POST",
-        body: JSON.stringify({ status, transfer_inventory: false }),
+        body: JSON.stringify({
+          status,
+          transfer_inventory: status === "delivered" ? transfer : false,
+        }),
       });
+      setDeliverFor(null);
       setOk(
         status === "en_route"
           ? "Marked on the way."
           : status === "delivered"
-            ? "Marked delivered."
+            ? inventorySentence(res.inventory, "Marked delivered.")
             : status === "cancelled"
               ? "Cancelled."
               : "Updated."
@@ -209,7 +396,56 @@ export function PartsRunPage() {
     }
   }
 
+  async function retryMove(id: number) {
+    setActingId(id);
+    setError("");
+    try {
+      const res = await api<{ inventory?: InventoryResult }>(`/parts-runs/${id}/retry-move`, {
+        method: "POST",
+        body: "{}",
+      });
+      setOk(inventorySentence(res.inventory, "Retry finished."));
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Retry failed");
+    } finally {
+      setActingId(null);
+    }
+  }
+
+  async function addLine(runId: number, partId: number, qty: number) {
+    setActingId(runId);
+    setError("");
+    try {
+      await api(`/parts-runs/${runId}/lines`, {
+        method: "POST",
+        body: JSON.stringify({ part_id: partId, qty }),
+      });
+      setOk("Line added.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add the line");
+    } finally {
+      setActingId(null);
+    }
+  }
+
+  async function removeLine(runId: number, lineId: number) {
+    setActingId(runId);
+    setError("");
+    try {
+      await api(`/parts-runs/${runId}/lines/${lineId}`, { method: "DELETE" });
+      setOk("Line removed.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not remove the line");
+    } finally {
+      setActingId(null);
+    }
+  }
+
   function renderCard(r: PartsRun, opts?: { showEmployee?: boolean }) {
+    const unmoved = (r.lines || []).filter((line) => line.part_id && !line.transferred).length;
     return (
       <article key={r.id} className={`card parts-run-card st-${statusClass(r.status)}`}>
         <div className="parts-run-card-head">
@@ -236,6 +472,16 @@ export function PartsRunPage() {
             {r.delivered_at ? ` · ${formatWhen(r.delivered_at)}` : ""}
           </p>
         )}
+        <PartsRunLines
+          run={r}
+          canEdit={
+            (r.status === "requested" || r.status === "en_route") &&
+            (isDispatcher || user?.id === r.user_id)
+          }
+          busy={actingId === r.id}
+          onAdd={(partId, qty) => void addLine(r.id, partId, qty)}
+          onRemove={(lineId) => void removeLine(r.id, lineId)}
+        />
         {(r.status === "requested" || r.status === "en_route") && (
           <div className="toolbar" style={{ marginTop: "0.5rem" }}>
             {opts?.showEmployee && isDispatcher && r.status === "requested" && (
@@ -255,7 +501,14 @@ export function PartsRunPage() {
                   type="button"
                   className="btn secondary btn-sm"
                   disabled={actingId === r.id}
-                  onClick={() => void setStatus(r.id, "delivered")}
+                  onClick={() => {
+                    if (stockMovesOn && unmoved > 0) {
+                      setSkipMove(false);
+                      setDeliverFor(r.id);
+                    } else {
+                      void setStatus(r.id, "delivered", false);
+                    }
+                  }}
                 >
                   Delivered
                 </button>
@@ -274,6 +527,50 @@ export function PartsRunPage() {
             </button>
           </div>
         )}
+        {deliverFor === r.id && (
+          <div className="parts-run-deliver-confirm">
+            <p>
+              Moves {unmoved} {unmoved === 1 ? "part" : "parts"} from Warehouse
+              {r.vehicle_unit ? ` to Unit ${r.vehicle_unit}` : ""}. Counts update in the Field App only
+              (not ServiceTitan).
+            </p>
+            <label>
+              <input
+                type="checkbox"
+                checked={skipMove}
+                onChange={(e) => setSkipMove(e.target.checked)}
+              />{" "}
+              Don't move stock this time
+            </label>
+            <div className="toolbar">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={actingId === r.id}
+                onClick={() => void setStatus(r.id, "delivered", !skipMove)}
+              >
+                Confirm delivered
+              </button>
+              <button type="button" className="btn secondary btn-sm" onClick={() => setDeliverFor(null)}>
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+        {isDispatcher &&
+          r.status === "delivered" &&
+          (r.lines || []).some((line) => line.part_id && !line.transferred) && (
+            <div className="toolbar" style={{ marginTop: "0.5rem" }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={actingId === r.id}
+                onClick={() => void retryMove(r.id)}
+              >
+                Retry move
+              </button>
+            </div>
+          )}
       </article>
     );
   }
@@ -282,7 +579,7 @@ export function PartsRunPage() {
     <div className="page parts-run-page">
       <div className="page-header">
         <div>
-          <h1>Warehouse delivery request</h1>
+          <h1>Deliver to job</h1>
           <p>
             Need the warehouse to bring something out to a job? Tell us what you need, why it
             wasn’t on the truck, and the address.
@@ -318,14 +615,14 @@ export function PartsRunPage() {
         <button
           type="button"
           className={`chip ${tab === "request" ? "active" : ""}`}
-          onClick={() => setTab("request")}
+          onClick={() => chooseTab("request")}
         >
           New request
         </button>
         <button
           type="button"
           className={`chip ${tab === "mine" ? "active" : ""}`}
-          onClick={() => setTab("mine")}
+          onClick={() => chooseTab("mine")}
         >
           My log
         </button>
@@ -333,16 +630,16 @@ export function PartsRunPage() {
           <button
             type="button"
             className={`chip ${tab === "open" ? "active" : ""}`}
-            onClick={() => setTab("open")}
+            onClick={() => chooseTab("open")}
           >
-            Open runs{open.length ? ` (${open.length})` : ""}
+            Open runs ({open.length})
           </button>
         )}
         {canReport && (
           <button
             type="button"
             className={`chip ${tab === "report" ? "active" : ""}`}
-            onClick={() => setTab("report")}
+            onClick={() => chooseTab("report")}
           >
             Team log
           </button>

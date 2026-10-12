@@ -151,7 +151,7 @@ export function RolesPage() {
             checks, handbook.
           </li>
           <li>
-            Switch to <strong>Office</strong> — home becomes office map/repairs style; inventory view.
+            Switch to <strong>{roleLabel("office")}</strong> — home becomes office map/repairs style; inventory view.
           </li>
           <li>
             Switch to <strong>Mechanic</strong> — repairs/shop, service, yard.

@@ -57,7 +57,7 @@ export const HANDBOOK_SECTIONS: HandbookSection[] = [
     id: "2",
     title: "Employment Policies",
     summary: "Classifications, EEO, confidentiality, relatives, and workplace rules.",
-    topicIds: ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12"],
+    topicIds: ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"],
   },
   {
     id: "3",
@@ -240,6 +240,19 @@ export const HANDBOOK_TOPICS: HandbookTopic[] = [
     ],
   },
   {
+    id: "2.13",
+    sectionId: "2",
+    title: "Company Software, Apps & Work Product",
+    summary: "Anything built for Total Assurance using company tools, time, or accounts belongs to the Company.",
+    keywords: ["software", "app", "field app", "work product", "copyright", "ownership", "intellectual property", "IP"],
+    body: [
+      "During employment (and when using Company systems, accounts, devices, or paid tools such as Company cloud hosting, Company email, Company phones, or Company AI/coding subscriptions), employees may create or improve software, apps, websites, automations, prompts, templates, designs, documentation, videos, and other digital work for Total Assurance A/C & Heating (the Company).",
+      "All such work product is the exclusive property of the Company, including the Field App / FuelTracker and related shop tools, whether finished or in progress. Employees assign to the Company all rights, title, and interest in that work product (including copyright and related intellectual property) to the fullest extent allowed by law. Employees will not sell, license, copy for another business, open-source, or commercially use Company software or work product without written permission from Company ownership (Eric Gonzalez / Total Assurance).",
+      "Confidential Information (Section 2.3) includes Company source code, app credentials, customer data inside Company systems, pricing, and proprietary shop processes. The Internet, Email, and Computer Use Policy (Section 4.8) still applies: Company systems are for Company business, not personal commercial gain.",
+      "This policy does not change at-will employment. Questions about ownership go to management / ownership.",
+    ],
+  },
+  {
     id: "3.1",
     sectionId: "3",
     title: "Pay Periods and Paydays",
@@ -340,7 +353,7 @@ export const HANDBOOK_TOPICS: HandbookTopic[] = [
     title: "Dress Code",
     summary: "What to wear at work and on the job.",
     body: [
-      "Employees must wear clean, professional attire appropriate for their role. Field technicians and service personnel are required to wear Company uniforms and appropriate personal protective equipment (PPE), including safety boots. Office staff should wear business casual attire. Grooming must be hygienic and professional; visible offensive tattoos must be covered. Violations will result in being sent home unpaid to correct the issue; repeated violations will lead to disciplinary action.",
+      "Employees must wear clean, professional attire appropriate for their role. Field technicians and service personnel are required to wear Company uniforms and appropriate personal protective equipment (PPE), including safety boots. Office staff should wear business casual attire. Grooming must be hygienic and professional. Violations will result in being sent home unpaid to correct the issue; repeated violations will lead to disciplinary action.",
     ],
   },
   {
@@ -369,7 +382,7 @@ export const HANDBOOK_TOPICS: HandbookTopic[] = [
     title: "Workplace Searches",
     summary: "When the company may search workplace property.",
     body: [
-      "The Company reserves the right to search Company property, including desks, lockers, vehicles, and electronic devices, at any time for safety, security, or policy compliance reasons. Refusal to consent to a reasonable search will result in termination.",
+      "The Company reserves the right to search Company property, including desks, lockers, Company vehicles, and Company-issued electronic devices, at any time for safety, security, or policy compliance reasons. Refusal to consent to a reasonable search of Company property will result in termination. Personal phones and other personal electronic devices that are not Company-issued are not Company property. The Company does not search personal phones or personal devices. Any access to personal devices requires the employee’s clear voluntary consent or a lawful process (such as a warrant). This policy does not create an expectation that personal phones will be inspected as a condition of employment.",
     ],
   },
   {
@@ -388,7 +401,7 @@ export const HANDBOOK_TOPICS: HandbookTopic[] = [
     summary: "Cell phone use on the job.",
     keywords: ["phone", "cell", "mobile", "texting"],
     body: [
-      "Limited personal use of cell phones is permitted during breaks or non-working time, provided it does not disrupt operations or customer service. Cell phone use while operating a Company vehicle or while driving on Company business is strictly prohibited (hands-free only where legally permitted and safe). Violations will result in a warning for the first offense and may lead to termination for repeated or serious violations.",
+      "Limited personal use of cell phones is permitted during breaks or non-working time, provided it does not disrupt operations or customer service. Cell phone use while operating a Company vehicle or while driving on Company business is strictly prohibited (hands-free only where legally permitted and safe). Personal cell phones remain the employee’s personal property — the Company does not search personal phones; see Workplace Searches. Violations will result in a warning for the first offense and may lead to termination for repeated or serious violations.",
     ],
   },
   {

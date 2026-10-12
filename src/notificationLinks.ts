@@ -13,6 +13,21 @@ export function notificationLink(n: {
   const entity = String(n.entity_type || "").toLowerCase();
   const text = `${n.title || ""} ${n.body || ""}`.toLowerCase();
 
+  if (kind === "left_on_job" || entity === "left_on_job") {
+    const id = String(n.entity_id || "").trim();
+    return id ? `/clock?appt=${encodeURIComponent(id)}&step=complete` : "/clock";
+  }
+
+  if (kind === "part_delivery" || entity === "part_delivery") {
+    const id = String(n.entity_id || "").trim();
+    return id ? `/deliveries?id=${encodeURIComponent(id)}` : "/deliveries";
+  }
+
+  if (kind === "onsite_clock" || entity === "onsite_clock") {
+    const id = String(n.entity_id || "").trim();
+    return id ? `/clock?appt=${encodeURIComponent(id)}` : "/clock";
+  }
+
   // Messaging UI removed — old chat alerts just open the inbox
   if (
     kind === "message" ||
@@ -64,6 +79,25 @@ export function notificationLink(n: {
       return "/tool-loans?tab=approvals";
     }
     return "/tool-loans";
+  }
+  if (kind === "azali_rnc_estimate" || entity === "new_construction") {
+    return "/new-construction";
+  }
+  if (kind.startsWith("part_finder") || entity === "part_finder_request") {
+    return "/part-in-stock?tab=repair";
+  }
+  if (kind === "truck_restock_filled" || text.includes("restock is on your truck")) {
+    return "/clock";
+  }
+  if (
+    kind === "truck_restock_confirmed" ||
+    text.includes("confirmed the bin") ||
+    text.includes("confirmed restock")
+  ) {
+    return "/live-inventory";
+  }
+  if (kind === "parts_arrival" || entity === "parts_arrival" || text.includes("unmatched arrival") || text.includes("no open request")) {
+    return "/parts-orders";
   }
   if (
     kind === "parts_order_request" ||

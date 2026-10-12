@@ -1,10 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, can, canOpenStudio, roleLabel } from "../api";
+import { api, can, roleLabel } from "../api";
 import { useAuth } from "../auth";
+import { ClockinNudgeCard } from "../components/ClockinNudgeCard";
+import { NewHireSafetyCard } from "../components/NewHireSafetyCard";
+import { ResponsibilityHomeCard } from "../components/ResponsibilityHomeCard";
 import { MyShortcuts } from "../components/MyShortcuts";
-import { StudioDoor } from "../components/StudioDoor";
 import { OfficeHome } from "./OfficeHome";
+import { PullTomorrowHome } from "./TomorrowMaterialsPage";
+import { isAzaliMiller } from "../lib/azaliRnc";
 
 interface Dash {
   stats: {
@@ -27,6 +31,11 @@ interface Dash {
     assets_attention?: number;
     handbook_pending?: number;
     emergencies?: number;
+    /** Registration sticker: expired + due ≤30d + missing date */
+    registration_attention?: number;
+    registration_expired?: number;
+    registration_due_soon?: number;
+    registration_missing?: number;
   };
   tracking_issues?: Array<{
     code: string;
@@ -41,6 +50,11 @@ interface Dash {
       unit_number: string;
       assigned_driver: string | null;
       last_check_date: string | null;
+    }>;
+    registration?: Array<{
+      id: number;
+      unit_number: string;
+      registration_expires: string;
     }>;
     repairs: Array<{
       id: number;
@@ -157,12 +171,15 @@ function FocusGrid({
   items,
   title,
   subtitle,
+  calm = false,
 }: {
   items: FocusItem[];
   title: string;
   subtitle?: string;
+  /** Admin calm mode — no HOT badge / fake urgency chrome */
+  calm?: boolean;
 }) {
-  // Hot items (warn/bad) first so they catch the eye
+  // Real waiting work first (non-zero warn/bad), then the rest
   const sorted = [...items].sort((a, b) => {
     const rank = (t: Tone) => (t === "bad" ? 0 : t === "warn" ? 1 : t === "info" ? 2 : 3);
     const d = rank(a.tone) - rank(b.tone);
@@ -171,59 +188,72 @@ function FocusGrid({
     const bv = typeof b.value === "number" ? b.value : 0;
     return bv - av || b.weight - a.weight;
   });
-  const hot = sorted.filter((i) => i.tone === "bad" || i.tone === "warn");
+  const waiting = sorted.filter(
+    (i) => typeof i.value === "number" && i.value > 0 && (i.tone === "bad" || i.tone === "warn")
+  );
 
   return (
-    <section className="home-section" aria-label={title}>
+    <section className={`home-section${calm ? " home-focus-calm" : ""}`} aria-label={title}>
       <div className="home-section-head home-focus-head">
         <div className="home-focus-head-text">
           <h2 style={{ margin: 0 }}>{title}</h2>
           {subtitle ? (
             <div className="home-focus-sub-block">
               <p className="muted home-focus-sub">{subtitle}</p>
-              {hot.length > 0 ? (
-                <p className="home-focus-inline-hot">
-                  <strong>{hot.length}</strong> need a look
-                </p>
-              ) : (
-                <p className="home-focus-inline-clear">all clear</p>
-              )}
+              {!calm ? (
+                waiting.length > 0 ? (
+                  <p className="home-focus-inline-hot">
+                    <strong>{waiting.length}</strong> waiting
+                  </p>
+                ) : (
+                  <p className="home-focus-inline-clear">all clear</p>
+                )
+              ) : null}
             </div>
           ) : null}
         </div>
-        {hot.length > 0 ? (
-          <div
-            className="home-focus-count"
-            title={`${hot.length} areas need attention — sorted to the top`}
-          >
-            <span className="home-focus-count-n">{hot.length}</span>
-            <span className="home-focus-count-label">hot</span>
-          </div>
-        ) : (
-          <div className="home-focus-count is-clear" title="Nothing urgent on this board">
+        {!calm ? (
+          waiting.length > 0 ? (
+            <div
+              className="home-focus-count"
+              title={`${waiting.length} real queues with work waiting`}
+            >
+              <span className="home-focus-count-n">{waiting.length}</span>
+              <span className="home-focus-count-label">waiting</span>
+            </div>
+          ) : (
+            <div className="home-focus-count is-clear" title="Nothing waiting">
+              <span className="home-focus-count-label">OK</span>
+            </div>
+          )
+        ) : waiting.length === 0 ? (
+          <div className="home-focus-count is-clear" title="Nothing waiting">
             <span className="home-focus-count-label">OK</span>
           </div>
-        )}
+        ) : null}
       </div>
-      {/* Hot + rest share the same left-digit button layout (compact) */}
       <div className="home-actions status-tiles focus-all-grid">
-        {sorted.map((t) => (
-          <Link
-            key={t.key}
-            to={t.to}
-            className={`home-action status-tile tone-${t.tone}${
-              t.tone === "bad" || t.tone === "warn" ? " is-hot" : ""
-            }`}
-          >
-            <span className="home-action-icon status-tile-icon" aria-hidden>
-              {t.value}
-            </span>
-            <span className="home-action-text">
-              <strong>{t.label}</strong>
-              <span>{t.hint}</span>
-            </span>
-          </Link>
-        ))}
+        {sorted.map((t) => {
+          const isWaiting =
+            typeof t.value === "number" && t.value > 0 && (t.tone === "bad" || t.tone === "warn");
+          return (
+            <Link
+              key={t.key}
+              to={t.to}
+              className={`home-action status-tile tone-${t.tone}${
+                isWaiting && !calm ? " is-hot" : ""
+              }${calm && !isWaiting ? " is-quiet" : ""}`}
+            >
+              <span className="home-action-icon status-tile-icon" aria-hidden>
+                {t.value}
+              </span>
+              <span className="home-action-text">
+                <strong>{t.label}</strong>
+                <span>{t.hint}</span>
+              </span>
+            </Link>
+          );
+        })}
       </div>
     </section>
   );
@@ -265,17 +295,18 @@ export function DashboardPage() {
   const role = user?.role || "viewer";
   const isDriver = role === "driver";
   const isOffice = role === "office";
+  const isSupervisor = role === "supervisor";
   const isWarehouse = role === "warehouse";
   const isAdmin = role === "admin";
   const isMechanic = role === "mechanic";
   const isViewer = role === "viewer";
   /** Same home / command-center UI as admin */
   const isAdminShell = isAdmin || isViewer;
+  const isOfficeHome = isOffice || isSupervisor;
 
   const [data, setData] = useState<Dash | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [handbookPending, setHandbookPending] = useState(false);
 
   /** quiet = background refresh (no full-page spinner) */
   function load(opts?: { quiet?: boolean }) {
@@ -302,16 +333,11 @@ export function DashboardPage() {
         if (watchdog) window.clearTimeout(watchdog);
         setLoading(false);
       });
-    api<{ pending?: boolean }>("/handbook")
-      .then((h) => setHandbookPending(!!h.pending))
-      .catch(() => {
-        /* ignore */
-      });
   }
 
   // Auto-refresh when opened, then every 45s while visible (not on every focus spam)
   useEffect(() => {
-    if (isOffice) return;
+    if (isOfficeHome) return;
     load();
     const id = window.setInterval(() => {
       if (document.visibilityState === "visible") load({ quiet: true });
@@ -327,8 +353,8 @@ export function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role]);
 
-  // Office keeps its own focused home
-  if (isOffice) {
+  // Office and supervisor share the same focused home
+  if (isOfficeHome) {
     return <OfficeHome />;
   }
 
@@ -382,6 +408,8 @@ export function DashboardPage() {
 
   const stats = data?.stats;
   const myWeekly = data?.my_reminders?.weekly_checks || [];
+  const myReg = data?.my_reminders?.registration || [];
+  const myAlerts = data?.recent_alerts || [];
   const myRepairs = data?.my_reminders?.repairs || [];
   const trackingList = data?.tracking_issues || [];
   const first = user?.display_name?.split(" ")[0] || "there";
@@ -402,101 +430,250 @@ export function DashboardPage() {
     stale_issues: stats?.open_issues_stale ?? 0,
     assets: stats?.assets_attention ?? 0,
     handbook: stats?.handbook_pending ?? 0,
+    reg_attention: stats?.registration_attention ?? 0,
+    reg_expired: stats?.registration_expired ?? 0,
+    reg_due: stats?.registration_due_soon ?? 0,
+    reg_missing: stats?.registration_missing ?? 0,
   };
 
+  // Real waiting work only — never sum fuel-alert noise / weekly spam / GPS / handbook into a fake total
   let attentionTotal = 0;
   if (isDriver) {
-    attentionTotal = myWeekly.length + myRepairs.length + (handbookPending ? 1 : 0);
+    attentionTotal = myWeekly.length + myRepairs.length + myReg.length + myAlerts.length;
   } else if (isWarehouse) {
-    attentionTotal =
-      s.pickups +
-      s.vendor_runs +
-      s.dropoffs +
-      s.warranties +
-      s.assets +
-      (handbookPending ? 1 : 0);
+    attentionTotal = s.pickups + s.vendor_runs + s.dropoffs + s.warranties;
   } else if (isMechanic) {
-    attentionTotal = s.emergencies + s.open_issues + s.weekly + s.tracking + s.stale_issues;
+    attentionTotal = s.emergencies + s.stale_issues + s.warranties;
   } else {
+    // Admin / viewer: warranties, fuel OCR queue, parts at shop / warehouse pulls (+ true emergencies)
     attentionTotal =
       s.emergencies +
-      s.open_issues +
-      s.open_alerts +
-      s.weekly +
-      s.expiring +
-      s.tracking +
+      s.reg_attention +
       s.warranties +
-      s.pickups +
-      s.vendor_runs +
-      s.dropoffs +
       s.fuel_ocr +
-      s.assets +
-      (s.handbook > 0 ? 1 : 0);
+      s.dropoffs +
+      s.pickups +
+      s.vendor_runs;
+  }
+
+  if (isDriver) {
+    const waiting = myWeekly.length + myRepairs.length + myReg.length + myAlerts.length;
+    return (
+      <div className="home home-clean home-role-driver">
+        <header className="home-hero">
+          <div>
+            <p className="home-kicker">Field</p>
+            <h1 className="home-title">Hi, {first}</h1>
+            <p className="home-sub">
+              {waiting === 0 ? "Your jobs are up top" : `${waiting} waiting on you`}
+            </p>
+          </div>
+        </header>
+
+        {error && (
+          <div className="error" style={{ marginBottom: "0.85rem" }}>
+            {error}
+            <div style={{ marginTop: "0.5rem" }}>
+              <button className="btn secondary" type="button" onClick={() => load()}>
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        <NewHireSafetyCard />
+        <ResponsibilityHomeCard />
+
+        <section className="home-section" aria-label="Today">
+          <div className="home-section-head">
+            <h2>Today</h2>
+          </div>
+          <div className="home-actions">
+            {can(user, "viewDayBoard") ? (
+              <Link className="home-action primary" to="/day-board">
+                <span className="home-action-icon" aria-hidden>
+                  JB
+                </span>
+                <span className="home-action-text">
+                  <strong>Today's jobs</strong>
+                  <span>Your jobs for today</span>
+                </span>
+              </Link>
+            ) : null}
+            {can(user, "useJobClock") ? (
+              <Link className="home-action primary" to="/clock">
+                <span className="home-action-icon" aria-hidden>
+                  CL
+                </span>
+                <span className="home-action-text">
+                  <strong>Clock in / out</strong>
+                  <span>En route, arrived, finished</span>
+                </span>
+              </Link>
+            ) : null}
+          </div>
+        </section>
+
+        {waiting > 0 ? (
+          <section className="home-section" aria-label="Waiting on you">
+            <div className="home-section-head">
+              <h2>Waiting on you</h2>
+            </div>
+            <div className="home-pills">
+              {myWeekly.map((v) => (
+                <Link key={`w-${v.id}`} className="home-pill warn" to="/inspections">
+                  <strong>Check unit {v.unit_number}</strong>
+                  <span>{v.last_check_date ? `Last ${v.last_check_date}` : "Never checked"}</span>
+                </Link>
+              ))}
+              {myReg.map((v) => {
+                const due = String(v.registration_expires || "").slice(0, 10);
+                const expired = due && due < new Date().toISOString().slice(0, 10);
+                return (
+                  <span key={`reg-${v.id}`} className="home-pill warn">
+                    <strong>
+                      {v.unit_number} sticker {expired ? "expired" : "due"}
+                    </strong>
+                    <span>{due || "Date missing"}</span>
+                  </span>
+                );
+              })}
+              {myAlerts.map((a) => (
+                <Link key={`a-${a.id}`} className="home-pill alert" to="/fuel">
+                  <strong>{a.unit_number} fuel</strong>
+                  <span>{a.message}</span>
+                </Link>
+              ))}
+              {myRepairs.map((r) => {
+                const needsConfirm =
+                  r.status === "scheduled" && r.tech_confirm_status !== "confirmed";
+                return (
+                  <Link
+                    key={`r-${r.id}`}
+                    className={`home-pill alert${needsConfirm ? " needs-confirm" : ""}`}
+                    to={`/issues?id=${r.id}`}
+                  >
+                    <strong>
+                      {r.status === "scheduled"
+                        ? needsConfirm
+                          ? `CONFIRM · BRING IN ${r.unit_number}`
+                          : `BRING IN ${r.unit_number}`
+                        : `${r.unit_number} · ${r.status}`}
+                    </strong>
+                    <span>
+                      {r.title}
+                      {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
+                      {needsConfirm
+                        ? " · tap to confirm"
+                        : r.tech_confirm_status === "confirmed"
+                          ? " · confirmed"
+                          : ""}
+                    </span>
+                  </Link>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="home-section" aria-label="When you need it">
+          <div className="home-section-head">
+            <h2>When you need it</h2>
+          </div>
+          <div className="home-actions">
+            <details className="home-part-door">
+              <summary className="home-action">
+                <span className="home-action-icon" aria-hidden>
+                  PT
+                </span>
+                <span className="home-action-text">
+                  <strong>I need a part</strong>
+                  <span>At a store, already at the shop, or bring it to the job</span>
+                </span>
+              </summary>
+              <div className="home-part-choices">
+                <Link to="/part-pickup">At a store</Link>
+                <Link to="/parts-dropoff">Already at the shop</Link>
+                <Link to="/parts-runs">Bring it to the job</Link>
+              </div>
+            </details>
+          </div>
+          <details className="home-more">
+            <summary>More</summary>
+            <div className="home-actions">
+              {can(user, "logFuel") ? (
+                <Link className="home-action" to="/fuel">
+                  <span className="home-action-icon" aria-hidden>
+                    FL
+                  </span>
+                  <span className="home-action-text">
+                    <strong>Log fuel</strong>
+                    <span>Photo the receipt</span>
+                  </span>
+                </Link>
+              ) : null}
+              {can(user, "logPartsPurchase") ? (
+                <Link className="home-action" to="/parts-receipts">
+                  <span className="home-action-icon" aria-hidden>
+                    BY
+                  </span>
+                  <span className="home-action-text">
+                    <strong>Purchase receipts</strong>
+                    <span>Parts and materials, not fuel</span>
+                  </span>
+                </Link>
+              ) : null}
+              <Link className="home-action" to="/warranties">
+                <span className="home-action-icon" aria-hidden>
+                  W
+                </span>
+                <span className="home-action-text">
+                  <strong>Warranty drop-off</strong>
+                  <span>Photo where you leave the part</span>
+                </span>
+              </Link>
+              {can(user, "reportTruckProblem") ? (
+                <Link className="home-action" to="/fleet-shop/report">
+                  <span className="home-action-icon" aria-hidden>
+                    RP
+                  </span>
+                  <span className="home-action-text">
+                    <strong>Truck problem</strong>
+                    <span>Flat tire, will not start, warning light</span>
+                  </span>
+                </Link>
+              ) : null}
+              <Link className="home-action" to="/responsibility">
+                <span className="home-action-icon" aria-hidden>
+                  CV
+                </span>
+                <span className="home-action-text">
+                  <strong>Card and vehicle forms</strong>
+                  <span>Sign for a company card or a company truck</span>
+                </span>
+              </Link>
+              {can(user, "viewDoneToday") ? (
+                <Link className="home-action" to="/done-today">
+                  <span className="home-action-icon" aria-hidden>
+                    DT
+                  </span>
+                  <span className="home-action-text">
+                    <strong>Done today</strong>
+                    <span>What the app already logged</span>
+                  </span>
+                </Link>
+              ) : null}
+            </div>
+          </details>
+        </section>
+
+        <MyShortcuts />
+      </div>
+    );
   }
 
   /** Role-specific focus tiles */
   const focusItems: FocusItem[] = (() => {
-    if (isDriver) {
-      return [
-        {
-          key: "weekly",
-          value: myWeekly.length || s.weekly,
-          label: "Weekly check due",
-          hint: myWeekly.length
-            ? myWeekly.map((v) => `Unit ${v.unit_number}`).join(", ")
-            : "Your unit this week",
-          to: "/inspections",
-          tone: toneForCount(myWeekly.length || s.weekly),
-          weight: 10,
-        },
-        {
-          key: "repairs",
-          value: myRepairs.length || s.open_issues,
-          label: "Your repairs",
-          hint: myRepairs.length ? "Work on your unit" : "None open",
-          to: "/issues",
-          tone: toneForCount(myRepairs.length),
-          weight: 9,
-        },
-        {
-          key: "vendor",
-          value: "→",
-          label: "Part pickup request",
-          hint: "Parts ready at a store? Tell warehouse where to get them",
-          to: "/part-pickup",
-          tone: "info",
-          weight: 7,
-        },
-        {
-          key: "dropoff",
-          value: "→",
-          label: "Brought to shop",
-          hint: "Already dropped parts at the shop? Tell warehouse",
-          to: "/parts-dropoff",
-          tone: "info",
-          weight: 6,
-        },
-        {
-          key: "warranties",
-          value: "→",
-          label: "Warranty drop-off",
-          hint: "Photo where you leave parts",
-          to: "/warranties",
-          tone: "info",
-          weight: 5,
-        },
-        {
-          key: "gear",
-          value: "→",
-          label: "My truck gear",
-          hint: "Bottles & equipment",
-          to: "/assets",
-          tone: "info",
-          weight: 4,
-        },
-      ];
-    }
-
     if (isWarehouse) {
       return [
         {
@@ -534,24 +711,6 @@ export function DashboardPage() {
           to: "/warranties",
           tone: toneForCount(s.warranties, 1, 5),
           weight: 9,
-        },
-        {
-          key: "assets",
-          value: s.assets,
-          label: "Equipment needs attention",
-          hint: "Damaged / repair / missing",
-          to: "/assets",
-          tone: toneForCount(s.assets, 1, 2),
-          weight: 8,
-        },
-        {
-          key: "bottles",
-          value: "→",
-          label: "Gas bottle counts",
-          hint: "O2 · N2 · acetylene swap",
-          to: "/assets",
-          tone: "info",
-          weight: 6,
         },
         {
           key: "inventory",
@@ -606,40 +765,15 @@ export function DashboardPage() {
           tone: toneForCount(s.stale_issues, 1, 2),
           weight: 8,
         },
-        {
-          key: "weekly",
-          value: s.weekly,
-          label: "Weekly checks due",
-          hint: "Units not checked in 7 days",
-          to: "/inspections",
-          tone: toneForCount(s.weekly, 1, 5),
-          weight: 7,
-        },
-        {
-          key: "tracking",
-          value: s.tracking,
-          label: "GPS / cam issues",
-          hint:
-            s.not_reporting > 0
-              ? `${s.not_reporting} not reporting live`
-              : "Trackers & dash cams",
-          to: "/live",
-          tone: toneForCount(s.tracking, 1, 2),
-          weight: 6,
-        },
-        {
-          key: "yard",
-          value: s.expiring,
-          label: "Compliance soon",
-          hint: "Reg / insurance",
-          to: "/yard",
-          tone: toneForCount(s.expiring, 1, 3),
-          weight: 5,
-        },
       ];
     }
 
-    // Admin + viewer bird's-eye (viewer tiles still link for read)
+    // Admin + viewer — real waiting queues only (no fuel-alert / weekly / GPS / handbook spam)
+    const regHintParts = [
+      s.reg_expired ? `${s.reg_expired} expired` : null,
+      s.reg_due ? `${s.reg_due} due ≤30d` : null,
+      s.reg_missing ? `${s.reg_missing} missing date` : null,
+    ].filter(Boolean);
     return [
       {
         key: "emergencies",
@@ -651,22 +785,15 @@ export function DashboardPage() {
         weight: 20,
       },
       {
-        key: "repairs",
-        value: s.open_issues,
-        label: "Open repairs",
-        hint: "Needs schedule first — then shop board",
-        to: "/issues",
-        tone: toneForCount(s.open_issues, 1, 5),
-        weight: 15,
-      },
-      {
-        key: "pickups",
-        value: s.pickups,
-        label: "Warehouse pickups",
-        hint: "Handoffs still open",
-        to: "/inventory",
-        tone: toneForCount(s.pickups, 1, 3),
-        weight: 14,
+        key: "registration",
+        value: s.reg_attention,
+        label: "Registration renewals",
+        hint: regHintParts.length
+          ? regHintParts.join(" · ")
+          : "Expired, due soon, or missing sticker date",
+        to: "/yard?filter=registration",
+        tone: toneForCount(s.reg_attention, 1, 3),
+        weight: 19,
       },
       {
         key: "warranties",
@@ -675,16 +802,16 @@ export function DashboardPage() {
         hint: "File pile — dropped off, not parked",
         to: "/warranties",
         tone: toneForCount(s.warranties, 1, 5),
-        weight: 13,
+        weight: 18,
       },
       {
         key: "fuel_ocr",
         value: s.fuel_ocr,
         label: "Fuel receipts to verify",
-        hint: "OCR uncertain — teach the app",
+        hint: "OCR queue — teach the app",
         to: "/fuel/receipt-review",
         tone: toneForCount(s.fuel_ocr, 1, 5),
-        weight: 13,
+        weight: 17,
       },
       {
         key: "dropoffs",
@@ -693,160 +820,124 @@ export function DashboardPage() {
         hint: "Drop-offs waiting for warehouse",
         to: "/parts-dropoff",
         tone: toneForCount(s.dropoffs, 1, 2),
-        weight: 12,
+        weight: 16,
       },
       {
-        key: "flags",
-        value: s.open_alerts,
-        label: "Fuel alerts",
-        hint: "Odd odometer / fuel patterns",
-        to: "/alerts",
-        tone: toneForCount(s.open_alerts, 1, 2),
-        weight: 11,
+        key: "pickups",
+        value: s.pickups,
+        label: "Warehouse handoffs",
+        hint: "Issue / pull waiting at the counter",
+        to: "/inventory",
+        tone: toneForCount(s.pickups, 1, 3),
+        weight: 15,
       },
       {
-        key: "tracking",
-        value: s.tracking,
-        label: "GPS / dash cam",
-        hint:
-          s.not_reporting > 0
-            ? `${s.not_reporting} not on map`
-            : (s.stale_or_offline ?? 0) > 0
-              ? `${s.stale_or_offline} stale / offline`
-              : "Open live map",
-        to: "/live",
-        tone: toneForCount(s.tracking, 1, 2),
-        weight: 11,
-      },
-      {
-        key: "weekly",
-        value: s.weekly,
-        label: "Weekly checks due",
-        hint: "No check in last 7 days",
-        to: "/inspections",
-        tone: toneForCount(s.weekly, 1, 5),
-        weight: 10,
-      },
-      {
-        key: "compliance",
-        value: s.expiring,
-        label: "Compliance soon",
-        hint: "Registration / insurance",
-        to: "/yard",
-        tone: toneForCount(s.expiring, 1, 3),
-        weight: 9,
-      },
-      {
-        key: "assets",
-        value: s.assets,
-        label: "Equipment attention",
-        hint: "Ladders / tools damaged or repair",
-        to: "/assets",
-        tone: toneForCount(s.assets, 1, 2),
-        weight: 8,
-      },
-      {
-        key: "handbook",
-        value: s.handbook,
-        label: "Employee handbook not signed",
-        hint: "Staff still need to acknowledge",
-        to: "/handbook",
-        tone: toneForCount(s.handbook, 1, 3),
-        weight: 7,
+        key: "vendor_runs",
+        value: s.vendor_runs,
+        label: "Vendor pickups waiting",
+        hint: "Parts still at supply houses",
+        to: "/part-pickup",
+        tone: toneForCount(s.vendor_runs, 1, 3),
+        weight: 14,
       },
     ];
   })();
 
+  const waitingFocus = focusItems.filter(
+    (i) => typeof i.value === "number" && i.value > 0 && (i.tone === "bad" || i.tone === "warn")
+  );
+  const focusShown = isAdminShell && waitingFocus.length > 0 ? waitingFocus : focusItems;
+
   const actions = (() => {
-    if (isDriver) {
-      return [
-        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Photo receipt · odometer", primary: true },
-        { to: "/inspections", icon: "✓", title: "Weekly check", hint: "OK or report issue" },
-        {
-          to: "/parts-runs",
-          icon: "🚚",
-          title: "Warehouse delivery request",
-          hint: "Need materials on site",
-        },
-        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
-        { to: "/warranties", icon: "📦", title: "Warranty drop-off", hint: "Photo shelf · write log # on box" },
-        { to: "/issues", icon: "🔧", title: "Report a problem", hint: "Something’s wrong on the truck" },
-        { to: "/assets", icon: "🧰", title: "My truck gear", hint: "Bottles & tools" },
-      ];
-    }
     if (isWarehouse) {
       return [
         {
           to: "/inventory",
-          icon: "📋",
+          icon: "ST",
           title: "Stock room",
-          hint: "Scan · custody · truck",
+          hint: "Scan - custody - truck",
           primary: true,
         },
         {
+          to: "/parts-orders#receiving",
+          icon: "RC",
+          title: "Receiving",
+          hint: "Dock a box - where it sits",
+        },
+        {
           to: "/parts-runs",
-          icon: "🚚",
-          title: "Warehouse delivery request",
+          icon: "DL",
+          title: "Deliver to job",
           hint: "Field needs a run",
         },
-        { to: "/live", icon: "🗺", title: "Live map", hint: "Find techs · units on the road" },
-        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · any unit" },
-        { to: "/assets", icon: "🧪", title: "Company assets", hint: "Bottles · ladders · tools" },
-        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
-        { to: "/warranties", icon: "📦", title: "Warranties", hint: "Process drop-offs" },
-        { to: "/part-pickup", icon: "🏪", title: "Part pickup request", hint: "Parts ready at a store" },
+        { to: "/live", icon: "MP", title: "Fleet map", hint: "Find techs - units on the road" },
+        { to: "/fuel", icon: "FL", title: "Log fuel", hint: "Receipt photo - any unit" },
+        { to: "/assets", icon: "GR", title: "Company assets", hint: "Bottles - ladders - tools" },
+        { to: "/parts-receipts", icon: "BY", title: "Purchase receipts", hint: "Company card - photo the receipt" },
+        { to: "/warranties", icon: "W", title: "Warranties", hint: "Process drop-offs" },
+        { to: "/part-pickup", icon: "PK", title: "Will-call", hint: "Parts ready at a store" },
       ];
     }
     if (isMechanic) {
       return [
-        { to: "/issues", icon: "🔧", title: "Shop board", hint: "Schedule · work · close", primary: true },
+        { to: "/issues", icon: "RP", title: "Repair board", hint: "Schedule - work - close", primary: true },
+        { to: "/service", icon: "OC", title: "Oil changes", hint: "Due by miles" },
+        { to: "/fleet-shop", icon: "FS", title: "Fleet Shop", hint: "Shop jobs and driver reports" },
         {
           to: "/parts-runs",
-          icon: "🚚",
-          title: "Warehouse delivery request",
+          icon: "DL",
+          title: "Deliver to job",
           hint: "Field needs a run",
         },
         {
           to: "/parts-orders",
-          icon: "🛒",
+          icon: "OR",
           title: "Order for shop",
-          hint: "AutoZone · First Call · track",
+          hint: "AutoZone - First Call - track",
         },
-        { to: "/fuel", icon: "⛽", title: "Fuel", hint: "Receipt photo · odometer" },
-        { to: "/parts-receipts", icon: "🧾", title: "Bought parts", hint: "Company card · photo the receipt" },
-        { to: "/yard", icon: "📋", title: "Yard", hint: "Stickers · cams · GPS" },
-        { to: "/vehicles", icon: "🚐", title: "Trucks", hint: "Fleet registry" },
-        { to: "/live", icon: "🗺", title: "Live map", hint: "Where units are" },
-        { to: "/inspections", icon: "✓", title: "Weekly check", hint: "Status board" },
+        { to: "/fuel", icon: "FL", title: "Log fuel", hint: "Receipt photo - odometer" },
+        { to: "/parts-receipts", icon: "BY", title: "Purchase receipts", hint: "Company card - photo the receipt" },
+        { to: "/yard", icon: "YD", title: "Fleet compliance", hint: "Stickers - cams - GPS" },
+        { to: "/vehicles", icon: "UN", title: "Fleet units", hint: "Fleet registry" },
+        { to: "/live", icon: "MP", title: "Fleet map", hint: "Where units are" },
+        { to: "/inspections", icon: "OK", title: "Weekly check", hint: "Status board" },
       ];
     }
     // Admin shell (admin + viewer) — same hub; viewer is read-only via API/UI gates
     if (isAdminShell) {
       return [
-        { to: "/issues", icon: "🔧", title: "Shop board", hint: "Repairs + schedule", primary: true },
+        { to: "/issues", icon: "RP", title: "Repair board", hint: "Repairs + schedule", primary: true },
         {
           to: "/parts-orders",
-          icon: "🛒",
+          icon: "OR",
           title: "Order for shop",
-          hint: "AutoZone · First Call · track",
+          hint: "AutoZone - First Call - track",
         },
-        { to: "/inventory", icon: "📦", title: "Stock room", hint: "Stock · pickup · stage" },
-        { to: "/warranties", icon: "🧾", title: "Warranties", hint: "Drop-offs to process" },
-        { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet on the road" },
-        { to: "/assets", icon: "🧰", title: "Company assets", hint: "Bottles · ladders · tools" },
-        { to: "/alerts", icon: "🚩", title: "Fuel alerts", hint: "Mileage / fuel oddities" },
-        { to: "/yard", icon: "📋", title: "Yard", hint: "Compliance walk" },
-        { to: "/tv", icon: "📺", title: "TV board", hint: "Office wall display" },
+        { to: "/inventory", icon: "ST", title: "Stock room", hint: "Stock - pickup - stage" },
+        { to: "/warranties", icon: "W", title: "Warranties", hint: "Drop-offs to process" },
+        { to: "/live", icon: "MP", title: "Fleet map", hint: "Fleet on the road" },
+        { to: "/fuel/receipt-review", icon: "VF", title: "Verify fuel", hint: "Receipt photo queue" },
+        { to: "/assets", icon: "GR", title: "Company assets", hint: "Bottles - ladders - tools" },
+        { to: "/yard", icon: "YD", title: "Fleet compliance", hint: "Compliance walk" },
+        { to: "/tv", icon: "TV", title: "TV board", hint: "Office wall display" },
         ...(isAdmin
-          ? [{ to: "/roles", icon: "👁", title: "Preview roles", hint: "See staff screens" }]
+          ? [{ to: "/roles", icon: "PR", title: "Preview roles", hint: "See staff screens" }]
           : []),
-        { to: "/admin", icon: "👥", title: "People", hint: "Logins · roster" },
-        { to: "/audit", icon: "📜", title: "Change history", hint: "Who changed what" },
+        { to: "/admin", icon: "EM", title: "Employees", hint: "Logins - roster" },
+        { to: "/audit", icon: "CH", title: "Change history", hint: "Who changed what" },
       ];
     }
+    // Office / supervisor — Live map lives in nav; don't duplicate as primary Home card
     return [
-      { to: "/live", icon: "🗺", title: "Live map", hint: "Fleet locations", primary: true },
-      { to: "/reports", icon: "📈", title: "Reports", hint: "Browse numbers" },
+      { to: "/day-board", icon: "JB", title: "Today's jobs", hint: "Watch the day", primary: true },
+      {
+        to: "/ops-performance?period=7",
+        icon: "WK",
+        title: "Shop scoreboard",
+        hint: "Jobs, sales, comebacks, recalls",
+      },
+      { to: "/reports", icon: "EX", title: "Fuel and fleet exports", hint: "Browse numbers" },
+      { to: "/admin", icon: "EM", title: "Employees", hint: "Logins - roster" },
     ];
   })();
 
@@ -858,36 +949,19 @@ export function DashboardPage() {
       ? "Warehouse"
       : isMechanic
         ? "Shop"
-        : isDriver
-          ? "Field"
-          : roleLabel(role);
+        : roleLabel(role);
 
-  const subtitle = isAdmin
+  const subtitle = isAdminShell
     ? attentionTotal === 0
-      ? "Everything looks clear — scan below anytime"
-      : `${attentionTotal} items need your attention across fleet, shop & warehouse`
+      ? "Nothing waiting — Live map and shortcuts below"
+      : `${attentionTotal} real queue${attentionTotal === 1 ? "" : "s"} waiting`
     : isWarehouse
       ? attentionTotal === 0
         ? "Counter is clear"
         : `${attentionTotal} open at the counter / stock`
-      : isDriver
-        ? attentionTotal === 0
-          ? "You’re caught up"
-          : `${attentionTotal} for you today`
-        : attentionTotal === 0
-          ? "All clear"
-          : `${attentionTotal} need attention`;
-
-  const handbookBanner = handbookPending ? (
-    <div className="handbook-pending-banner" role="status">
-      <span>
-        <strong>Employee handbook</strong> — please read and acknowledge.
-      </span>
-      <Link className="btn" to="/handbook">
-        Open handbook
-      </Link>
-    </div>
-  ) : null;
+      : attentionTotal === 0
+        ? "All clear"
+        : `${attentionTotal} waiting`;
 
   return (
     <div className={`home home-clean home-role-${role}`}>
@@ -910,235 +984,126 @@ export function DashboardPage() {
         </div>
       )}
 
-      {handbookBanner}
-
-      <MyShortcuts />
-
-      {canOpenStudio(user) ? (
-        <div className="home-actions studio-door-row" style={{ marginBottom: "0.75rem" }}>
-          <StudioDoor variant="home" />
-        </div>
-      ) : null}
+      <NewHireSafetyCard />
+      <ResponsibilityHomeCard />
 
       {/* Role-specific at-a-glance board */}
       <FocusGrid
-        items={focusItems}
+        items={focusShown}
+        calm={isAdminShell}
         title={
-          isAdmin
-            ? "Needs attention"
+          isAdminShell
+            ? "Waiting counts"
             : isWarehouse
               ? "Warehouse at a glance"
-              : isDriver
-                ? "Field at a glance"
-                : isMechanic
-                  ? "Shop at a glance"
-                  : "At a glance"
+              : isMechanic
+                ? "Shop at a glance"
+                : "At a glance"
         }
         subtitle={
-          isAdmin
-            ? "Hot items first — fleet, shop, warehouse, compliance"
+          isAdminShell
+            ? waitingFocus.length > 0
+              ? "Only the queues that have something waiting"
+              : "Nothing in these queues"
             : isWarehouse
               ? "Vendors, shop drop-offs, warranties, bottles"
-              : isDriver
-                ? "Checks, repairs, parts & truck gear"
-                : isMechanic
-                  ? "Urgent jobs, shop board, yard & tracking"
-                  : "Status that matters for your role"
+              : isMechanic
+                ? "Urgent jobs, repair board, compliance & tracking"
+                : "Status that matters for your role"
         }
       />
 
-      {/* Field daily checklist — always visible for techs */}
-      {isDriver && (
-        <section className="home-section home-checklist" aria-label="Today’s checklist">
-          <div className="home-section-head">
-            <h2>Today’s checklist</h2>
+      {isAdmin ? <ClockinNudgeCard /> : null}
+
+      {can(user, "viewDoneToday") ? <DoneTodayHomeCard /> : null}
+
+      {(isWarehouse || isAdminShell) ? (
+        <section className="home-section" aria-label="Pull for tomorrow">
+          <div className="office-actions">
+            <PullTomorrowHome />
           </div>
-          <ul className="home-check-list">
-            <li>
-              <Link to="/day-board">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Day board</strong>
-                  <span className="muted">Your jobs for today · pick any day</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/clock">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Job clock</strong>
-                  <span className="muted">
-                    Dispatch → Arrive → Complete (saved on phone — ST sync coming)
-                  </span>
-                </span>
-              </Link>
-            </li>
-            <li className={myWeekly.length ? "is-todo" : "is-done"}>
-              <Link to="/inspections">
-                <span className="home-check-mark" aria-hidden>
-                  {myWeekly.length ? "○" : "✓"}
-                </span>
-                <span>
-                  <strong>Weekly vehicle check</strong>
-                  <span className="muted">
-                    {myWeekly.length
-                      ? `Your van: ${myWeekly.map((v) => `Unit ${v.unit_number}`).join(" · ")} — tap All good or Needs repair`
-                      : "Done for your units"}
-                  </span>
-                </span>
-              </Link>
-            </li>
-            <li className={myRepairs.length ? "is-todo" : "is-done"}>
-              <Link to="/issues">
-                <span className="home-check-mark" aria-hidden>
-                  {myRepairs.length ? "○" : "✓"}
-                </span>
-                <span>
-                  <strong>
-                    {myRepairs.some(
-                      (r) =>
-                        r.status === "scheduled" && r.tech_confirm_status !== "confirmed"
-                    )
-                      ? "Confirm shop appointment"
-                      : myRepairs.some((r) => r.status === "scheduled")
-                        ? "Bring unit to shop (scheduled)"
-                        : "Open repairs on your units"}
-                  </strong>
-                  <span className="muted">
-                    {myRepairs.length
-                      ? myRepairs
-                          .map((r) => {
-                            if (r.status === "scheduled" && r.scheduled_date) {
-                              const conf =
-                                r.tech_confirm_status === "confirmed"
-                                  ? "confirmed"
-                                  : r.tech_confirm_status === "declined"
-                                    ? "declined"
-                                    : "needs confirm";
-                              return `Unit ${r.unit_number} · ${r.scheduled_date} · ${conf}`;
-                            }
-                            return `Unit ${r.unit_number} · ${r.status}`;
-                          })
-                          .join(" · ")
-                      : "None waiting on you"}
-                  </span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/fuel">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Log fuel when you fill up</strong>
-                  <span className="muted">Photo receipt · odometer</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/warranties">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Warranty drop-off</strong>
-                  <span className="muted">Photo shelf · write log # on box</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/part-pickup">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Part pickup request</strong>
-                  <span className="muted">Parts ready at a store? Tell warehouse where to get them</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/parts-dropoff">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Brought to shop</strong>
-                  <span className="muted">Already dropped parts at the shop? Tell warehouse</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/time-off">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Time off request</strong>
-                  <span className="muted">Manager approves in the app</span>
-                </span>
-              </Link>
-            </li>
-            <li>
-              <Link to="/tool-loans">
-                <span className="home-check-mark" aria-hidden>
-                  ○
-                </span>
-                <span>
-                  <strong>Tool loan request</strong>
-                  <span className="muted">Company tools · office approves</span>
-                </span>
-              </Link>
-            </li>
-          </ul>
-          {(myWeekly.length > 0 || myRepairs.length > 0) && (
-            <div className="home-pills" style={{ marginTop: "0.65rem" }}>
-              {myWeekly.map((v) => (
-                <Link key={`w-${v.id}`} className="home-pill warn" to="/inspections">
-                  <strong>Check unit {v.unit_number}</strong>
-                  <span>{v.last_check_date ? `Last ${v.last_check_date}` : "Never checked"}</span>
-                </Link>
-              ))}
-              {myRepairs.map((r) => {
-                const needsConfirm =
-                  r.status === "scheduled" &&
-                  r.tech_confirm_status !== "confirmed";
-                return (
-                  <Link
-                    key={`r-${r.id}`}
-                    className={`home-pill alert${needsConfirm ? " needs-confirm" : ""}`}
-                    to={`/issues?id=${r.id}`}
-                  >
-                    <strong>
-                      {r.status === "scheduled"
-                        ? needsConfirm
-                          ? `CONFIRM · BRING IN ${r.unit_number}`
-                          : `BRING IN ${r.unit_number}`
-                        : `${r.unit_number} · ${r.status}`}
-                    </strong>
-                    <span>
-                      {r.title}
-                      {r.scheduled_date ? ` · ${r.scheduled_date}` : ""}
-                      {needsConfirm ? " · tap to confirm" : r.tech_confirm_status === "confirmed" ? " · confirmed" : ""}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-          )}
         </section>
-      )}
+      ) : null}
+
+      <MyShortcuts />
+
+      {!isAdminShell && isAzaliMiller(user) ? (
+        <section className="home-section" aria-label="New construction">
+          <div className="office-actions">
+            <Link to="/new-construction" className="office-action">
+              <span>
+                <strong>New Azali house</strong>
+                <span className="office-action-hint">RNC location and project</span>
+              </span>
+            </Link>
+          </div>
+        </section>
+      ) : null}
+
+      {isAdminShell ? (
+        <section className="home-section home-launch-pad" aria-label="Daily doors">
+          <div className="home-section-head">
+            <h2>Daily doors</h2>
+          </div>
+          <div className="office-actions">
+            <Link to="/day-board" className="office-action primary">
+              <span>
+                <strong>Today's jobs</strong>
+                <span className="office-action-hint">Watch the day</span>
+              </span>
+            </Link>
+            <Link to="/install-book" className="office-action">
+              <span>
+                <strong>Book install</strong>
+                <span className="office-action-hint">Miller / Install + NC</span>
+              </span>
+            </Link>
+            <Link to="/live" className="office-action">
+              <span>
+                <strong>Fleet map</strong>
+                <span className="office-action-hint">Find a tech</span>
+              </span>
+            </Link>
+            <Link to="/part-pickup" className="office-action">
+              <span>
+                <strong>Will-call</strong>
+                <span className="office-action-hint">Parts at the store</span>
+              </span>
+            </Link>
+            <Link to="/issues" className="office-action">
+              <span>
+                <strong>Repair board</strong>
+                <span className="office-action-hint">Shop repairs</span>
+              </span>
+            </Link>
+            <Link to="/time-off" className="office-action">
+              <span>
+                <strong>Time off</strong>
+                <span className="office-action-hint">Approvals</span>
+              </span>
+            </Link>
+            {isAzaliMiller(user) ? (
+              <Link to="/new-construction" className="office-action">
+                <span>
+                  <strong>New Azali house</strong>
+                  <span className="office-action-hint">RNC location and project</span>
+                </span>
+              </Link>
+            ) : null}
+            <Link to="/part-in-stock" className="office-action">
+              <span>
+                <strong>Part in stock</strong>
+                <span className="office-action-hint">Search the catalog</span>
+              </span>
+            </Link>
+          </div>
+        </section>
+      ) : null}
 
       <ActionRow items={actions} />
 
-      {/* Admin / shop: tracking — collapsed by default for a cleaner home */}
-      {!isDriver && !isWarehouse && trackingList.length > 0 && (
+      {/* Mechanic only: tracking (parked off Admin Home — not daily attention spam) */}
+      {isMechanic && trackingList.length > 0 && (
         <CollapsibleHomeSection
           id="tracking"
           title="Tracking issues"
@@ -1162,64 +1127,51 @@ export function DashboardPage() {
         </CollapsibleHomeSection>
       )}
 
-      {/* Recent fuel + mileage flags — each collapsible */}
-      {data && (isAdminShell || isMechanic) && (
-        <>
-          <CollapsibleHomeSection
-            id="recent_fuel"
-            title="Recent activity"
-            count={data.recent_fuel.length || undefined}
-            link={can(user, "logFuel") ? { to: "/fuel", label: "Log →" } : undefined}
-            defaultOpen={false}
-          >
-            <div className="card home-activity-card">
-              {!data.recent_fuel.length ? (
-                <p className="muted empty-tight">No fuel entries yet.</p>
-              ) : (
-                <ul className="home-feed">
-                  {data.recent_fuel.slice(0, 6).map((f) => (
-                    <li key={f.id}>
-                      <span className="home-feed-main">
-                        <strong>{f.unit_number}</strong> · {f.employee_name}
-                      </span>
-                      <span className="home-feed-meta">
-                        {f.fuel_date}
-                        {f.total_cost != null ? ` · $${Number(f.total_cost).toFixed(0)}` : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </CollapsibleHomeSection>
-
-          <CollapsibleHomeSection
-            id="mileage_flags"
-            title="Mileage flags"
-            count={data.recent_alerts.length || undefined}
-            link={{ to: "/alerts", label: "All →" }}
-            defaultOpen={false}
-          >
-            <div className="card home-activity-card">
-              {!data.recent_alerts.length ? (
-                <p className="muted empty-tight">None open.</p>
-              ) : (
-                <ul className="home-feed">
-                  {data.recent_alerts.slice(0, 6).map((a) => (
-                    <li key={a.id}>
-                      <span className="home-feed-main">
-                        <span className={`badge ${a.severity}`}>{a.severity}</span>{" "}
-                        <strong>{a.unit_number}</strong>
-                      </span>
-                      <span className="home-feed-meta home-feed-msg">{a.message}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </CollapsibleHomeSection>
-        </>
+      {/* Recent fuel — collapsed; mileage flags parked off Admin Home */}
+      {data && isMechanic && (
+        <CollapsibleHomeSection
+          id="recent_fuel"
+          title="Recent activity"
+          count={data.recent_fuel.length || undefined}
+          link={can(user, "logFuel") ? { to: "/fuel", label: "Log →" } : undefined}
+          defaultOpen={false}
+        >
+          <div className="card home-activity-card">
+            {!data.recent_fuel.length ? (
+              <p className="muted empty-tight">No fuel entries yet.</p>
+            ) : (
+              <ul className="home-feed">
+                {data.recent_fuel.slice(0, 6).map((f) => (
+                  <li key={f.id}>
+                    <span className="home-feed-main">
+                      <strong>{f.unit_number}</strong> · {f.employee_name}
+                    </span>
+                    <span className="home-feed-meta">
+                      {f.fuel_date}
+                      {f.total_cost != null ? ` · $${Number(f.total_cost).toFixed(0)}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </CollapsibleHomeSection>
       )}
     </div>
+  );
+}
+
+function DoneTodayHomeCard() {
+  const [n, setN] = useState<number | null>(null);
+  useEffect(() => {
+    api<{ items?: unknown[] }>("/done-today")
+      .then((d) => setN((d.items || []).length))
+      .catch(() => setN(null));
+  }, []);
+  return (
+    <Link className="fs-card" to="/done-today">
+      <strong>Done today{n == null ? "" : ` (${n})`}</strong>
+      <div className="muted">Filled in automatically from what you did in the app.</div>
+    </Link>
   );
 }

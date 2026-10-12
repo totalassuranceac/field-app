@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { notificationLink } from "../notificationLinks";
 import { notificationsReturnState, setNavReturn } from "../navReturn";
+import { repairUtf8Mojibake } from "../lib/utf8Mojibake";
 
 type Panel = "closed" | "open";
 
@@ -45,18 +46,26 @@ function InboxIcon() {
  */
 export function NotificationBell() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [open, setOpen] = useState<Panel>("closed");
   const [notifUnread, setNotifUnread] = useState(0);
   const [warrantyOpen, setWarrantyOpen] = useState(0);
   const [preview, setPreview] = useState<PreviewNote[]>([]);
+  const [bellError, setBellError] = useState(false);
+  const [bellLoading, setBellLoading] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
+    setBellLoading(true);
+    setBellError(false);
     try {
       const [n, w] = await Promise.all([
-        api<{ unread: number; notifications: PreviewNote[] }>("/notifications"),
+        api<{ unread: number; notifications: PreviewNote[] }>("/notifications", {
+          timeoutMs: 8_000,
+        }),
         api<{ file_count?: number; attention_count?: number; open_count?: number }>(
-          "/warranties?status=file"
+          "/warranties?status=file",
+          { timeoutMs: 8_000 }
         ).catch(
           (): { file_count: number; attention_count: number } => ({
             file_count: 0,
@@ -65,9 +74,9 @@ export function NotificationBell() {
         ),
       ]);
       setNotifUnread(n.unread || 0);
-      // File pile only (dropped_off − parked) — not Hold / all-open
+      // File pile only (dropped_off - parked) - not Hold / all-open
       setWarrantyOpen(w.file_count ?? w.attention_count ?? 0);
-      // Hide legacy chat alerts — messaging UI was removed
+      // Hide legacy chat alerts - messaging UI was removed
       setPreview(
         (n.notifications || [])
           .filter((x) => {
@@ -77,7 +86,10 @@ export function NotificationBell() {
           .slice(0, 12)
       );
     } catch {
-      /* ignore poll errors */
+      setBellError(true);
+      /* calm empty - no endless spinner */
+    } finally {
+      setBellLoading(false);
     }
   }, []);
 
@@ -91,6 +103,46 @@ export function NotificationBell() {
       window.removeEventListener("notifications-changed", onChanged);
     };
   }, [load]);
+
+  /** Rule 2: if user already opened the related screen, clear matching unread */
+  useEffect(() => {
+    const path = location.pathname || "";
+    if (!path || path === "/login" || path === "/join") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const n = await api<{ notifications: PreviewNote[] }>("/notifications");
+        if (cancelled) return;
+        const unread = (n.notifications || []).filter((x) => !x.read_at);
+        let marked = 0;
+        for (const note of unread) {
+          const to = notificationLink(note);
+          if (!to) continue;
+          const base = to.split("?")[0];
+          if (path === base || path.startsWith(base + "/")) {
+            try {
+              await api("/notifications/read", {
+                method: "POST",
+                body: JSON.stringify({ id: note.id }),
+              });
+              marked += 1;
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        if (!cancelled && marked > 0) {
+          window.dispatchEvent(new Event("notifications-changed"));
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname]);
+
 
   useEffect(() => {
     if (open !== "open") return;
@@ -168,7 +220,7 @@ export function NotificationBell() {
             </div>
             <div className="notif-panel-links">
               <Link to="/warranties" className="notif-panel-link" onClick={() => setOpen("closed")}>
-                Warranties{warrantyOpen ? ` · ${warrantyOpen} to file` : ""}
+                Warranties{warrantyOpen ? ` - ${warrantyOpen} to file` : ""}
               </Link>
               <Link
                 to="/notifications"
@@ -179,10 +231,26 @@ export function NotificationBell() {
               </Link>
             </div>
             <ul className="notif-panel-list">
-              {!preview.length && <li className="muted notif-panel-empty">No recent alerts.</li>}
+              {bellLoading && !preview.length ? (
+                <li className="muted notif-panel-empty">Loading…</li>
+              ) : null}
+              {!bellLoading && bellError && !preview.length ? (
+                <li className="muted notif-panel-empty">Inbox unavailable - try again</li>
+              ) : null}
+              {!bellLoading && !bellError && !preview.length ? (
+                <li className="muted notif-panel-empty">No recent alerts.</li>
+              ) : null}
               {preview.map((n) => {
                 const to = notificationLink(n);
                 const unread = !n.read_at;
+                const title = repairUtf8Mojibake(String(n.title || ""))
+                  .replace(/\u00b7/g, " - ")
+                  .replace(/[\u2013\u2014]/g, "-");
+                const body = n.body
+                  ? repairUtf8Mojibake(String(n.body))
+                      .replace(/\u00b7/g, " - ")
+                      .replace(/[\u2013\u2014]/g, "-")
+                  : null;
                 return (
                   <li
                     key={n.id}
@@ -193,11 +261,11 @@ export function NotificationBell() {
                       className="notif-panel-item-btn"
                       onClick={() => void openNote(n)}
                     >
-                      <div className="notif-panel-title">{n.title}</div>
-                      {n.body ? <div className="muted notif-panel-body">{n.body}</div> : null}
+                      <div className="notif-panel-title">{title}</div>
+                      {body ? <div className="muted notif-panel-body">{body}</div> : null}
                       <div className="muted notif-panel-go">
-                        {to ? "Tap to open →" : "Tap for details →"}
-                        {unread ? " · unread" : ""}
+                        {to ? "Tap to open" : "Tap for details"}
+                        {unread ? " - unread" : ""}
                       </div>
                     </button>
                   </li>
@@ -209,7 +277,7 @@ export function NotificationBell() {
               className="notif-panel-footer"
               onClick={() => setOpen("closed")}
             >
-              View all notifications →
+              View all notifications
             </Link>
           </div>
         </>

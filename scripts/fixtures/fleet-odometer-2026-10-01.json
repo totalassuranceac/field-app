@@ -1,0 +1,1019 @@
+[
+  {
+    "vehicle_id": 1,
+    "id": 6,
+    "source": "fuel",
+    "date": "2025-12-22",
+    "odometer": 136128,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 62,
+    "source": "fuel",
+    "date": "2026-01-05",
+    "odometer": 114573,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 60,
+    "source": "fuel",
+    "date": "2026-01-12",
+    "odometer": 114800,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 23,
+    "source": "fuel",
+    "date": "2026-01-19",
+    "odometer": 115023,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 59,
+    "source": "fuel",
+    "date": "2026-01-23",
+    "odometer": 137126,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 24,
+    "source": "fuel",
+    "date": "2026-01-27",
+    "odometer": 115228,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 4,
+    "source": "fuel",
+    "date": "2026-02-03",
+    "odometer": 115442,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 36,
+    "source": "fuel",
+    "date": "2026-02-16",
+    "odometer": 137786,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 41,
+    "source": "fuel",
+    "date": "2026-02-24",
+    "odometer": 116205,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 70,
+    "source": "fuel",
+    "date": "2026-03-04",
+    "odometer": 116417,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 1,
+    "id": 9,
+    "source": "fuel",
+    "date": "2026-03-16",
+    "odometer": 161624,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 27,
+    "source": "fuel",
+    "date": "2026-01-22",
+    "odometer": 131902,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 39,
+    "source": "fuel",
+    "date": "2026-02-18",
+    "odometer": 132634,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 69,
+    "source": "fuel",
+    "date": "2026-03-09",
+    "odometer": 133355,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 14,
+    "source": "fuel",
+    "date": "2026-07-02",
+    "odometer": 3872.4,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 97,
+    "source": "fuel",
+    "date": "2026-07-20",
+    "odometer": 47626,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 122,
+    "source": "fuel",
+    "date": "2026-07-28",
+    "odometer": 5246,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 138,
+    "source": "fuel",
+    "date": "2026-08-04",
+    "odometer": 5703.7,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 228,
+    "source": "fuel",
+    "date": "2026-09-12",
+    "odometer": 8118,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 4,
+    "id": 264,
+    "source": "fuel",
+    "date": "2026-09-25",
+    "odometer": 9058,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 6,
+    "id": 114,
+    "source": "fuel",
+    "date": "2026-04-16",
+    "odometer": 0,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 52,
+    "source": "fuel",
+    "date": "2026-01-14",
+    "odometer": 169420,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 18,
+    "source": "fuel",
+    "date": "2026-01-17",
+    "odometer": 169690,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 21,
+    "source": "fuel",
+    "date": "2026-01-27",
+    "odometer": 170137,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 12,
+    "source": "fuel",
+    "date": "2026-02-02",
+    "odometer": 170387,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 26,
+    "source": "fuel",
+    "date": "2026-02-06",
+    "odometer": 170630,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 34,
+    "source": "fuel",
+    "date": "2026-02-12",
+    "odometer": 170869,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 50,
+    "source": "fuel",
+    "date": "2026-02-27",
+    "odometer": 171622,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 76,
+    "source": "fuel",
+    "date": "2026-03-06",
+    "odometer": 172308,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 75,
+    "source": "fuel",
+    "date": "2026-03-07",
+    "odometer": 172204,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 82,
+    "source": "fuel",
+    "date": "2026-03-11",
+    "odometer": 172404,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 81,
+    "source": "fuel",
+    "date": "2026-03-13",
+    "odometer": 172599,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 11,
+    "source": "fuel",
+    "date": "2026-03-17",
+    "odometer": 172844,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 90,
+    "source": "fuel",
+    "date": "2026-04-20",
+    "odometer": 174834,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 100,
+    "source": "fuel",
+    "date": "2026-05-10",
+    "odometer": 175746,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 125,
+    "source": "fuel",
+    "date": "2026-07-20",
+    "odometer": 180308,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 124,
+    "source": "fuel",
+    "date": "2026-07-22",
+    "odometer": 180464,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 123,
+    "source": "fuel",
+    "date": "2026-07-28",
+    "odometer": 180610,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 129,
+    "source": "fuel",
+    "date": "2026-07-31",
+    "odometer": 180750,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 136,
+    "source": "fuel",
+    "date": "2026-08-01",
+    "odometer": 180937,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 135,
+    "source": "fuel",
+    "date": "2026-08-03",
+    "odometer": 181174,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 148,
+    "source": "fuel",
+    "date": "2026-08-10",
+    "odometer": 181512,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 8,
+    "id": 158,
+    "source": "fuel",
+    "date": "2026-08-13",
+    "odometer": 181691,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 159,
+    "source": "fuel",
+    "date": "2026-08-16",
+    "odometer": 181889,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 167,
+    "source": "fuel",
+    "date": "2026-08-18",
+    "odometer": 182065,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 8,
+    "id": 179,
+    "source": "fuel",
+    "date": "2026-08-24",
+    "odometer": 182243,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 8,
+    "id": 190,
+    "source": "fuel",
+    "date": "2026-08-27",
+    "odometer": 182452,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 195,
+    "source": "fuel",
+    "date": "2026-08-31",
+    "odometer": 182846,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 199,
+    "source": "fuel",
+    "date": "2026-09-01",
+    "odometer": 185015,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 206,
+    "source": "fuel",
+    "date": "2026-09-03",
+    "odometer": 183228,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 8,
+    "id": 219,
+    "source": "fuel",
+    "date": "2026-09-09",
+    "odometer": 183394,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 235,
+    "source": "fuel",
+    "date": "2026-09-15",
+    "odometer": 183781,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 255,
+    "source": "fuel",
+    "date": "2026-09-22",
+    "odometer": 184009,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 8,
+    "id": 265,
+    "source": "fuel",
+    "date": "2026-09-25",
+    "odometer": 184202,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 8,
+    "id": 267,
+    "source": "fuel",
+    "date": "2026-09-26",
+    "odometer": 184375,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 7,
+    "source": "fuel",
+    "date": "2026-01-19",
+    "odometer": 110022,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 110,
+    "source": "fuel",
+    "date": "2026-01-22",
+    "odometer": 121345,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 74,
+    "source": "fuel",
+    "date": "2026-02-10",
+    "odometer": 111140,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 77,
+    "source": "fuel",
+    "date": "2026-02-12",
+    "odometer": 111413,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 78,
+    "source": "fuel",
+    "date": "2026-03-09",
+    "odometer": 11243,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 101,
+    "source": "fuel",
+    "date": "2026-03-19",
+    "odometer": 133698,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 88,
+    "source": "fuel",
+    "date": "2026-04-07",
+    "odometer": 113838,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 89,
+    "source": "fuel",
+    "date": "2026-04-10",
+    "odometer": 114061,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 87,
+    "source": "fuel",
+    "date": "2026-04-20",
+    "odometer": 114534,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 91,
+    "source": "fuel",
+    "date": "2026-04-23",
+    "odometer": 114783,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 2,
+    "source": "fuel",
+    "date": "2026-05-01",
+    "odometer": 15307,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 102,
+    "source": "fuel",
+    "date": "2026-05-11",
+    "odometer": 117576,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 64,
+    "source": "fuel",
+    "date": "2026-05-17",
+    "odometer": 116235,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 109,
+    "source": "fuel",
+    "date": "2026-07-01",
+    "odometer": 119758,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 5,
+    "source": "fuel",
+    "date": "2026-07-14",
+    "odometer": 120767,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 113,
+    "source": "fuel",
+    "date": "2026-07-22",
+    "odometer": 121345,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 112,
+    "source": "fuel",
+    "date": "2026-07-24",
+    "odometer": 121543,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 126,
+    "source": "fuel",
+    "date": "2026-07-29",
+    "odometer": 122152,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 140,
+    "source": "fuel",
+    "date": "2026-08-05",
+    "odometer": 122501,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 154,
+    "source": "fuel",
+    "date": "2026-08-12",
+    "odometer": 123134,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 157,
+    "source": "fuel",
+    "date": "2026-08-14",
+    "odometer": 123312,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 166,
+    "source": "fuel",
+    "date": "2026-08-18",
+    "odometer": 123513,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 15,
+    "id": 175,
+    "source": "fuel",
+    "date": "2026-08-21",
+    "odometer": 123722,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 176,
+    "source": "fuel",
+    "date": "2026-08-22",
+    "odometer": 123986,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 194,
+    "source": "fuel",
+    "date": "2026-08-31",
+    "odometer": 124930,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 204,
+    "source": "fuel",
+    "date": "2026-09-03",
+    "odometer": 125194,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 210,
+    "source": "fuel",
+    "date": "2026-09-04",
+    "odometer": 125448,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 213,
+    "source": "fuel",
+    "date": "2026-09-08",
+    "odometer": 125655,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 225,
+    "source": "fuel",
+    "date": "2026-09-10",
+    "odometer": 125879,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 236,
+    "source": "fuel",
+    "date": "2026-09-15",
+    "odometer": 126106,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 240,
+    "source": "fuel",
+    "date": "2026-09-16",
+    "odometer": 126347,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 247,
+    "source": "fuel",
+    "date": "2026-09-19",
+    "odometer": 126622,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 249,
+    "source": "fuel",
+    "date": "2026-09-21",
+    "odometer": 126804,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 258,
+    "source": "fuel",
+    "date": "2026-09-23",
+    "odometer": 127023,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 15,
+    "id": 262,
+    "source": "fuel",
+    "date": "2026-09-25",
+    "odometer": 127210,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": null
+  },
+  {
+    "vehicle_id": 15,
+    "id": 271,
+    "source": "fuel",
+    "date": "2026-09-29",
+    "odometer": 127453,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 49,
+    "source": "fuel",
+    "date": "2025-02-20",
+    "odometer": 95297,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 63,
+    "source": "fuel",
+    "date": "2025-10-02",
+    "odometer": 223142,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 17,
+    "source": "fuel",
+    "date": "2026-01-19",
+    "odometer": 94415,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 25,
+    "source": "fuel",
+    "date": "2026-01-29",
+    "odometer": 94619,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 30,
+    "source": "fuel",
+    "date": "2026-02-11",
+    "odometer": 94856,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 38,
+    "source": "fuel",
+    "date": "2026-02-18",
+    "odometer": 95056,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 46,
+    "source": "fuel",
+    "date": "2026-02-24",
+    "odometer": 95470,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 48,
+    "source": "fuel",
+    "date": "2026-02-27",
+    "odometer": 95601,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 57,
+    "source": "fuel",
+    "date": "2026-03-06",
+    "odometer": 95842,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 104,
+    "source": "fuel",
+    "date": "2026-03-12",
+    "odometer": 96046,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 85,
+    "source": "fuel",
+    "date": "2026-04-21",
+    "odometer": 97343,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 116,
+    "source": "fuel",
+    "date": "2026-07-28",
+    "odometer": 99602,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 155,
+    "source": "fuel",
+    "date": "2026-08-13",
+    "odometer": 80514.9,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 165,
+    "source": "fuel",
+    "date": "2026-08-18",
+    "odometer": 80705.3,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 181,
+    "source": "fuel",
+    "date": "2026-08-25",
+    "odometer": 80915,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 208,
+    "source": "fuel",
+    "date": "2026-09-04",
+    "odometer": 81173.8,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 233,
+    "source": "fuel",
+    "date": "2026-09-15",
+    "odometer": 81472.5,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 17,
+    "id": 252,
+    "source": "fuel",
+    "date": "2026-09-22",
+    "odometer": 81708.7,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 18,
+    "id": 99,
+    "source": "fuel",
+    "date": "2026-07-20",
+    "odometer": 5862,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 18,
+    "id": 108,
+    "source": "fuel",
+    "date": "2026-07-27",
+    "odometer": 6100.7,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 18,
+    "id": 144,
+    "source": "fuel",
+    "date": "2026-08-05",
+    "odometer": 6770,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  },
+  {
+    "vehicle_id": 18,
+    "id": 150,
+    "source": "fuel",
+    "date": "2026-08-11",
+    "odometer": 7152,
+    "ocr_needs_review": 0,
+    "ocr_reviewed_at": "2026-10-01 00:00:00"
+  }
+]

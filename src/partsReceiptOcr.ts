@@ -448,7 +448,7 @@ export async function ocrPartsReceiptImage(
 
   // Reuse fuel learning for vendor≈store, total, card, date
   if (hints) {
-    const fuelLike = applyOcrLearning(toFuelLikeSnapshot(parsed), text, hints);
+    const fuelLike = applyOcrLearning(toFuelLikeSnapshot(parsed), text, hints, { storeMode: "legacy" });
     parsed = fromFuelLike(parsed, fuelLike);
     parsed = applyInvoiceHints(parsed, text, hints);
   }

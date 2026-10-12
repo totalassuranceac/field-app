@@ -1,10 +1,24 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
+import { printWithLightTheme } from "../printTheme";
 
 type TimeOffStatus = "pending" | "approved" | "declined" | "cancelled";
-type TimeOffType = "pto" | "sick" | "personal" | "unpaid" | "other";
-type TimeOffTab = "mine" | "approvals" | "board" | "upcoming" | "report" | "payroll";
+type TimeOffType = "pto" | "sick" | "personal" | "unpaid" | "other" | "bereavement";
+type TimeOffTab = "mine" | "approvals" | "board" | "calendar" | "upcoming" | "report" | "payroll";
+
+type CalendarPtoItem = {
+  id: number;
+  user_id: number;
+  employee_name: string;
+  request_type: string;
+  type_label: string;
+  start_date: string;
+  end_date: string;
+  weekday_days: number;
+  hours_deducted: number;
+  reason: string | null;
+};
 
 type PayrollCheckItem = {
   id: number;
@@ -49,13 +63,13 @@ function chicagoYmdParts(anchor = new Date()): {
 }
 
 /**
- * Previous completed Sat→Fri pay week (America/Chicago).
- * Payroll is reviewed on Monday looking at last Sat–Fri.
+ * Previous completed Sat - Fri pay week (America/Chicago).
+ * Payroll is reviewed on Monday looking at last Sat-Fri.
  */
 function previousSatFriPayWeek(anchor = new Date()): { from: string; to: string } {
   const { y, m, d, dayIdx } = chicagoYmdParts(anchor);
-  // dayIdx: Sun=0 … Sat=6. Days since this week's Saturday:
-  // Sat=0, Sun=1, Mon=2, … Fri=6
+  // dayIdx: Sun=0 ... Sat=6. Days since this week's Saturday:
+  // Sat=0, Sun=1, Mon=2, ... Fri=6
   const daysSinceSat = (dayIdx + 1) % 7;
   const noon = Date.UTC(y, m - 1, d, 12, 0, 0);
   // This week's Saturday
@@ -89,6 +103,8 @@ type PtoBoardRow = {
   sick_entitlement: number;
   sick_used: number;
   sick_balance: number;
+  /** True when an active Field App user is linked - required for admin-create */
+  has_app_login?: boolean;
 };
 
 type UpcomingEvent = {
@@ -111,21 +127,75 @@ interface TimeOffRequest {
   manager_remarks: string | null;
   decided_at: string | null;
   created_at: string;
+  hours_deducted?: number | null;
   employee_name?: string | null;
   manager_name?: string | null;
   decided_by_name?: string | null;
 }
 
+/** Prior history under Create / Manual adjust (newest first). */
+type EmpHistoryPayload = {
+  employee: { id: number; name: string };
+  /** Bank balances when API returns them - do not invent. */
+  balance?: PtoBoardRow | null;
+  as_of?: string;
+  requests: TimeOffRequest[];
+  ledger: Array<{
+    id?: number;
+    entry_date: string;
+    kind: string;
+    hours: number;
+    source: string;
+    note: string | null;
+  }>;
+};
+
+
+/** Leave types. Value "pto" = Vacation bank (legacy API key). No generic "PTO" label. */
 const TYPE_OPTIONS: { value: TimeOffType; label: string }[] = [
-  { value: "pto", label: "PTO / vacation" },
+  { value: "pto", label: "Vacation" },
   { value: "sick", label: "Sick" },
-  { value: "personal", label: "Personal" },
   { value: "unpaid", label: "Unpaid" },
-  { value: "other", label: "Other" },
+  { value: "bereavement", label: "Bereavement" },
 ];
 
-function typeLabel(t: string): string {
-  return TYPE_OPTIONS.find((x) => x.value === t)?.label || t;
+/** History-only labels for legacy rows (not choosable on new requests). */
+const LEGACY_TYPE_LABELS: Record<string, string> = {
+  personal: "Personal",
+  other: "Other",
+};
+
+/** Employee My request picker — Chris HARD: Vacation / Sick / Unpaid / Bereavement only. */
+const EMPLOYEE_TYPE_OPTIONS = TYPE_OPTIONS;
+
+function typeLabel(
+  t: string,
+  hoursDeducted?: number | null,
+  status?: string | null
+): string {
+  const key = String(t || "").toLowerCase();
+  const base =
+    TYPE_OPTIONS.find((x) => x.value === key)?.label ||
+    LEGACY_TYPE_LABELS[key] ||
+    t;
+  // Never rewrite pending/cancelled to Unpaid just because hours_deducted is null
+  const st = String(status || "").toLowerCase();
+  if (st === "pending" || st === "cancelled" || st === "declined") {
+    return base;
+  }
+  // Only annotate when APPROVED paid-type had zero bank take
+  const paidBank = key === "pto" || key === "personal" || key === "sick";
+  if (
+    st === "approved" &&
+    paidBank &&
+    hoursDeducted !== undefined &&
+    (hoursDeducted == null ||
+      !Number.isFinite(Number(hoursDeducted)) ||
+      Number(hoursDeducted) <= 0)
+  ) {
+    return `${base} -> Unpaid (no bank hours)`;
+  }
+  return base;
 }
 
 function statusLabel(s: string): string {
@@ -138,7 +208,7 @@ function statusLabel(s: string): string {
 
 function formatRange(start: string, end: string): string {
   if (start === end) return start;
-  return `${start} → ${end}`;
+  return `${start} - ${end}`;
 }
 
 function todayIso(): string {
@@ -149,8 +219,83 @@ function todayIso(): string {
   }
 }
 
+/** 0=Sun ... 6=Sat for an ISO date in America/Chicago. */
+function chicagoWeekdayIndex(iso: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return -1;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    weekday: "short",
+  }).formatToParts(new Date(`${iso}T12:00:00Z`));
+  const wd = parts.find((p) => p.type === "weekday")?.value || "";
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(wd);
+}
+
+function isChicagoWeekend(iso: string): boolean {
+  const i = chicagoWeekdayIndex(iso);
+  return i === 0 || i === 6;
+}
+
+function eachIsoDateInclusive(startIso: string, endIso: string): string[] {
+  const out: string[] = [];
+  let t = Date.parse(`${startIso}T12:00:00Z`);
+  const end = Date.parse(`${endIso}T12:00:00Z`);
+  if (!Number.isFinite(t) || !Number.isFinite(end) || end < t) return out;
+  while (t <= end + 1e-3) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+    t += 86400000;
+  }
+  return out;
+}
+
+/** Mon-Fri only - weekends never count toward PTO day/hour math. */
+function eachWeekdayIsoInclusive(startIso: string, endIso: string): string[] {
+  return eachIsoDateInclusive(startIso, endIso).filter((d) => !isChicagoWeekend(d));
+}
+
+function weekdayDaysInclusive(startIso: string, endIso: string): number {
+  return eachWeekdayIsoInclusive(startIso, endIso).length;
+}
+
+function hoursForWeekdayRange(startIso: string, endIso: string, hoursPerDay = 8): number {
+  return weekdayDaysInclusive(startIso, endIso) * hoursPerDay;
+}
+
+function requestedHoursPreview(r: { start_date: string; end_date: string; hours_deducted?: number | null }): number {
+  if (r.hours_deducted != null && Number.isFinite(Number(r.hours_deducted))) {
+    return Number(r.hours_deducted);
+  }
+  return hoursForWeekdayRange(r.start_date, r.end_date, 8);
+}
+
+
+function formatWeekdaySpan(start: string, end: string): string {
+  const n = weekdayDaysInclusive(start, end);
+  const h = n * 8;
+  if (n <= 0) return "0 weekdays (Sat/Sun excluded)";
+  return `${n} weekday${n === 1 ? "" : "s"} | ${h}h`;
+}
+
+function shiftMonth(ym: string, delta: number): string {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1, 12, 0, 0));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthBounds(ym: string): { from: string; to: string; label: string } {
+  const [y, m] = ym.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0, 12, 0, 0)).getUTCDate();
+  const from = `${ym}-01`;
+  const to = `${ym}-${String(last).padStart(2, "0")}`;
+  const label = new Date(Date.UTC(y, m - 1, 1, 12, 0, 0)).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return { from, to, label };
+}
+
 function formatMdBirthday(md: string | null | undefined): string {
-  if (!md) return "—";
+  if (!md) return " - ";
   const [m, d] = md.split("-");
   if (!m || !d) return md;
   return `${Number(m)}/${Number(d)}`;
@@ -223,13 +368,13 @@ function OverageOweSummary({
           sickOwe ? `Sick ${sickOwe}h` : null,
         ]
           .filter(Boolean)
-          .join(" · ") || "—"}
+          .join(" | ") || " - "}
       </span>
     </div>
   );
 }
 
-/** Page 1 — hour breakdown so the employee sees exactly where they went over. */
+/** Page 1 - hour breakdown so the employee sees exactly where they went over. */
 function OverageBreakdownPage({
   row,
   preparedBy,
@@ -243,12 +388,12 @@ function OverageBreakdownPage({
   return (
     <div className="pto-overage-page pto-overage-page-breakdown">
       <OverageLetterhead
-        subtitle="Page 1 of 2 · Balance & hours owed"
+        subtitle="Page 1 of 2 | Balance & hours owed"
         preparedBy={preparedBy}
         preparedOn={preparedOn}
       />
 
-      <h2 className="pto-print-doc-title">Time-off overage — hour breakdown</h2>
+      <h2 className="pto-print-doc-title">Time-off overage - hour breakdown</h2>
       <p className="pto-print-lead">
         Your vacation and sick banks as of <strong>{formatDisplayDate(preparedOn)}</strong>.
         Amounts in <strong className="pto-owe-amount">red</strong> are hours you currently owe.
@@ -261,7 +406,7 @@ function OverageBreakdownPage({
         </div>
         <div>
           <dt>Hire date</dt>
-          <dd>{row.hire_date ? formatDisplayDate(row.hire_date) : "—"}</dd>
+          <dd>{row.hire_date ? formatDisplayDate(row.hire_date) : " - "}</dd>
         </div>
         <div>
           <dt>Years of service</dt>
@@ -269,7 +414,7 @@ function OverageBreakdownPage({
         </div>
         <div>
           <dt>Next anniversary</dt>
-          <dd>{row.next_anniversary ? formatDisplayDate(row.next_anniversary) : "—"}</dd>
+          <dd>{row.next_anniversary ? formatDisplayDate(row.next_anniversary) : " - "}</dd>
         </div>
       </dl>
 
@@ -295,7 +440,7 @@ function OverageBreakdownPage({
             </td>
             <td>
               <strong className={vacOwe ? "pto-owe-amount" : undefined}>
-                {vacOwe ? `${vacOwe}h` : "—"}
+                {vacOwe ? `${vacOwe}h` : " - "}
               </strong>
             </td>
           </tr>
@@ -308,7 +453,7 @@ function OverageBreakdownPage({
             </td>
             <td>
               <strong className={sickOwe ? "pto-owe-amount" : undefined}>
-                {sickOwe ? `${sickOwe}h` : "—"}
+                {sickOwe ? `${sickOwe}h` : " - "}
               </strong>
             </td>
           </tr>
@@ -316,14 +461,14 @@ function OverageBreakdownPage({
       </table>
 
       <p className="pto-print-footnote">
-        Entitlement = hours given this anniversary year · Used = hours taken · Balance =
-        entitlement − used. Please review page 1, then sign the acknowledgment on page 2.
+        Entitlement = hours given this anniversary year | Used = hours taken | Balance =
+        entitlement - used. Please review page 1, then sign the acknowledgment on page 2.
       </p>
     </div>
   );
 }
 
-/** Page 2 — employee + office acknowledgment (no blank dates to fill). */
+/** Page 2 - employee + office acknowledgment (no blank dates to fill). */
 function OverageSignPage({
   row,
   preparedBy,
@@ -337,7 +482,7 @@ function OverageSignPage({
   return (
     <div className="pto-overage-page pto-overage-page-sign">
       <OverageLetterhead
-        subtitle="Page 2 of 2 · Employee acknowledgment"
+        subtitle="Page 2 of 2 | Employee acknowledgment"
         preparedBy={preparedBy}
         preparedOn={preparedOn}
       />
@@ -380,7 +525,7 @@ function OverageSignPage({
           <div className="pto-overage-sign-caption">Employee acknowledgment</div>
           <div className="pto-overage-sign-line" aria-hidden="true" />
           <div className="pto-overage-sign-label">
-            Signature — <strong>{row.name}</strong>
+            Signature - <strong>{row.name}</strong>
           </div>
           <div className="pto-overage-sign-hint">
             Signing confirms you have read and acknowledge this document dated{" "}
@@ -390,7 +535,7 @@ function OverageSignPage({
         <div className="pto-overage-sign-block pto-overage-sign-office">
           <div className="pto-overage-sign-caption">Office / manager witness</div>
           <div className="pto-overage-sign-line" aria-hidden="true" />
-          <div className="pto-overage-sign-label">Signature — office received</div>
+          <div className="pto-overage-sign-label">Signature - office received</div>
           <div className="pto-overage-sign-hint">
             Witness confirms the employee reviewed and signed this acknowledgment.
           </div>
@@ -399,13 +544,13 @@ function OverageSignPage({
 
       <p className="pto-print-footnote pto-print-file-note">
         File the signed original (both pages) in the employee personnel file. Document date and
-        preparer are recorded above — no handwritten dates required.
+        preparer are recorded above - no handwritten dates required.
       </p>
     </div>
   );
 }
 
-/** Standalone 2-page print packet (board “Print owe / sign-off”). */
+/** Standalone 2-page print packet (board "Print owe / sign-off).. */
 function OverageAckForm({
   row,
   preparedBy,
@@ -441,12 +586,17 @@ export function TimeOffPage() {
 
   const [startDate, setStartDate] = useState(todayIso);
   const [endDate, setEndDate] = useState(todayIso);
-  const [requestType, setRequestType] = useState<TimeOffType>("pto");
+  const [requestType, setRequestType] = useState<TimeOffType | "">("");
   const [reason, setReason] = useState("");
 
   const [decideId, setDecideId] = useState<number | null>(null);
   const [decideAction, setDecideAction] = useState<"approved" | "declined">("approved");
   const [remarks, setRemarks] = useState("");
+  /** Hours to deduct on Approve (editable). Default = requested weekday preview. */
+  const [decideHours, setDecideHours] = useState("");
+  /** Original requested hours shown as muted reference. */
+  const [decideRequestedHours, setDecideRequestedHours] = useState<number | null>(null);
+  const [pendingHoursById, setPendingHoursById] = useState<Record<number, string>>({});
 
   const [myBalance, setMyBalance] = useState<PtoBoardRow | null>(null);
   const [boardRows, setBoardRows] = useState<PtoBoardRow[]>([]);
@@ -479,13 +629,178 @@ export function TimeOffPage() {
   const [partialHours, setPartialHours] = useState("");
   const [partialNote, setPartialNote] = useState("");
 
+  const [calMonth, setCalMonth] = useState(() => todayIso().slice(0, 7));
+  const [calItems, setCalItems] = useState<CalendarPtoItem[]>([]);
+  const [calBusy, setCalBusy] = useState(false);
+
   const [adjustRow, setAdjustRow] = useState<PtoBoardRow | null>(null);
   const [adjustKind, setAdjustKind] = useState<"vacation" | "sick">("sick");
   const [adjustHours, setAdjustHours] = useState("");
   const [adjustNote, setAdjustNote] = useState("");
-  /** Day the hours were actually used — required; not defaulted to today. */
+  /** Day the hours were actually used - required; not defaulted to today. */
   const [adjustUsedOn, setAdjustUsedOn] = useState("");
   const [adjustBusy, setAdjustBusy] = useState(false);
+
+  /** Admin/office: create time-off for any employee (Approvals tab). */
+  const [adminEmpId, setAdminEmpId] = useState("");
+  const [adminStart, setAdminStart] = useState(todayIso);
+  const [adminEnd, setAdminEnd] = useState(todayIso);
+  const [adminType, setAdminType] = useState<TimeOffType>("pto");
+  const [adminHours, setAdminHours] = useState("");
+  const [adminReason, setAdminReason] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [empHistory, setEmpHistory] = useState<EmpHistoryPayload | null>(null);
+  const [empHistoryBusy, setEmpHistoryBusy] = useState(false);
+  const [empHistoryForId, setEmpHistoryForId] = useState<number | null>(null);
+  const [showAdminCreate, setShowAdminCreate] = useState(true);
+
+
+  async function loadEmpHistory(employeeId: number | string | null | undefined) {
+    const id = Number(employeeId || 0);
+    if (!id) {
+      setEmpHistory(null);
+      setEmpHistoryForId(null);
+      return;
+    }
+    setEmpHistoryBusy(true);
+    setEmpHistoryForId(id);
+    try {
+      const d = await api<EmpHistoryPayload>(
+        `/time-off/history?employee_id=${encodeURIComponent(String(id))}`
+      );
+      setEmpHistory(d);
+    } catch (e) {
+      setEmpHistory(null);
+      setError(e instanceof Error ? e.message : "Could not load prior time-off history");
+    } finally {
+      setEmpHistoryBusy(false);
+    }
+  }
+
+  function EmpHistoryBelow({ employeeId }: { employeeId: number | string | null | undefined }) {
+    const id = Number(employeeId || 0);
+    if (!id) return null;
+    const mine = empHistoryForId === id ? empHistory : null;
+    const busy = empHistoryBusy && empHistoryForId === id;
+    const boardHit = boardRows.find((r) => r.employee_id === id) || null;
+    const bal = mine?.balance || boardHit;
+    const who = mine?.employee?.name || boardHit?.name || "Employee";
+
+    function formatLedgerHours(h: number): { text: string; cls: string } {
+      const n = Number(h);
+      if (!Number.isFinite(n) || n === 0) return { text: "0h", cls: "pto-hist-hrs" };
+      if (n > 0) return { text: `-${n}h`, cls: "pto-hist-hrs pto-hist-hrs-use" };
+      return { text: `+${Math.abs(n)}h`, cls: "pto-hist-hrs pto-hist-hrs-credit" };
+    }
+
+    return (
+      <div className="card pto-emp-history-card">
+          <div className="pto-emp-history-strip">
+            <div className="pto-emp-history-name">{who}</div>
+            {bal ? (
+              <div className="pto-emp-history-totals">
+                <span>
+                  Vacation used: <strong>{bal.vacation_used}h</strong>
+                  {typeof bal.vacation_balance === "number" ? (
+                    <>
+                      {" "}
+                      | Remaining: <strong>{bal.vacation_balance}h</strong>
+                    </>
+                  ) : null}
+                </span>
+                <span>
+                  Sick used: <strong>{bal.sick_used}h</strong>
+                  {typeof bal.sick_balance === "number" ? (
+                    <>
+                      {" "}
+                      | Remaining: <strong>{bal.sick_balance}h</strong>
+                    </>
+                  ) : null}
+                </span>
+              </div>
+            ) : (
+              <div className="pto-emp-history-totals muted">
+                Used totals load with history when available.
+              </div>
+            )}
+          </div>
+          <p className="pto-emp-history-hint">
+            Prior requests and ledger (newest first). Hours first - check before adding again.
+          </p>
+          {busy && <p className="pto-emp-history-hint">Loading history...</p>}
+          {!busy && !mine && <p className="pto-emp-history-hint">No history loaded.</p>}
+          {!busy && mine && !mine.requests.length && !mine.ledger.length && (
+            <p className="pto-emp-history-hint">No prior requests or ledger rows.</p>
+          )}
+          {!busy && mine && (mine.requests.length > 0 || mine.ledger.length > 0) && (
+            <div className="pto-emp-history-scroll">
+              {mine.requests.length > 0 && (
+                <>
+                  <div className="pto-emp-history-section-label">Requests</div>
+                  <table className="pto-emp-history-table">
+                    <thead>
+                      <tr>
+                        <th className="pto-hist-hrs-col">Hours</th>
+                        <th>Dates</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mine.requests.map((r) => (
+                        <tr key={`req-${r.id}`}>
+                          <td className="pto-hist-hrs">
+                            {r.hours_deducted != null && Number.isFinite(Number(r.hours_deducted))
+                              ? `${r.hours_deducted}h`
+                              : "-"}
+                          </td>
+                          <td>{formatRange(r.start_date, r.end_date)}</td>
+                          <td>{typeLabel(r.request_type, r.hours_deducted, r.status)}</td>
+                          <td>
+                            <span className={`time-off-status st-${r.status}`}>{r.status}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+              {mine.ledger.length > 0 && (
+                <>
+                  <div className="pto-emp-history-section-label">Ledger</div>
+                  <table className="pto-emp-history-table">
+                    <thead>
+                      <tr>
+                        <th className="pto-hist-hrs-col">Hours</th>
+                        <th>Date</th>
+                        <th>Kind</th>
+                        <th>Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mine.ledger.map((l, i) => {
+                        const hrs = formatLedgerHours(l.hours);
+                        return (
+                          <tr key={`led-${l.id ?? i}-${l.entry_date}`}>
+                            <td className={hrs.cls}>{hrs.text}</td>
+                            <td>{l.entry_date}</td>
+                            <td>{l.kind}</td>
+                            <td>
+                              {l.source}
+                              {l.note ? ` - ${l.note}` : ""}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </div>
+          )}
+      </div>
+    );
+  }
 
   function openManualAdjust(r: PtoBoardRow) {
     setAdjustRow(r);
@@ -493,6 +808,7 @@ export function TimeOffPage() {
     setAdjustHours("");
     setAdjustNote("");
     setAdjustUsedOn("");
+    void loadEmpHistory(r.employee_id);
   }
 
   const canSeeAllApprovals =
@@ -500,6 +816,8 @@ export function TimeOffPage() {
   const canSeeBoard =
     user?.role === "admin" || user?.role === "office" || user?.role === "supervisor";
   const canConfirmPayroll = user?.role === "admin" || user?.role === "office";
+  const canAdminCreateTimeOff =
+    user?.role === "admin" || user?.role === "office";
 
   const overRows = useMemo(
     () => boardRows.filter((r) => r.vacation_balance < 0 || r.sick_balance < 0),
@@ -520,11 +838,7 @@ export function TimeOffPage() {
   async function printOverageForm(row: PtoBoardRow) {
     setOverageForm(row);
     setTab("board");
-    document.body.classList.add("print-pto-overage");
-    await new Promise<void>((r) =>
-      requestAnimationFrame(() => requestAnimationFrame(() => r()))
-    );
-    window.print();
+    await printWithLightTheme("print-pto-overage");
   }
 
   const load = useCallback(async () => {
@@ -577,16 +891,36 @@ export function TimeOffPage() {
     void load();
   }, [load]);
 
+  const loadCalendar = useCallback(async (ym?: string) => {
+    if (!canSeeBoard) return;
+    const month = ym || calMonth;
+    const { from, to } = monthBounds(month);
+    setCalBusy(true);
+    try {
+      const d = await api<{ items: CalendarPtoItem[] }>(
+        `/time-off/calendar?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+      );
+      setCalItems(d.items || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load time-off calendar");
+    } finally {
+      setCalBusy(false);
+    }
+  }, [canSeeBoard, calMonth]);
+
   useEffect(() => {
     if (tab === "board" || tab === "upcoming" || tab === "report") void loadBoard();
+    if (tab === "approvals" && canAdminCreateTimeOff && canSeeBoard) void loadBoard();
     if (tab === "payroll" && canSeeBoard) void loadPayrollCheck();
-  }, [tab, loadBoard, canSeeBoard]);
+    if (tab === "calendar" && canSeeBoard) void loadCalendar();
+  }, [tab, loadBoard, canSeeBoard, loadCalendar, canAdminCreateTimeOff]);
 
   // Deep-link from notification: open approvals if manager
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get("tab") === "approvals" && isManager) setTab("approvals");
     if (q.get("tab") === "board" && canSeeBoard) setTab("board");
+    if (q.get("tab") === "calendar" && canSeeBoard) setTab("calendar");
     if (q.get("tab") === "payroll" && canSeeBoard) setTab("payroll");
   }, [isManager, canSeeBoard]);
 
@@ -635,10 +969,10 @@ export function TimeOffPage() {
       });
       setOk(
         action === "taken"
-          ? `Marked took it · ${item.employee_name}`
+          ? `Marked took it | ${item.employee_name}`
           : action === "not_taken"
-            ? `Restored hours · ${item.employee_name} came in`
-            : `Partial hours saved · ${item.employee_name}`
+            ? `Restored hours | ${item.employee_name} came in`
+            : `Partial hours saved | ${item.employee_name}`
       );
       setPartialEditId(null);
       setPartialHours("");
@@ -662,7 +996,7 @@ export function TimeOffPage() {
     }
     const usedOn = adjustUsedOn.trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(usedOn)) {
-      setError("Pick the Used on date — the day those hours were actually used.");
+      setError("Pick the Used on date - the day those hours were actually used.");
       return;
     }
     if (!adjustNote.trim()) {
@@ -685,13 +1019,14 @@ export function TimeOffPage() {
       });
       const kindLabel = adjustKind === "sick" ? "sick" : "vacation";
       setOk(
-        `Adjusted ${adjustRow.name}: ${hours > 0 ? "+" : ""}${hours}h ${kindLabel} · used on ${formatDisplayDate(usedOn)}`
+        `Adjusted ${adjustRow.name}: ${hours > 0 ? "+" : ""}${hours}h ${kindLabel} | used on ${formatDisplayDate(usedOn)}`
       );
-      setAdjustRow(null);
+      const stayId = adjustRow.employee_id;
       setAdjustHours("");
       setAdjustNote("");
       setAdjustUsedOn("");
       await loadBoard();
+      await loadEmpHistory(stayId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Adjust failed");
     } finally {
@@ -725,7 +1060,7 @@ export function TimeOffPage() {
     }>;
   };
 
-  /** Anniversary-year window: last anniversary (or hire date) → today. */
+  /** Anniversary-year window: last anniversary (or hire date) - today. */
   function reportRangeForEmployee(empId: string): { from: string; to: string } {
     const row = boardRows.find((r) => String(r.employee_id) === empId);
     const to = todayIso();
@@ -779,7 +1114,7 @@ export function TimeOffPage() {
     }
   }
 
-  /** One button: load the selected employee’s report, then open the print dialog. */
+  /** One button: load the selected employee's report, then open the print dialog. */
   async function printReport() {
     if (!reportEmpId) {
       setError("Pick an employee for the report.");
@@ -797,12 +1132,8 @@ export function TimeOffPage() {
       const d = await fetchReport({ from, to });
       if (!d) return;
       setReportData(d);
-      document.body.classList.add("print-pto-report");
       // Let React paint the report before the print stylesheet runs
-      await new Promise<void>((r) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => r()))
-      );
-      window.print();
+      await printWithLightTheme("print-pto-report");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not print report");
       document.body.classList.remove("print-pto-report");
@@ -813,6 +1144,10 @@ export function TimeOffPage() {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (!requestType) {
+      setError("Pick a type: Vacation, Sick, Unpaid, or Bereavement.");
+      return;
+    }
     setBusy(true);
     setError("");
     setOk("");
@@ -857,29 +1192,59 @@ export function TimeOffPage() {
     setDecideId(r.id);
     setDecideAction(action);
     setRemarks("");
+    const preview = requestedHoursPreview(r);
+    setDecideRequestedHours(preview);
+    const fromCard = pendingHoursById[r.id];
+    const seeded =
+      fromCard != null && fromCard.trim() !== "" && Number.isFinite(Number(fromCard))
+        ? String(Math.max(0, Number(fromCard)))
+        : String(preview);
+    setDecideHours(action === "approved" ? seeded : "");
   }
 
   async function submitDecision(e: FormEvent) {
     e.preventDefault();
     if (decideId == null) return;
-    setActingId(decideId);
     setError("");
     setOk("");
+    let hoursNum: number | null = null;
+    if (decideAction === "approved") {
+      const hoursRaw = decideHours.trim();
+      const n = Number(hoursRaw);
+      if (hoursRaw === "" || !Number.isFinite(n) || n <= 0) {
+        setError("Enter Hours to approve greater than 0 (can be less than requested for a 40h week).");
+        return;
+      }
+      hoursNum = Math.round(n * 100) / 100;
+      // Soft: allow less than requested; warn-only if above requested (API still clamps)
+      if (
+        decideRequestedHours != null &&
+        hoursNum > decideRequestedHours + 0.001
+      ) {
+        // still allow — bank clamp handles overflow
+      }
+    }
+    setActingId(decideId);
     try {
       await api(`/time-off/${decideId}/decide`, {
         method: "POST",
         body: JSON.stringify({
           decision: decideAction,
           remarks: remarks.trim() || null,
+          ...(decideAction === "approved" && hoursNum != null ? { hours: hoursNum } : {}),
         }),
       });
       setOk(
         decideAction === "approved"
-          ? "Approved — employee was notified."
-          : "Declined — employee was notified."
+          ? hoursNum != null
+            ? `Approved ${hoursNum}h - employee was notified.`
+            : "Approved - employee was notified."
+          : "Declined - employee was notified."
       );
       setDecideId(null);
       setRemarks("");
+      setDecideHours("");
+      setDecideRequestedHours(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save decision");
@@ -888,51 +1253,220 @@ export function TimeOffPage() {
     }
   }
 
+
+  async function submitAdminCreate(e: FormEvent) {
+    e.preventDefault();
+    if (!canAdminCreateTimeOff) {
+      setError("Only office/admin can create time-off for others.");
+      return;
+    }
+    const empId = Number(adminEmpId);
+    if (!empId) {
+      setError("Pick an employee.");
+      return;
+    }
+    const picked = boardRows.find((r) => r.employee_id === empId);
+    if (picked && picked.has_app_login === false) {
+      setError(
+        `${picked.name} has no Field App login linked. Link them in People / Admin first.`
+      );
+      return;
+    }
+    const start = adminStart;
+    const end = adminEnd || adminStart;
+    if (weekdayDaysInclusive(start, end) < 1) {
+      setError("Saturday and Sunday don't count. Pick at least one weekday.");
+      return;
+    }
+    setAdminBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const created = await api<{
+        ok?: boolean;
+        request?: TimeOffRequest;
+        error?: string;
+      }>("/time-off/admin-create", {
+        method: "POST",
+        body: JSON.stringify({
+          employee_id: empId,
+          start_date: start,
+          end_date: end,
+          request_type: adminType,
+          reason: adminReason.trim() || null,
+        }),
+      });
+      const newId = created.request?.id;
+      if (!newId) {
+        throw new Error("Create succeeded but no request id returned");
+      }
+      const hoursRaw = adminHours.trim();
+      // Optional hours: empty = 8x weekdays (server default). Explicit 0 = no bank.
+      const hours =
+        hoursRaw !== "" && Number.isFinite(Number(hoursRaw))
+          ? Math.max(0, Number(hoursRaw))
+          : null;
+      try {
+        const decided = await api<{ ok?: boolean; pto?: string | null }>(
+          `/time-off/${newId}/decide`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              decision: "approved",
+              remarks: "Created and approved by admin",
+              hours,
+            }),
+          }
+        );
+        const who =
+          created.request?.employee_name ||
+          picked?.name ||
+          "Employee";
+        setOk(
+          `Created & approved for ${who}${
+            decided.pto ? ` | ${decided.pto}` : ""
+          }.`
+        );
+      } catch (approveErr) {
+        setOk(
+          `Request #${newId} created (pending). Approve failed - use one-tap Approve below. ${
+            approveErr instanceof Error ? approveErr.message : ""
+          }`
+        );
+      }
+      setAdminReason("");
+      setAdminHours("");
+      // Keep Create form open so prior history stays visible after save
+      setShowAdminCreate(true);
+      if (empId) await loadEmpHistory(empId);
+      await load();
+      if (canSeeBoard) await loadBoard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create time-off");
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  /** Employees with Field App login first - admin-create needs a linked user. */
+  const adminCreateEmployees = useMemo(() => {
+    const rows = [...boardRows];
+    rows.sort((a, b) => {
+      const al = a.has_app_login === false ? 1 : 0;
+      const bl = b.has_app_login === false ? 1 : 0;
+      if (al !== bl) return al - bl;
+      return a.name.localeCompare(b.name);
+    });
+    return rows;
+  }, [boardRows]);
+
   const pendingApprovals = useMemo(
     () => approvals.filter((r) => r.status === "pending"),
     [approvals]
   );
+
+  // Seed Hours to approve on each Waiting card (e.g. Arin 16h -> edit 12h before Approve).
+  useEffect(() => {
+    setPendingHoursById((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const r of pendingApprovals) {
+        if (next[r.id] == null || next[r.id] === "") {
+          next[r.id] = String(requestedHoursPreview(r));
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [pendingApprovals]);
   const recentDecided = useMemo(
     () => approvals.filter((r) => r.status === "approved" || r.status === "declined"),
     [approvals]
   );
 
-  /** Hours this form would request (8h × inclusive calendar days). */
-  const formHoursNeeded = useMemo(() => {
+  /** Hours this form would request (8h x Mon-Fri only; Sat/Sun excluded). */
+  const formWeekdayCount = useMemo(() => {
     if (!startDate) return 0;
-    const end = endDate || startDate;
-    const a = Date.parse(startDate + "T12:00:00Z");
-    const b = Date.parse(end + "T12:00:00Z");
-    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
-    return (Math.round((b - a) / 86400000) + 1) * 8;
+    return weekdayDaysInclusive(startDate, endDate || startDate);
   }, [startDate, endDate]);
 
+  const formHoursNeeded = useMemo(
+    () => formWeekdayCount * 8,
+    [formWeekdayCount]
+  );
+
   const formBankGate = useMemo(() => {
+    // Vacation (pto) / Sick only — Unpaid / Bereavement never gated
     if (requestType !== "pto" && requestType !== "sick") {
-      return { gated: false as const, available: null as number | null, ok: true };
+      return {
+        gated: false as const,
+        available: null as number | null,
+        ok: true,
+        willUnpaid: false,
+      };
     }
     if (!myBalance) {
-      return { gated: true as const, available: null as number | null, ok: false };
+      return {
+        gated: true as const,
+        available: null as number | null,
+        ok: false,
+        willUnpaid: false,
+      };
     }
     const pendingSame = mine
-      .filter((r) => r.status === "pending" && r.request_type === requestType)
-      .reduce((sum, r) => {
-        const a = Date.parse(r.start_date + "T12:00:00Z");
-        const b = Date.parse(r.end_date + "T12:00:00Z");
-        if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return sum;
-        return sum + (Math.round((b - a) / 86400000) + 1) * 8;
-      }, 0);
+      .filter(
+        (r) =>
+          r.status === "pending" &&
+          (requestType === "sick"
+            ? r.request_type === "sick"
+            : r.request_type === "pto" || r.request_type === "personal")
+      )
+      .reduce(
+        (sum, r) => sum + hoursForWeekdayRange(r.start_date, r.end_date, 8),
+        0
+      );
     const bal =
       requestType === "sick" ? myBalance.sick_balance : myBalance.vacation_balance;
     const available = bal - pendingSame;
+    const covers = formWeekdayCount > 0 && formHoursNeeded <= available + 1e-9;
+    const short = formWeekdayCount > 0 && !covers;
     return {
       gated: true as const,
       available,
       pendingSame,
-      ok: formHoursNeeded <= available + 1e-9,
-      label: requestType === "sick" ? "sick" : "vacation",
+      // Short bank: still allow submit — type stays Vacation/Sick for manager approve
+      ok: formWeekdayCount > 0 && myBalance != null,
+      willUnpaid: short,
+      label: requestType === "sick" ? "Sick" : "Vacation",
     };
-  }, [requestType, myBalance, mine, formHoursNeeded]);
+  }, [requestType, myBalance, mine, formHoursNeeded, formWeekdayCount]);
+
+  const calByDate = useMemo(() => {
+    const map = new Map<string, CalendarPtoItem[]>();
+    for (const item of calItems) {
+      for (const day of eachWeekdayIsoInclusive(item.start_date, item.end_date)) {
+        if (!day.startsWith(calMonth)) continue;
+        const list = map.get(day) || [];
+        list.push(item);
+        map.set(day, list);
+      }
+    }
+    return map;
+  }, [calItems, calMonth]);
+
+  const calCells = useMemo(() => {
+    const { from, to, label } = monthBounds(calMonth);
+    const firstDow = chicagoWeekdayIndex(from); // 0=Sun
+    const days: Array<{ iso: string | null; weekend: boolean }> = [];
+    for (let i = 0; i < (firstDow < 0 ? 0 : firstDow); i++) {
+      days.push({ iso: null, weekend: false });
+    }
+    for (const iso of eachIsoDateInclusive(from, to)) {
+      days.push({ iso, weekend: isChicagoWeekend(iso) });
+    }
+    while (days.length % 7 !== 0) days.push({ iso: null, weekend: false });
+    return { days, label, from, to };
+  }, [calMonth]);
 
   return (
     <div className="page time-off-page">
@@ -940,9 +1474,9 @@ export function TimeOffPage() {
         <div>
           <h1>Time off</h1>
           <p>
-            Request days off and track vacation &amp; sick balances
-            {canSeeBoard ? " — office board and Adjust are here" : ""}. Vacation and sick
-            requests can only be submitted for hours you still have available.
+            {canSeeBoard
+              ? "Request days off and track vacation and sick balances. The office board and Adjust are on the other tabs."
+              : "Request days off here. You only see your own requests."}
           </p>
         </div>
         <div className="toolbar no-print">
@@ -977,37 +1511,49 @@ export function TimeOffPage() {
           </button>
         )}
         {canSeeBoard && (
-          <>
-            <button
-              type="button"
-              className={`chip ${tab === "board" ? "active" : ""}`}
-              onClick={() => setTab("board")}
-            >
-              PTO board
-            </button>
-            <button
-              type="button"
-              className={`chip ${tab === "upcoming" ? "active" : ""}`}
-              onClick={() => setTab("upcoming")}
-            >
-              Birthdays / anniversaries
-            </button>
-            <button
-              type="button"
-              className={`chip ${tab === "payroll" ? "active" : ""}`}
-              onClick={() => setTab("payroll")}
-            >
-              Payroll check
-              {payrollPending ? ` (${payrollPending})` : ""}
-            </button>
-            <button
-              type="button"
-              className={`chip ${tab === "report" ? "active" : ""}`}
-              onClick={() => setTab("report")}
-            >
-              Print report
-            </button>
-          </>
+          <button
+            type="button"
+            className={`chip ${tab === "payroll" ? "active" : ""}`}
+            onClick={() => setTab("payroll")}
+          >
+            Payroll check
+            {payrollPending ? ` (${payrollPending})` : ""}
+          </button>
+        )}
+        {canSeeBoard && (
+          <details className="warranty-more">
+            <summary className="btn ghost btn-sm">More</summary>
+            <div className="warranty-more-list">
+              <button
+                type="button"
+                className={`chip ${tab === "board" ? "active" : ""}`}
+                onClick={() => setTab("board")}
+              >
+                PTO board
+              </button>
+              <button
+                type="button"
+                className={`chip ${tab === "calendar" ? "active" : ""}`}
+                onClick={() => setTab("calendar")}
+              >
+                Calendar
+              </button>
+              <button
+                type="button"
+                className={`chip ${tab === "upcoming" ? "active" : ""}`}
+                onClick={() => setTab("upcoming")}
+              >
+                Birthdays / anniversaries
+              </button>
+              <button
+                type="button"
+                className={`chip ${tab === "report" ? "active" : ""}`}
+                onClick={() => setTab("report")}
+              >
+                Print report
+              </button>
+            </div>
+          </details>
         )}
       </div>
 
@@ -1042,7 +1588,7 @@ export function TimeOffPage() {
           </div>
           {myBalance.next_anniversary && (
             <p className="muted" style={{ margin: "0.5rem 0 0", fontSize: "0.8rem" }}>
-              Next anniversary {myBalance.next_anniversary} — banks refresh automatically that day.
+              Next anniversary {myBalance.next_anniversary} - banks refresh automatically that day.
             </p>
           )}
         </div>
@@ -1056,9 +1602,13 @@ export function TimeOffPage() {
               Type
               <select
                 value={requestType}
-                onChange={(e) => setRequestType(e.target.value as TimeOffType)}
+                onChange={(e) => setRequestType(e.target.value as TimeOffType | "")}
+                required
               >
-                {TYPE_OPTIONS.map((o) => (
+                <option value="" disabled>
+                  Select type…
+                </option>
+                {EMPLOYEE_TYPE_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
                   </option>
@@ -1089,32 +1639,44 @@ export function TimeOffPage() {
             </label>
           </div>
           <label>
-            Reason / notes <span className="muted">(optional — helps your manager)</span>
+            Reason / notes <span className="muted">(optional - helps your manager)</span>
             <textarea
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               rows={2}
-              placeholder="e.g. Family trip · doctor appointment"
+              placeholder="e.g. Family trip | doctor appointment"
             />
           </label>
+          {formWeekdayCount <= 0 ? (
+            <p className="error" style={{ margin: 0, fontSize: "0.85rem" }}>
+              Saturday and Sunday don't count. Pick a range with at least one weekday
+              (Mon-Fri).
+            </p>
+          ) : (
+            <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+              {formatWeekdaySpan(startDate, endDate || startDate)} (Sat/Sun excluded)
+            </p>
+          )}
           {formBankGate.gated && (
             <p
-              className={formBankGate.ok ? "muted" : "error"}
+              className={
+                myBalance == null || formBankGate.willUnpaid ? "error" : "muted"
+              }
               style={{ margin: 0, fontSize: "0.85rem" }}
             >
               {myBalance == null
-                ? "Vacation/sick requests need your login linked to People. Ask office to link you — unpaid leave can still be requested."
-                : formBankGate.ok
-                  ? `This request uses ${formHoursNeeded}h ${formBankGate.label}. Available: ${Math.max(0, Math.round((formBankGate.available || 0) * 10) / 10)}h${
+                ? "Vacation / Sick need your login linked to People. Ask office to link you - or choose Unpaid."
+                : formBankGate.willUnpaid
+                  ? `Not enough ${formBankGate.label} bank for ${formHoursNeeded}h (${formWeekdayCount} weekday${formWeekdayCount === 1 ? "" : "s"}). Available: ${Math.max(0, Math.round((formBankGate.available || 0) * 10) / 10)}h${
                       (formBankGate.pendingSame || 0) > 0
                         ? ` (${formBankGate.pendingSame}h already pending)`
                         : ""
-                    }.`
-                  : `Not enough ${formBankGate.label} hours. Needs ${formHoursNeeded}h; available ${Math.max(0, Math.round((formBankGate.available || 0) * 10) / 10)}h${
+                    }. Request stays ${formBankGate.label} for your manager — they can approve hours against the bank (or ask you to pick Unpaid).`
+                  : `This request uses ${formHoursNeeded}h ${formBankGate.label} (${formWeekdayCount} weekday${formWeekdayCount === 1 ? "" : "s"}). Available: ${Math.max(0, Math.round((formBankGate.available || 0) * 10) / 10)}h${
                       (formBankGate.pendingSame || 0) > 0
                         ? ` (${formBankGate.pendingSame}h already pending)`
                         : ""
-                    }. Use unpaid if you have no bank hours left.`}
+                    }.`}
             </p>
           )}
           <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
@@ -1128,9 +1690,14 @@ export function TimeOffPage() {
             <button
               className="btn"
               type="submit"
-              disabled={busy || (formBankGate.gated && !formBankGate.ok)}
+              disabled={
+                busy ||
+                !requestType ||
+                formWeekdayCount <= 0 ||
+                (formBankGate.gated && !formBankGate.ok)
+              }
             >
-              {busy ? "Sending…" : "Submit for approval"}
+              {busy ? "Sending..." : "Submit for approval"}
             </button>
           </div>
         </form>
@@ -1144,10 +1711,15 @@ export function TimeOffPage() {
             mine.map((r) => (
               <article key={r.id} className={`card time-off-card st-${r.status}`}>
                 <div className="time-off-card-head">
-                  <strong>{typeLabel(r.request_type)}</strong>
+                  <strong>
+                    {typeLabel(r.request_type, r.hours_deducted, r.status)}
+                  </strong>
                   <span className={`time-off-status st-${r.status}`}>{statusLabel(r.status)}</span>
                 </div>
                 <p className="time-off-range">{formatRange(r.start_date, r.end_date)}</p>
+                <p className="muted" style={{ fontSize: "0.82rem", margin: "0.15rem 0 0" }}>
+                  {formatWeekdaySpan(r.start_date, r.end_date)}
+                </p>
                 {r.reason && <p className="muted time-off-reason">{r.reason}</p>}
                 {r.manager_name && (
                   <p className="muted" style={{ fontSize: "0.8rem", margin: "0.25rem 0 0" }}>
@@ -1174,7 +1746,7 @@ export function TimeOffPage() {
                 <p className="muted" style={{ fontSize: "0.75rem", margin: "0.4rem 0 0" }}>
                   Submitted {String(r.created_at).replace("T", " ").slice(0, 16)}
                   {r.decided_at
-                    ? ` · decided ${String(r.decided_at).replace("T", " ").slice(0, 16)}`
+                    ? ` | decided ${String(r.decided_at).replace("T", " ").slice(0, 16)}`
                     : ""}
                 </p>
               </article>
@@ -1185,6 +1757,139 @@ export function TimeOffPage() {
 
       {tab === "approvals" && isManager && (
         <section className="time-off-list">
+          {canAdminCreateTimeOff && (
+            <div className="card" style={{ marginBottom: "1rem" }}>
+              <div className="toolbar" style={{ marginBottom: showAdminCreate ? "0.65rem" : 0 }}>
+                <h2 style={{ margin: 0, fontSize: "1.05rem", flex: 1 }}>
+                  Create time off for employee
+                </h2>
+                <button
+                  type="button"
+                  className="btn secondary btn-sm"
+                  onClick={() => setShowAdminCreate((v) => !v)}
+                >
+                  {showAdminCreate ? "Hide" : "Show"}
+                </button>
+              </div>
+              {showAdminCreate && (
+                <form className="form" onSubmit={(ev) => void submitAdminCreate(ev)}>
+                  <div className="form row">
+                    <label>
+                      Employee
+                      <select
+                        value={adminEmpId}
+                        onChange={(e) => {
+                          const id = e.target.value;
+                          setAdminEmpId(id);
+                          void loadEmpHistory(id);
+                        }}
+                        required
+                      >
+                        <option value="">Select...</option>
+                        {adminCreateEmployees.map((r) => (
+                          <option
+                            key={r.employee_id}
+                            value={String(r.employee_id)}
+                            disabled={r.has_app_login === false}
+                          >
+                            {r.name}
+                            {r.has_app_login === false ? " (no app login)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Type
+                      <select
+                        value={adminType}
+                        onChange={(e) => setAdminType(e.target.value as TimeOffType)}
+                      >
+                        {TYPE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="form row">
+                    <label>
+                      Start date
+                      <input
+                        type="date"
+                        value={adminStart}
+                        onChange={(e) => {
+                          setAdminStart(e.target.value);
+                          if (adminEnd < e.target.value) setAdminEnd(e.target.value);
+                        }}
+                        required
+                      />
+                    </label>
+                    <label>
+                      End date
+                      <input
+                        type="date"
+                        value={adminEnd}
+                        min={adminStart}
+                        onChange={(e) => setAdminEnd(e.target.value)}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Hours{" "}
+                      <span className="muted">(edit for 40h week; blank = 8x weekdays)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={adminHours}
+                        onChange={(e) => setAdminHours(e.target.value)}
+                        placeholder={String(hoursForWeekdayRange(adminStart, adminEnd || adminStart, 8))}
+                      />
+                      <span className="muted" style={{ display: "block", fontSize: "0.82rem", marginTop: "0.2rem" }}>
+                        Default if blank: {hoursForWeekdayRange(adminStart, adminEnd || adminStart, 8)}h
+                        (8 x weekdays). Create &amp; approve deducts the hours you enter.
+                      </span>
+                    </label>
+                  </div>
+                  <label>
+                    Reason / notes <span className="muted">(optional)</span>
+                    <textarea
+                      value={adminReason}
+                      onChange={(e) => setAdminReason(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. Called in | office entered for tech"
+                    />
+                  </label>
+                  <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
+                    Creates &amp; approves in one step. Bank: PTO/personal - vacation;
+                    sick - sick; bereavement / unpaid / other - 0h, no bank. Soft lock:
+                    PTO ledger only - no money writes. Employee still needs a linked
+                    Field App login. Self-serve My requests is unchanged.
+                  </p>
+                  {!boardRows.length && (
+                    <p className="error" style={{ margin: 0, fontSize: "0.85rem" }}>
+                      Loading employees... open Board once if this stays empty.
+                    </p>
+                  )}
+                  <div className="toolbar">
+                    <button
+                      className="btn"
+                      type="submit"
+                      disabled={
+                        adminBusy ||
+                        !adminEmpId ||
+                        weekdayDaysInclusive(adminStart, adminEnd || adminStart) < 1
+                      }
+                    >
+                      {adminBusy ? "Saving..." : "Create & approve"}
+                    </button>
+                  </div>
+                  <EmpHistoryBelow employeeId={adminEmpId} />
+                </form>
+              )}
+            </div>
+          )}
           <h2 className="time-off-section-title">
             Waiting for you{pendingApprovals.length ? ` (${pendingApprovals.length})` : ""}
           </h2>
@@ -1198,31 +1903,76 @@ export function TimeOffPage() {
                   <span className="time-off-status st-pending">Pending</span>
                 </div>
                 <p className="time-off-range">
-                  {typeLabel(r.request_type)} · {formatRange(r.start_date, r.end_date)}
+                  {typeLabel(r.request_type, r.hours_deducted, r.status)}  | {" "}
+                  {formatRange(r.start_date, r.end_date)}
+                </p>
+                <p className="muted" style={{ fontSize: "0.82rem", margin: "0.15rem 0 0" }}>
+                  {formatWeekdaySpan(r.start_date, r.end_date)}
                 </p>
                 {r.reason && <p className="muted time-off-reason">{r.reason}</p>}
+                <label className="pto-approve-hours-field" style={{ display: "block", marginTop: "0.55rem" }}>
+                  <span style={{ fontWeight: 700 }}>Hours to approve</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.5}
+                    value={
+                      pendingHoursById[r.id] ??
+                      String(requestedHoursPreview(r))
+                    }
+                    onChange={(e) =>
+                      setPendingHoursById((prev) => ({
+                        ...prev,
+                        [r.id]: e.target.value,
+                      }))
+                    }
+                    style={{ maxWidth: "8rem", marginTop: "0.25rem" }}
+                  />
+                  <span className="muted" style={{ display: "block", fontSize: "0.82rem", marginTop: "0.2rem" }}>
+                    Requested: {requestedHoursPreview(r)}h - edit here (e.g. 16 to 12), then Approve. Bank deducts these hours.
+                  </span>
+                </label>
                 {decideId === r.id ? (
                   <form className="form" onSubmit={submitDecision} style={{ marginTop: "0.65rem" }}>
                     <p style={{ margin: 0, fontWeight: 700 }}>
                       {decideAction === "approved" ? "Approve" : "Decline"} this request
                     </p>
+                    {decideAction === "approved" && (
+                      <label>
+                        Hours to approve
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.5}
+                          value={decideHours}
+                          onChange={(e) => setDecideHours(e.target.value)}
+                          required
+                        />
+                        <span className="muted" style={{ display: "block", fontSize: "0.82rem", marginTop: "0.25rem" }}>
+                          Requested:{" "}
+                          {decideRequestedHours != null ? `${decideRequestedHours}h` : "-"}
+                          {" "}
+                          - edit so worked hours + these leave hours = 40 for the week; bank deducts Hours to approve only
+                        </span>
+                      </label>
+                    )}
                     <label>
-                      Remarks <span className="muted">(optional — employee will see this)</span>
+                      Remarks <span className="muted">(optional - employee will see this)</span>
                       <textarea
                         value={remarks}
                         onChange={(e) => setRemarks(e.target.value)}
                         rows={2}
                         placeholder={
                           decideAction === "approved"
-                            ? "e.g. Enjoy your time off — coverage noted"
-                            : "e.g. Need coverage that week — can you shift dates?"
+                            ? "e.g. Enjoy your time off - coverage noted"
+                            : "e.g. Need coverage that week - can you shift dates?"
                         }
                       />
                     </label>
                     <div className="toolbar">
                       <button className="btn btn-sm" type="submit" disabled={actingId === r.id}>
                         {actingId === r.id
-                          ? "Saving…"
+                          ? "Saving..."
                           : decideAction === "approved"
                             ? "Confirm approve"
                             : "Confirm decline"}
@@ -1230,7 +1980,11 @@ export function TimeOffPage() {
                       <button
                         type="button"
                         className="btn secondary btn-sm"
-                        onClick={() => setDecideId(null)}
+                        onClick={() => {
+                          setDecideId(null);
+                          setDecideHours("");
+                          setDecideRequestedHours(null);
+                        }}
                       >
                         Back
                       </button>
@@ -1272,7 +2026,11 @@ export function TimeOffPage() {
                     </span>
                   </div>
                   <p className="time-off-range">
-                    {typeLabel(r.request_type)} · {formatRange(r.start_date, r.end_date)}
+                    {typeLabel(r.request_type, r.hours_deducted, r.status)}{" "}
+                    | {formatRange(r.start_date, r.end_date)}
+                  </p>
+                  <p className="muted" style={{ fontSize: "0.82rem", margin: "0.15rem 0 0" }}>
+                    {formatWeekdaySpan(r.start_date, r.end_date)}
                   </p>
                   {r.manager_remarks && (
                     <div className="time-off-remarks">
@@ -1282,13 +2040,99 @@ export function TimeOffPage() {
                   <p className="muted" style={{ fontSize: "0.75rem", margin: "0.35rem 0 0" }}>
                     {r.decided_by_name ? `By ${r.decided_by_name}` : ""}
                     {r.decided_at
-                      ? ` · ${String(r.decided_at).replace("T", " ").slice(0, 16)}`
+                      ? ` | ${String(r.decided_at).replace("T", " ").slice(0, 16)}`
                       : ""}
                   </p>
                 </article>
               ))}
             </>
           )}
+        </section>
+      )}
+
+      {tab === "calendar" && canSeeBoard && (
+        <section className="pto-calendar-section">
+          <div className="card pto-calendar-card">
+            <div className="pto-calendar-nav" role="group" aria-label="Change month">
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                onClick={() => {
+                  const next = shiftMonth(calMonth, -1);
+                  setCalMonth(next);
+                  void loadCalendar(next);
+                }}
+              >
+                x
+              </button>
+              <strong className="pto-calendar-title">{calCells.label}</strong>
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                onClick={() => {
+                  const next = shiftMonth(calMonth, 1);
+                  setCalMonth(next);
+                  void loadCalendar(next);
+                }}
+              >
+                x
+              </button>
+              <button
+                type="button"
+                className="btn secondary btn-sm"
+                disabled={calBusy}
+                onClick={() => void loadCalendar()}
+              >
+                {calBusy ? "Loading..." : "Reload"}
+              </button>
+            </div>
+            <p className="muted" style={{ margin: "0.4rem 0 0.75rem", fontSize: "0.82rem" }}>
+              Approved time off on <strong>weekdays only</strong> - Saturday and Sunday stay blank
+              even when a request range includes the weekend.
+            </p>
+            <div className="pto-calendar-grid" role="grid" aria-label="Time off calendar">
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                <div key={d} className="pto-calendar-dow" role="columnheader">
+                  {d}
+                </div>
+              ))}
+              {calCells.days.map((cell, idx) => {
+                if (!cell.iso) {
+                  return <div key={`pad-${idx}`} className="pto-calendar-cell is-pad" />;
+                }
+                const people = cell.weekend ? [] : calByDate.get(cell.iso) || [];
+                const dayNum = Number(cell.iso.slice(8, 10));
+                return (
+                  <div
+                    key={cell.iso}
+                    className={`pto-calendar-cell${cell.weekend ? " is-weekend" : ""}${
+                      people.length ? " has-pto" : ""
+                    }`}
+                    role="gridcell"
+                  >
+                    <div className="pto-calendar-daynum">{dayNum}</div>
+                    {cell.weekend ? (
+                      <div className="pto-calendar-weekend-label muted"> - </div>
+                    ) : (
+                      <ul className="pto-calendar-people">
+                        {people.map((p) => (
+                          <li key={`${cell.iso}-${p.id}`} title={`${p.type_label} | ${formatRange(p.start_date, p.end_date)}`}>
+                            <span className="pto-calendar-name">{p.employee_name}</span>
+                            <span className="pto-calendar-type muted">{p.type_label}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {!calBusy && calItems.length === 0 ? (
+              <p className="muted" style={{ margin: "0.75rem 0 0" }}>
+                No approved time off overlapping this month.
+              </p>
+            ) : null}
+          </div>
         </section>
       )}
 
@@ -1303,22 +2147,22 @@ export function TimeOffPage() {
             <p className="muted" style={{ margin: "0.5rem 0 0", fontSize: "0.82rem" }}>
               Balances can go negative (they owe hours). On each hire anniversary, vacation &amp; sick
               used reset automatically. When someone is over, use{" "}
-              <strong>Print owe / sign-off</strong> below — they sign that owed hours come out of
+              <strong>Print owe / sign-off</strong> below - they sign that owed hours come out of
               their next grant.
             </p>
             <p className="muted" style={{ margin: "0.35rem 0 0", fontSize: "0.82rem" }}>
               <strong>Rehire rule:</strong> mark leavers inactive in People (set last day). If they
-              return after <strong>90+ days</strong>, PTO restarts from the rehire date (banks → 0
+              return after <strong>90+ days</strong>, PTO restarts from the rehire date (banks - 0
               until their new first anniversary). Under 90 days keeps prior hire date and banks.
             </p>
           </div>
           {overRows.length > 0 && (
             <div className="card no-print" style={{ marginBottom: "0.75rem" }}>
               <h3 style={{ marginTop: 0 }}>
-                People over — hours owed ({overRows.length})
+                People over - hours owed ({overRows.length})
               </h3>
               <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
-                Print a sign-off for each person. Keep the signed copy in their file — owed hours
+                Print a sign-off for each person. Keep the signed copy in their file - owed hours
                 come out when new time grants on their anniversary.
               </p>
               <ul className="pto-over-list">
@@ -1335,9 +2179,9 @@ export function TimeOffPage() {
                             sickOwe ? `${sickOwe}h sick owed` : null,
                           ]
                             .filter(Boolean)
-                            .join(" · ")}
+                            .join(" | ")}
                           {r.next_anniversary
-                            ? ` · next grant ${formatDisplayDate(r.next_anniversary)}`
+                            ? ` | next grant ${formatDisplayDate(r.next_anniversary)}`
                             : ""}
                         </span>
                       </div>
@@ -1392,9 +2236,9 @@ export function TimeOffPage() {
                                 <div className="muted pto-board-bday">Bday {r.birthday_md}</div>
                               ) : null}
                             </td>
-                            <td>{r.hire_date || "—"}</td>
+                            <td>{r.hire_date || " - "}</td>
                             <td>{r.years_of_service}</td>
-                            <td>{r.next_anniversary || "—"}</td>
+                            <td>{r.next_anniversary || " - "}</td>
                             <td
                               className={`pto-bank-cell${
                                 r.vacation_balance < 0 ? " pto-neg" : ""
@@ -1445,7 +2289,7 @@ export function TimeOffPage() {
                   </table>
                 </div>
 
-                {/* Phone: one card per employee — no sideways scroll */}
+                {/* Phone: one card per employee - no sideways scroll */}
                 <ul className="pto-board-cards">
                   {boardRows.map((r) => {
                     const over = r.vacation_balance < 0 || r.sick_balance < 0;
@@ -1470,7 +2314,7 @@ export function TimeOffPage() {
                                 r.birthday_md ? `Bday ${r.birthday_md}` : null,
                               ]
                                 .filter(Boolean)
-                                .join(" · ")}
+                                .join(" | ")}
                             </div>
                           </div>
                         </div>
@@ -1481,7 +2325,7 @@ export function TimeOffPage() {
                               {r.vacation_balance}
                               <span className="muted"> / {r.vacation_entitlement}</span>
                             </span>
-                            <span className="muted"> · used {r.vacation_used}</span>
+                            <span className="muted"> | used {r.vacation_used}</span>
                           </div>
                           <div>
                             <span className="pto-board-card-label">Sick</span>
@@ -1489,7 +2333,7 @@ export function TimeOffPage() {
                               {r.sick_balance}
                               <span className="muted"> / {r.sick_entitlement}</span>
                             </span>
-                            <span className="muted"> · used {r.sick_used}</span>
+                            <span className="muted"> | used {r.sick_used}</span>
                           </div>
                         </div>
                         <div className="pto-board-card-actions">
@@ -1522,10 +2366,10 @@ export function TimeOffPage() {
 
           {adjustRow && canConfirmPayroll && (
             <div className="card pto-adjust-form-card" style={{ marginTop: "0.75rem" }}>
-              <h3 style={{ marginTop: 0 }}>Manual adjust · {adjustRow.name}</h3>
+              <h3 style={{ marginTop: 0 }}>Manual adjust | {adjustRow.name}</h3>
               <p className="muted" style={{ fontSize: "0.85rem" }}>
                 Positive hours = use more (deduct from bank). Negative = restore / credit.{" "}
-                <strong>Used on</strong> is the day they were actually out — not today unless that
+                <strong>Used on</strong> is the day they were actually out - not today unless that
                 is the day. Note required for the ledger.
               </p>
               <form className="form" onSubmit={(ev) => void submitManualAdjust(ev)}>
@@ -1541,7 +2385,7 @@ export function TimeOffPage() {
                     </select>
                   </label>
                   <label>
-                    Hours (+ use / − restore)
+                    Hours (+ use / - restore)
                     <input
                       type="number"
                       step="0.5"
@@ -1565,13 +2409,13 @@ export function TimeOffPage() {
                   <input
                     value={adjustNote}
                     onChange={(e) => setAdjustNote(e.target.value)}
-                    placeholder="e.g. Came in afternoon — restore 4h"
+                    placeholder="e.g. Came in afternoon - restore 4h"
                     required
                   />
                 </label>
                 <div className="toolbar">
                   <button className="btn" type="submit" disabled={adjustBusy}>
-                    {adjustBusy ? "Saving…" : "Save adjust"}
+                    {adjustBusy ? "Saving..." : "Save adjust"}
                   </button>
                   <button
                     type="button"
@@ -1579,12 +2423,15 @@ export function TimeOffPage() {
                     onClick={() => {
                       setAdjustRow(null);
                       setAdjustUsedOn("");
+                      setEmpHistory(null);
+                      setEmpHistoryForId(null);
                     }}
                   >
                     Cancel
                   </button>
                 </div>
               </form>
+              <EmpHistoryBelow employeeId={adjustRow.employee_id} />
             </div>
           )}
 
@@ -1595,8 +2442,7 @@ export function TimeOffPage() {
                   type="button"
                   className="btn"
                   onClick={() => {
-                    document.body.classList.add("print-pto-overage");
-                    window.print();
+                    void printWithLightTheme("print-pto-overage");
                   }}
                 >
                   Print acknowledgment
@@ -1627,8 +2473,8 @@ export function TimeOffPage() {
           <div className="card" style={{ marginBottom: "0.75rem" }}>
             <h2 style={{ marginTop: 0 }}>Payroll check</h2>
             <p className="muted" style={{ fontSize: "0.85rem" }}>
-              Approve already deducts vacation/sick. At payroll, confirm they actually stayed out — or
-              restore hours if they came in. Opens on the <strong>previous Sat–Fri</strong> pay week
+              Approve already deducts vacation/sick. At payroll, confirm they actually stayed out - or
+              restore hours if they came in. Opens on the <strong>previous Sat-Fri</strong> pay week
               (Central) automatically.
             </p>
             <div className="form row">
@@ -1656,7 +2502,7 @@ export function TimeOffPage() {
                 disabled={payrollBusy}
                 onClick={() => void loadPayrollCheck()}
               >
-                {payrollBusy ? "Loading…" : "Load week"}
+                {payrollBusy ? "Loading..." : "Load week"}
               </button>
               <button
                 type="button"
@@ -1669,7 +2515,7 @@ export function TimeOffPage() {
                   void loadPayrollCheck(w);
                 }}
               >
-                Prior Sat–Fri
+                Prior Sat-Fri
               </button>
             </div>
           </div>
@@ -1791,7 +2637,7 @@ export function TimeOffPage() {
                                     setPartialNote("");
                                   }}
                                 >
-                                  Partial…
+                                  Partial...
                                 </button>
                                 <button
                                   type="button"
@@ -1800,7 +2646,7 @@ export function TimeOffPage() {
                                   onClick={() => {
                                     const n = window.prompt(
                                       `Restore ${item.hours_deducted}h for ${item.employee_name} (they came in)? Add a short note:`,
-                                      "Came in — restore hours"
+                                      "Came in - restore hours"
                                     );
                                     if (n == null) return;
                                     if (!n.trim()) {
@@ -1810,7 +2656,7 @@ export function TimeOffPage() {
                                     void confirmUsage(item, "not_taken", 0, n.trim());
                                   }}
                                 >
-                                  Came in — restore
+                                  Came in - restore
                                 </button>
                               </div>
                             )
@@ -1832,7 +2678,7 @@ export function TimeOffPage() {
         <section className="card">
           <h2 style={{ marginTop: 0 }}>Upcoming birthdays &amp; anniversaries</h2>
           <p className="muted" style={{ fontSize: "0.85rem" }}>
-            Next ~45 days — recognize people on their special day.
+            Next ~45 days - recognize people on their special day.
           </p>
           {!upcoming.length ? (
             <p className="muted">No events in the next 45 days (need hire dates / birthdays on file).</p>
@@ -1846,7 +2692,7 @@ export function TimeOffPage() {
                   </span>
                   <span>{ev.name}</span>
                   {ev.event_type === "anniversary" && ev.years_of_service != null ? (
-                    <span className="muted"> · {ev.years_of_service} yrs</span>
+                    <span className="muted"> | {ev.years_of_service} yrs</span>
                   ) : null}
                 </li>
               ))}
@@ -1860,7 +2706,7 @@ export function TimeOffPage() {
           <div className="card no-print" style={{ marginBottom: "0.75rem" }}>
             <h2 style={{ marginTop: 0 }}>Printable usage report</h2>
             <p className="muted" style={{ fontSize: "0.85rem" }}>
-              Pick an employee — <strong>From</strong> defaults to their last anniversary (or hire
+              Pick an employee - <strong>From</strong> defaults to their last anniversary (or hire
               date), <strong>To</strong> to today. Print report uses that window. Adjust dates if
               needed.
             </p>
@@ -1876,7 +2722,7 @@ export function TimeOffPage() {
                     applyReportDefaultsForEmployee(id);
                   }}
                 >
-                  <option value="">Select…</option>
+                  <option value="">Select...</option>
                   {boardRows.map((r) => (
                     <option key={r.employee_id} value={String(r.employee_id)}>
                       {r.name}
@@ -1900,7 +2746,7 @@ export function TimeOffPage() {
                 disabled={busy || !reportEmpId}
                 onClick={() => void printReport()}
               >
-                {busy ? "Preparing…" : "Print report"}
+                {busy ? "Preparing..." : "Print report"}
               </button>
             </div>
           </div>
@@ -1916,7 +2762,7 @@ export function TimeOffPage() {
                   <div className="pto-print-subtitle">
                     Time-off usage report
                     {reportFrom || reportTo
-                      ? ` · ${reportFrom || "…"} → ${reportTo || todayIso()}`
+                      ? ` | ${reportFrom || "..."} - ${reportTo || todayIso()}`
                       : ""}
                   </div>
                 </div>
@@ -1942,7 +2788,7 @@ export function TimeOffPage() {
                     >
                       {reportData.balance.vacation_balance}h
                     </strong>
-                    {" · "}
+                    {" | "}
                     Sick balance:{" "}
                     <strong
                       className={
@@ -1975,7 +2821,7 @@ export function TimeOffPage() {
                             : null,
                         ]
                           .filter(Boolean)
-                          .join(" · ")}
+                          .join(" | ")}
                       </span>
                     </div>
                   )}
@@ -1990,6 +2836,7 @@ export function TimeOffPage() {
                     <tr>
                       <th>Type</th>
                       <th>Dates</th>
+                      <th>Weekdays</th>
                       <th>Approved by</th>
                       <th>Remarks</th>
                     </tr>
@@ -1997,10 +2844,13 @@ export function TimeOffPage() {
                   <tbody>
                     {reportData.approved_requests.map((r) => (
                       <tr key={r.id}>
-                        <td>{typeLabel(r.request_type)}</td>
+                        <td>
+                          {typeLabel(r.request_type, r.hours_deducted, r.status)}
+                        </td>
                         <td>{formatRange(r.start_date, r.end_date)}</td>
-                        <td>{r.decided_by_name || "—"}</td>
-                        <td>{r.manager_remarks || r.reason || "—"}</td>
+                        <td>{formatWeekdaySpan(r.start_date, r.end_date)}</td>
+                        <td>{r.decided_by_name || " - "}</td>
+                        <td>{r.manager_remarks || r.reason || " - "}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2030,7 +2880,7 @@ export function TimeOffPage() {
                         <td>{l.kind}</td>
                         <td>{l.hours}</td>
                         <td>{l.source}</td>
-                        <td>{l.note || "—"}</td>
+                        <td>{l.note || " - "}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2041,7 +2891,7 @@ export function TimeOffPage() {
                 reportData.balance.sick_balance < 0) ? (
                 <div className="pto-report-overage-sign">
                   <p className="pto-report-overage-banner no-print">
-                    <strong>Overage detected</strong> — print is 2 pages: (1) usage report above,
+                    <strong>Overage detected</strong> - print is 2 pages: (1) usage report above,
                     (2) employee + office acknowledgment below. No handwritten dates needed.
                   </p>
                   <OverageSignPage

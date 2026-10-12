@@ -1,5 +1,9 @@
 /** Persist and serve receipt OCR learning from user corrections. */
 
+import { aliasCandidateLine, brandFromHeader, canonicalBrand } from "../src/lib/fuelStoreFromReceipt";
+
+export const FUEL_BRAND_ALIAS_KEY = "fuel_brand_alias";
+
 export type OcrFieldSnapshot = {
   fuel_date?: string | null;
   fuel_time?: string | null;
@@ -28,6 +32,7 @@ export type OcrHints = {
   patterns: Record<string, Record<string, string[]>>;
   /** store_key → field → values often correct when present in text (use carefully) */
   known_values: Record<string, Record<string, string[]>>;
+  brand_aliases?: { key: string; brand: string }[];
 };
 
 export function storeKeyFrom(store: string | null | undefined, rawText?: string | null): string {
@@ -327,7 +332,8 @@ export async function recordOcrFeedback(
   userId: number,
   rawText: string | null | undefined,
   ocr: OcrFieldSnapshot,
-  final: OcrFieldSnapshot
+  final: OcrFieldSnapshot,
+  opts: { kind?: "fuel" | "other"; learnAliases?: boolean } = {}
 ): Promise<{ corrections: number }> {
   const storeKey = storeKeyFrom(final.store_number || ocr.store_number, rawText);
   let n = 0;
@@ -348,6 +354,13 @@ export async function recordOcrFeedback(
       .bind(userId, storeKey, field, ocrS || null, correct, rawText ? rawText.slice(0, 4000) : null)
       .run();
     n++;
+
+    // Fuel store #: keep the audit row above, but NEVER learn a store number
+    // (no sub / value_in_text / prefer_st_hash / line_label). Optionally learn a brand-name alias.
+    if (opts.kind === "fuel" && field === "store_number") {
+      if (opts.learnAliases) await learnFuelBrandAlias(db, rawText, correct);
+      continue;
+    }
 
     // Substitution memory (same wrong OCR → same fix)
     if (ocrS) {
@@ -621,6 +634,17 @@ export async function bootstrapPatternsFromCorrections(db: D1Database): Promise<
   }
 }
 
+/** Save & verify only: teach "this top-of-receipt line means <brand>". Never stores a number. */
+async function learnFuelBrandAlias(db: D1Database, rawText: string | null | undefined, finalStore: string): Promise<void> {
+  if (!rawText) return;
+  const brand = canonicalBrand(finalStore); // "7 Eleven 42360" -> "7-Eleven"; unknown brands -> null (skip)
+  if (!brand) return;
+  if (brandFromHeader(rawText) === brand) return; // already read right, nothing to teach
+  const key = aliasCandidateLine(rawText); // first 3 lines only; skips digits/address/city/phone lines
+  if (!key) return;
+  await bumpMemory(db, FUEL_BRAND_ALIAS_KEY, "brand", "sub", key, brand);
+}
+
 export async function getOcrHints(db: D1Database): Promise<OcrHints> {
   // Teach from historical corrections if patterns empty
   try {
@@ -649,6 +673,7 @@ export async function getOcrHints(db: D1Database): Promise<OcrHints> {
       }>();
 
     for (const r of rows.results || []) {
+      if (r.store_key === FUEL_BRAND_ALIAS_KEY) continue;
       if (r.memory_type === "sub") {
         if (!hints.subs[r.store_key]) hints.subs[r.store_key] = {};
         if (!hints.subs[r.store_key][r.field_name]) hints.subs[r.store_key][r.field_name] = {};
@@ -682,6 +707,25 @@ export async function getOcrHints(db: D1Database): Promise<OcrHints> {
     }
   } catch {
     // tables may not exist yet
+  }
+  try {
+    const al = await db
+      .prepare(
+        `SELECT key_text, value_text FROM ocr_memory
+         WHERE store_key = ? AND field_name = 'brand' AND memory_type = 'sub'
+         ORDER BY hits DESC, id DESC LIMIT 200`
+      )
+      .bind(FUEL_BRAND_ALIAS_KEY)
+      .all<{ key_text: string; value_text: string }>();
+    const seen = new Set<string>();
+    hints.brand_aliases = [];
+    for (const r of al.results || []) {
+      if (seen.has(r.key_text)) continue;
+      seen.add(r.key_text);
+      hints.brand_aliases.push({ key: r.key_text, brand: r.value_text });
+    }
+  } catch {
+    /* table may not exist yet */
   }
   return hints;
 }

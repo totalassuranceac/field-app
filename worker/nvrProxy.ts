@@ -113,6 +113,19 @@ export function parseCameraKey(
   return { source: "wyze", id: s };
 }
 
+/** Absolute shop-tunnel URL for continuous Wyze LIVE MJPEG (do not proxy body through Worker). */
+export function fetchWyzeLiveUrl(baseUrl: string, camId: string): string {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  return `${base}/fieldapp/wyze/live?cam=${encodeURIComponent(camId)}`;
+}
+
+/** Absolute shop-tunnel URL for continuous NVR LIVE MJPEG (RTSP→ISAPI→snap-pump on shop proxy). */
+export function fetchNvrLiveUrl(baseUrl: string, channelId: string | number): string {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  const ch = encodeURIComponent(String(channelId));
+  return `${base}/fieldapp/nvr/live?channel=${ch}`;
+}
+
 /** JPEG from shop proxy: /fieldapp/wyze/snapshot?cam= */
 export async function fetchWyzeSnapshot(
   baseUrl: string,

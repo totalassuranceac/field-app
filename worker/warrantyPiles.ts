@@ -34,20 +34,34 @@ export function vendorDefaultsToReturn(name: string | null | undefined): boolean
   return isSolarSupplyVendor(name) || isJohnstoneVendor(name);
 }
 
-/** File pile = dropped off, not parked. */
+/** File pile = dropped off, not parked, not voided. */
 export async function countWarrantyFilePile(db: D1Database): Promise<number> {
   try {
     const row = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM warranty_claims
-         WHERE status = 'dropped_off' AND IFNULL(parked, 0) = 0`
+         WHERE status = 'dropped_off' AND IFNULL(parked, 0) = 0 AND IFNULL(voided, 0) = 0`
       )
       .first<{ n: number }>();
     return Number(row?.n || 0);
   } catch (e) {
-    // Migration 079 not applied yet — fall back to all dropped_off
     const msg = e instanceof Error ? e.message : String(e);
-    if (/no such column.*parked/i.test(msg)) {
+    if (/no such column.*voided/i.test(msg)) {
+      try {
+        const row = await db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM warranty_claims
+             WHERE status = 'dropped_off' AND IFNULL(parked, 0) = 0`
+          )
+          .first<{ n: number }>();
+        return Number(row?.n || 0);
+      } catch (e2) {
+        const msg2 = e2 instanceof Error ? e2.message : String(e2);
+        if (!/no such column.*parked/i.test(msg2)) return 0;
+      }
+    }
+    // Migration 079 not applied yet - fall back to all dropped_off
+    if (/no such column.*(parked|voided)/i.test(msg)) {
       try {
         const row = await db
           .prepare(

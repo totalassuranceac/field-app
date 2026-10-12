@@ -118,18 +118,28 @@ export function isPoolDriverLabel(s: string | null | undefined): boolean {
   );
 }
 
-/** Map list / popup label: assigned tech, pool label, or Unassigned — never raw GPS device name when matched. */
+/** Strip leading dashes/junk from Verizon/OneStep display names (-Omar → Omar). */
+function cleanTrackerName(s: string | null | undefined): string | null {
+  if (!s) return null;
+  const t = String(s)
+    .replace(/^[\s\-–—_]+/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t || null;
+}
+
+/** Map list / popup label: assigned tech, pool label, or Unassigned - never raw GPS device name when matched. */
 function mapDriverLabel(
   matched: FleetVehicle | null | undefined,
   unmatchedFallback: string | null
 ): string | null {
-  if (!matched) return unmatchedFallback;
+  if (!matched) return cleanTrackerName(unmatchedFallback);
   const ad = (matched.assigned_driver || "").trim();
   return ad || null;
 }
 
 /** Split "Speedy Marroquin + Chuck Dickerson" into individual people. */
-function driverNameParts(assigned: string | null | undefined): string[] {
+export function driverNameParts(assigned: string | null | undefined): string[] {
   if (isPoolDriverLabel(assigned)) return [];
   const raw = normalizeName(assigned);
   if (!raw) return [];
@@ -494,7 +504,9 @@ async function fetchOneStepPositions(
     const devices: ProviderDeviceSummary[] = [];
     let withoutPosition = 0;
     for (const d of byId.values()) {
-      const displayName = (d.display_name || d.name || `Device ${d.device_id}`).trim();
+      const displayName =
+        cleanTrackerName(d.display_name || d.name || `Device ${d.device_id}`) ||
+        `Device ${d.device_id}`;
       // Prefer vehicles marked One Step, but always fall back to all units for matching
       const matched =
         matchVehicle(displayName, vehicles, "one") ||
@@ -513,13 +525,13 @@ async function fetchOneStepPositions(
         withoutPosition++;
         continue;
       }
-      // Always plot — new OneStep devices need no app registration
+      // Always plot - new OneStep devices need no app registration
       const oos = (matched?.status || "").toLowerCase() === "out_of_service";
       positions.push({
         id: `onestep:${d.device_id}`,
         provider: "onestep",
         name: displayName,
-        // Matched units: tech or pool label only — empty = Unassigned (still on map).
+        // Matched units: tech or pool label only - empty = Unassigned (still on map).
         // Do not fall back to GPS device name (that looked like someone was assigned).
         driver_name: mapDriverLabel(matched, displayName),
         phone: null,
@@ -718,17 +730,19 @@ async function fetchVerizonPositions(
       const lat = p.Coordinate?.Latitude;
       const lng = p.Coordinate?.Longitude;
       if (lat == null || lng == null) continue;
-      const label = p.vnme || p.dnme || `Vehicle ${p.id}`;
+      const label =
+        cleanTrackerName(p.vnme || p.dnme || `Vehicle ${p.id}`) || `Vehicle ${p.id}`;
+      const dnmeClean = cleanTrackerName(p.dnme || null);
       const matched =
         matchVehicle(label, vehicles, "verizon") ||
-        matchVehicle(p.dnme || "", vehicles, "verizon") ||
+        matchVehicle(dnmeClean || "", vehicles, "verizon") ||
         matchVehicle(label, vehicles);
       const oos = (matched?.status || "").toLowerCase() === "out_of_service";
       positions.push({
         id: `verizon:${p.id}`,
         provider: "verizon",
         name: label,
-        driver_name: mapDriverLabel(matched, p.dnme || null),
+        driver_name: mapDriverLabel(matched, dnmeClean),
         phone: null,
         lat,
         lng,
@@ -1052,4 +1066,38 @@ export async function getLivePositions(env: Env, force = false): Promise<LivePos
 
   positionsCache = { at: Date.now(), data };
   return data;
+}
+
+/**
+ * OneStep pins for the install-crew check only.
+ * Does not read or write the live-map cache and does not touch last-known GPS.
+ */
+export async function getOneStepPositionsForOnsite(
+  env: Env,
+  vehicleIds: number[]
+): Promise<{ positions: LivePosition[]; error?: string }> {
+  const want = new Set(vehicleIds.filter((id) => Number(id) > 0));
+  let vehicles: FleetVehicle[] = [];
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT id, unit_number, plate, assigned_driver, gps_tracker, status,
+              last_lat, last_lng, last_gps_at
+       FROM vehicles WHERE status != 'retired'`
+    ).all<FleetVehicle>();
+    vehicles = rows.results || [];
+  } catch {
+    const rows = await env.DB.prepare(
+      `SELECT id, unit_number, plate, assigned_driver, gps_tracker, status
+       FROM vehicles WHERE status != 'retired'`
+    ).all<FleetVehicle>();
+    vehicles = rows.results || [];
+  }
+  if (!env.ONESTEP_USER || !env.ONESTEP_PASS) {
+    return { positions: [], error: "onestep_not_configured" };
+  }
+  const os = await fetchOneStepPositions(env, vehicles);
+  const positions = dedupePositionsByVehicle(os.positions, vehicles).filter(
+    (p) => p.vehicle_id != null && want.has(Number(p.vehicle_id))
+  );
+  return { positions, error: os.error };
 }

@@ -826,6 +826,44 @@ export function ToolLoanLedgerPage() {
     }
   }
 
+  async function setLoanStatus(status: "inactive" | "former" | "active") {
+    if (!selectedId || !detail) return;
+    const name = detail.person.display_name;
+    if (status === "former") {
+      const yes = window.confirm(
+        `Mark ${name} as former? This turns their login off and their personal tools leave with them. Company bottles stay on the truck. The loan balance stays.`
+      );
+      if (!yes) return;
+    }
+    if (status === "inactive") {
+      const yes = window.confirm(
+        `Pause ${name}? The loan stays on file. Their login stays on and their personal tools stay with them.`
+      );
+      if (!yes) return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/tool-loan-ledger/people/${selectedId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status, deactivate_login: status === "former" }),
+      });
+      setOk(
+        status === "former"
+          ? "Marked former. Login is off and personal tools left with them."
+          : status === "inactive"
+            ? "Paused. Login and personal tools stay."
+            : "Marked active. Personal tools come back if the login was off. Bottles stay until Back in service."
+      );
+      await loadDetail(selectedId);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update status");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveWeekly() {
     if (!selectedId) return;
     setBusy(true);
@@ -1917,6 +1955,37 @@ export function ToolLoanLedgerPage() {
               >
                 Save default
               </button>
+              <p className="muted" style={{ margin: "0.65rem 0 0.35rem" }}>
+                Status: {detail.person.status || "active"}
+              </p>
+              <div className="toolbar">
+                <button
+                  type="button"
+                  className="btn secondary small"
+                  disabled={busy || detail.person.status === "inactive"}
+                  onClick={() => void setLoanStatus("inactive")}
+                >
+                  Pause loan
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary small"
+                  disabled={busy || detail.person.status === "former"}
+                  onClick={() => void setLoanStatus("former")}
+                >
+                  Former: turn login off and release personal tools
+                </button>
+                {detail.person.status !== "active" ? (
+                  <button
+                    type="button"
+                    className="btn secondary small"
+                    disabled={busy}
+                    onClick={() => void setLoanStatus("active")}
+                  >
+                    Mark active again
+                  </button>
+                ) : null}
+              </div>
             </div>
           )}
 

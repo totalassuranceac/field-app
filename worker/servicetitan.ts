@@ -42,6 +42,10 @@ export async function stConfigured(env: Env, db: D1Database): Promise<boolean> {
 
 type TokenCache = { access_token: string; expires_at: number };
 
+export async function clearStTokenCache(db: D1Database): Promise<void> {
+  await setSetting(db, "st_token_cache", "");
+}
+
 async function getAccessToken(env: Env, db: D1Database, creds: StCredentials): Promise<string> {
   const raw = await getSetting(db, "st_token_cache", "");
   if (raw) {
@@ -122,15 +126,67 @@ export async function stApiGet(
   if (!creds) {
     return { ok: false, status: 503, json: null, text: "ServiceTitan not configured" };
   }
-  const res = await stFetch(env, db, creds, path, { method: "GET" });
-  const text = await res.text();
-  let json: unknown = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+
+  async function once(): Promise<{ ok: boolean; status: number; json: unknown; text: string }> {
+    const res = await stFetch(env, db, creds!, path, { method: "GET" });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: res.ok, status: res.status, json, text };
   }
-  return { ok: res.ok, status: res.status, json, text };
+
+  let out = await once();
+  // Stale token after scope / Allow Access — refresh once on 401 only.
+  // Do not clear on 403 (missing scope is legitimate; clearing thrashes auth).
+  if (out.status === 401) {
+    await clearStTokenCache(db);
+    out = await once();
+  }
+  return out;
+}
+
+
+/** Public JSON request helper (GET/POST/PATCH/PUT/DELETE) for other modules. */
+export async function stApiJson(
+  env: Env,
+  db: D1Database,
+  path: string,
+  init?: { method?: string; body?: unknown }
+): Promise<{ ok: boolean; status: number; json: unknown; text: string }> {
+  const creds = await loadStCredentials(env, db);
+  if (!creds) {
+    return { ok: false, status: 503, json: null, text: "ServiceTitan not configured" };
+  }
+  const method = (init?.method || "GET").toUpperCase();
+  const headers: Record<string, string> = {};
+  let body: string | undefined;
+  if (init?.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = typeof init.body === "string" ? init.body : JSON.stringify(init.body);
+  }
+
+  async function once(): Promise<{ ok: boolean; status: number; json: unknown; text: string }> {
+    const res = await stFetch(env, db, creds!, path, { method, headers, body });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: res.ok, status: res.status, json, text };
+  }
+
+  let out = await once();
+  if (out.status === 401) {
+    await clearStTokenCache(db);
+    out = await once();
+  }
+  return out;
 }
 
 export async function stTenantId(env: Env, db: D1Database): Promise<string | null> {

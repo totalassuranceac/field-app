@@ -6,6 +6,7 @@
 
 import type { Env } from "./types";
 import { getSetting } from "./audit";
+import { secretsMatch } from "./secretCompare";
 import {
   loadStTechnicians,
   matchUserToStTechnician,
@@ -17,7 +18,7 @@ import { logSms, normalizePhone, sendSms, smsConfigured } from "./sms";
 const TZ = "America/Chicago";
 const DEDUPE_HOURS = 6;
 /** Optional shared secret for public ST/Zapier webhook (settings or env). */
-const WEBHOOK_SECRET_SETTING = "st_assignment_sms_webhook_secret";
+
 
 export type AssignmentEvent = {
   st_job_id: string;
@@ -667,19 +668,20 @@ export function parseAssignmentWebhookPayload(raw: unknown): AssignmentEvent[] {
   return out;
 }
 
-export async function verifyAssignmentWebhookSecret(
-  db: D1Database,
+/** Header secret only. Unset or shorter than 32 chars = disabled. Both headers, if they differ, are bad. */
+export async function assignmentWebhookAuth(
   env: Env,
-  provided: string | null | undefined
-): Promise<boolean> {
-  const fromEnv = (env as Env & { ST_ASSIGNMENT_WEBHOOK_SECRET?: string })
-    .ST_ASSIGNMENT_WEBHOOK_SECRET;
-  const secret =
-    (fromEnv || "").trim() ||
-    (await getSetting(db, WEBHOOK_SECRET_SETTING, "")).trim();
-  // If no secret configured, allow (office can lock later) — still HTTPS on workers.dev
-  if (!secret) return true;
-  return Boolean(provided && provided.trim() === secret);
+  headers: { primary?: string | null; alt?: string | null }
+): Promise<"ok" | "disabled" | "missing" | "bad"> {
+  const secret = String(env.ST_ASSIGNMENT_WEBHOOK_SECRET || "").trim();
+  if (secret.length < 32) return "disabled";
+  const primary = String(headers.primary || "").trim();
+  const alt = String(headers.alt || "").trim();
+  if (primary && alt && primary !== alt) return "bad";
+  const got = primary || alt;
+  if (!got) return "missing";
+  if (!(await secretsMatch(got, secret))) return "bad";
+  return "ok";
 }
 
 type ApptRow = {

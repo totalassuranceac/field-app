@@ -1,8 +1,20 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { VehicleQuickPick, type VehicleMatch } from "../components/VehicleQuickPick";
+import { PartsReceivingPanel } from "../components/PartsReceivingPanel";
+
+function OrderMore({ children }: { children: ReactNode }) {
+  return (
+    <details className="warranty-more">
+      <summary className="btn ghost btn-sm" onClick={(e) => e.stopPropagation()}>
+        More
+      </summary>
+      <div className="warranty-more-list">{children}</div>
+    </details>
+  );
+}
 
 type OrderStatus = "needed" | "ordered" | "arriving" | "received" | "cancelled";
 type VendorPref = "autozone" | "firstcall" | "either" | "other";
@@ -26,6 +38,23 @@ interface PartsOrder {
   created_at: string;
   requested_by_name?: string | null;
   vehicle_unit?: string | null;
+  job_ref?: string | null;
+  needed_by?: string | null;
+  deliver_to?: string | null;
+  eta_on?: string | null;
+  po_number?: string | null;
+  still_needed_due?: boolean;
+  events?: PartsOrderEvent[];
+}
+
+interface PartsOrderEvent {
+  id: number;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  note: string | null;
+  created_at: string;
+  actor_name?: string | null;
 }
 
 interface VendorLink {
@@ -160,6 +189,13 @@ function formatWhen(iso: string | null | undefined): string {
   }
 }
 
+function deliverLabel(value: string | null | undefined): string {
+  if (value === "shop") return "Shop";
+  if (value === "truck") return "Truck";
+  if (value === "job_site") return "Job site";
+  return "";
+}
+
 function unitLabel(r: PartsOrder): string {
   if (r.vehicle_unit) return `Unit ${r.vehicle_unit}`;
   if (r.vehicle_label) return r.vehicle_label;
@@ -191,23 +227,34 @@ export function PartsOrderPage() {
     () => searchParams.get("desc") || searchParams.get("part") || ""
   );
   const [partNumber, setPartNumber] = useState("");
-  const [vehicleId, setVehicleId] = useState(() => searchParams.get("vehicle") || "");
+  const [vehicleId, setVehicleId] = useState(
+    () => searchParams.get("vehicle_id") || searchParams.get("vehicle") || ""
+  );
   const [vehicleLabel, setVehicleLabel] = useState("");
-  const [issueId] = useState(() => searchParams.get("issue") || "");
+  const [issueId] = useState(() => searchParams.get("issue_id") || searchParams.get("issue") || "");
   const [vendorPref, setVendorPref] = useState<VendorPref>("either");
   const [notes, setNotes] = useState(() => searchParams.get("notes") || "");
+  const [jobRef, setJobRef] = useState("");
+  const [shopStock, setShopStock] = useState(false);
+  const [neededBy, setNeededBy] = useState("");
+  const [deliverTo, setDeliverTo] = useState("");
+  const [partFor, setPartFor] = useState<"" | "truck" | "shop bay">("");
 
   const [statusEditId, setStatusEditId] = useState<number | null>(null);
   const [statusNext, setStatusNext] = useState<OrderStatus>("ordered");
   const [orderedFrom, setOrderedFrom] = useState<"autozone" | "firstcall" | "other">("autozone");
   const [orderNote, setOrderNote] = useState("");
+  const [etaOn, setEtaOn] = useState("");
+  const [poNumber, setPoNumber] = useState("");
 
   const canEdit =
     user?.role === "admin" ||
     user?.role === "office" ||
     user?.role === "mechanic" ||
     user?.role === "warehouse";
-  const canCreate = canEdit;
+  const canOrder = user?.role === "admin" || user?.role === "warehouse";
+  const canCreate = canEdit || user?.role === "driver";
+  const isTech = user?.role === "driver" || user?.role === "mechanic";
 
   const load = useCallback(async () => {
     setError("");
@@ -323,6 +370,20 @@ export function PartsOrderPage() {
     setError("");
     setOk("");
     try {
+      if (!shopStock && !jobRef.trim()) {
+        throw new Error("Enter a job number, or choose Shop stock.");
+      }
+      if (!neededBy) throw new Error("Needed-by date is required.");
+      if (deliverTo !== "shop" && deliverTo !== "truck" && deliverTo !== "job_site") {
+        throw new Error("Choose where to deliver: Shop, Truck, or Job site.");
+      }
+      let savedNotes = notes.trim();
+      if (partFor === "truck" || partFor === "shop bay") {
+        const tag = partFor === "truck" ? "For: truck" : "For: shop bay";
+        if (!savedNotes.toLowerCase().includes(tag.toLowerCase())) {
+          savedNotes = savedNotes ? `${savedNotes}\n${tag}` : tag;
+        }
+      }
       await api("/parts-orders", {
         method: "POST",
         body: JSON.stringify({
@@ -332,14 +393,23 @@ export function PartsOrderPage() {
           vehicle_label: vehicleLabel.trim() || null,
           issue_id: issueId ? Number(issueId) : null,
           vendor_preference: vendorPref,
-          notes: notes.trim() || null,
+          notes: savedNotes || null,
+          job_ref: shopStock ? "Shop stock" : jobRef.trim(),
+          shop_stock: shopStock,
+          needed_by: neededBy,
+          deliver_to: deliverTo,
         }),
       });
-      setOk("Saved — open a vendor site to search & order when ready.");
+      setOk(isTech ? "Saved. Warehouse will order it." : "Saved. Warehouse can order it from here.");
       setPartDescription("");
       setPartNumber("");
       setNotes("");
       setVendorPref("either");
+      setJobRef("");
+      setShopStock(false);
+      setNeededBy("");
+      setDeliverTo("");
+      setPartFor("");
       setShowForm(false);
       setTab("open");
       await load();
@@ -361,11 +431,32 @@ export function PartsOrderPage() {
           : "autozone"
     );
     setOrderNote(r.order_note || "");
+    setEtaOn(r.eta_on || "");
+    setPoNumber(r.po_number || "");
   }
 
   async function submitStatus(e: FormEvent) {
     e.preventDefault();
     if (statusEditId == null) return;
+    if (statusNext === "received") {
+      setError("Receive this on the Receiving card and pick the open request.");
+      return;
+    }
+    const markingOrder = statusNext === "ordered" || statusNext === "arriving";
+    if (markingOrder) {
+      if (orderedFrom !== "autozone" && orderedFrom !== "firstcall" && orderedFrom !== "other") {
+        setError("Vendor is required. Choose AutoZone, First Call, or Other.");
+        return;
+      }
+      if (!poNumber.trim()) {
+        setError("PO number is required.");
+        return;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(etaOn.trim())) {
+        setError("ETA date is required.");
+        return;
+      }
+    }
     setActingId(statusEditId);
     setError("");
     try {
@@ -373,8 +464,10 @@ export function PartsOrderPage() {
         method: "POST",
         body: JSON.stringify({
           status: statusNext,
-          ordered_from: statusNext === "ordered" || statusNext === "arriving" ? orderedFrom : null,
+          ordered_from: markingOrder ? orderedFrom : null,
           order_note: orderNote.trim() || null,
+          eta_on: markingOrder ? etaOn.trim() : undefined,
+          po_number: markingOrder ? poNumber.trim() : undefined,
         }),
       });
       setOk(`Marked ${statusLabel(statusNext).toLowerCase()}.`);
@@ -401,6 +494,23 @@ export function PartsOrderPage() {
     }
   }
 
+  async function answerStillNeeded(id: number, answer: "yes" | "no") {
+    setActingId(id);
+    setError("");
+    try {
+      await api(`/parts-orders/${id}/still-needed`, {
+        method: "POST",
+        body: JSON.stringify({ answer }),
+      });
+      setOk(answer === "yes" ? "Logged: still needed. The request stays open." : "Logged: not still needed. The request stays open.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not log that answer");
+    } finally {
+      setActingId(null);
+    }
+  }
+
   async function copyText(text: string) {
     const okCopy = await copyTextAsync(text);
     setOk(
@@ -420,7 +530,11 @@ export function PartsOrderPage() {
       <div className="page-header">
         <div>
           <h1>Order for shop</h1>
-          <p>Log what you need, then open AutoZone or First Call to order.</p>
+          <p>
+            {isTech
+              ? "Tell warehouse what you need. Don't call suppliers. Warehouse orders."
+              : "Log what you need, then open AutoZone or First Call to order."}
+          </p>
         </div>
         {canCreate && (
           <button
@@ -436,9 +550,14 @@ export function PartsOrderPage() {
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
+      {user ? (
+        <PartsReceivingPanel role={user.role} userId={user.id} onChanged={() => void load()} />
+      ) : null}
+
       {showForm && canCreate && (
         <form className="card form parts-order-form" onSubmit={submit}>
           <h2 style={{ marginTop: 0 }}>What do you need?</h2>
+          {isTech ? <p className="muted">Don't call suppliers. Warehouse orders.</p> : null}
           {issueId ? (
             <p className="muted" style={{ marginTop: 0, fontSize: "0.85rem" }}>
               Linked to shop ticket #{issueId}
@@ -499,6 +618,54 @@ export function PartsOrderPage() {
             />
           </label>
           <label>
+            Job number *
+            <input
+              value={shopStock ? "Shop stock" : jobRef}
+              onChange={(e) => {
+                setShopStock(false);
+                setJobRef(e.target.value);
+              }}
+              required
+              disabled={shopStock}
+              placeholder="ServiceTitan job number"
+            />
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={shopStock}
+              onChange={(e) => {
+                setShopStock(e.target.checked);
+                if (e.target.checked) setJobRef("Shop stock");
+              }}
+            />
+            <span>Shop stock (no job number)</span>
+          </label>
+          <label>
+            Needed by *
+            <input type="date" value={neededBy} onChange={(e) => setNeededBy(e.target.value)} required />
+          </label>
+          <label>
+            Deliver to *
+            <select value={deliverTo} onChange={(e) => setDeliverTo(e.target.value)} required>
+              <option value="">Choose</option>
+              <option value="shop">Shop</option>
+              <option value="truck">Truck</option>
+              <option value="job_site">Job site</option>
+            </select>
+          </label>
+          <label>
+            This part is for
+            <select
+              value={partFor}
+              onChange={(e) => setPartFor(e.target.value as "" | "truck" | "shop bay")}
+            >
+              <option value="">Choose</option>
+              <option value="truck">Truck</option>
+              <option value="shop bay">Shop bay</option>
+            </select>
+          </label>
+          <label>
             Prefer store
             <select
               value={vendorPref}
@@ -523,24 +690,28 @@ export function PartsOrderPage() {
             <button className="btn" type="submit" disabled={busy}>
               {busy ? "Saving…" : "Save to order list"}
             </button>
-            <a
-              className="btn secondary"
-              href={vendorHref("autozone")}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={() => prepareVendorOpen(selectedVehicle)}
-            >
-              AutoZone
-            </a>
-            <a
-              className="btn secondary"
-              href={vendorHref("firstcall")}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={() => prepareVendorOpen(selectedVehicle)}
-            >
-              First Call
-            </a>
+            {!isTech ? (
+              <>
+                <a
+                  className="btn secondary"
+                  href={vendorHref("autozone")}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => prepareVendorOpen(selectedVehicle)}
+                >
+                  AutoZone
+                </a>
+                <a
+                  className="btn secondary"
+                  href={vendorHref("firstcall")}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => prepareVendorOpen(selectedVehicle)}
+                >
+                  First Call
+                </a>
+              </>
+            ) : null}
           </div>
         </form>
       )}
@@ -591,6 +762,10 @@ export function PartsOrderPage() {
                   {r.requested_by_name ? <span>{r.requested_by_name} · </span> : null}
                   Pref: {vendorLabel(r.vendor_preference)}
                   {r.ordered_from ? ` · From ${vendorLabel(r.ordered_from)}` : ""}
+                  {r.job_ref ? ` · ${r.job_ref}` : ""}
+                  {deliverLabel(r.deliver_to) ? ` · ${deliverLabel(r.deliver_to)}` : ""}
+                  {r.needed_by ? ` · Needed by ${formatWhen(r.needed_by)}` : ""}
+                  {r.eta_on ? ` · ETA ${formatWhen(r.eta_on)}` : ""}
                 </p>
                 {r.notes ? <p className="parts-order-notes">{r.notes}</p> : null}
                 {r.order_note ? (
@@ -632,19 +807,43 @@ export function PartsOrderPage() {
                       Mark as {statusLabel(statusNext).toLowerCase()}
                     </p>
                     {(statusNext === "ordered" || statusNext === "arriving") && (
-                      <label>
-                        Ordered from
-                        <select
-                          value={orderedFrom}
-                          onChange={(e) =>
-                            setOrderedFrom(e.target.value as "autozone" | "firstcall" | "other")
-                          }
-                        >
-                          <option value="autozone">AutoZone Pro</option>
-                          <option value="firstcall">First Call Online</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </label>
+                      <>
+                        <p className="muted" style={{ margin: "0.25rem 0" }}>
+                          Vendor, PO, and ETA are required.
+                        </p>
+                        <label>
+                          Vendor
+                          <select
+                            required
+                            value={orderedFrom}
+                            onChange={(e) =>
+                              setOrderedFrom(e.target.value as "autozone" | "firstcall" | "other")
+                            }
+                          >
+                            <option value="autozone">AutoZone Pro</option>
+                            <option value="firstcall">First Call Online</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </label>
+                        <label>
+                          PO
+                          <input
+                            required
+                            value={poNumber}
+                            onChange={(e) => setPoNumber(e.target.value)}
+                            placeholder="PO number"
+                          />
+                        </label>
+                        <label>
+                          ETA
+                          <input
+                            required
+                            type="date"
+                            value={etaOn}
+                            onChange={(e) => setEtaOn(e.target.value)}
+                          />
+                        </label>
+                      </>
                     )}
                     <label>
                       Note <span className="muted">(invoice #, ETA, counter person…)</span>
@@ -669,32 +868,7 @@ export function PartsOrderPage() {
                   </form>
                 ) : (
                   <div className="toolbar parts-order-actions">
-                    <button
-                      type="button"
-                      className="btn secondary btn-sm"
-                      onClick={() => void copyText(copyPayload)}
-                    >
-                      Copy part
-                    </button>
-                    <a
-                      className="btn secondary btn-sm"
-                      href={vendorHref("autozone")}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => prepareVendorOpen(vehicleForOrder(r))}
-                    >
-                      AutoZone
-                    </a>
-                    <a
-                      className="btn secondary btn-sm"
-                      href={vendorHref("firstcall")}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => prepareVendorOpen(vehicleForOrder(r))}
-                    >
-                      First Call
-                    </a>
-                    {canEdit && r.status === "needed" && (
+                    {canOrder && r.status === "needed" && (
                       <button
                         type="button"
                         className="btn btn-sm"
@@ -703,33 +877,59 @@ export function PartsOrderPage() {
                         Mark ordered
                       </button>
                     )}
-                    {canEdit && (r.status === "needed" || r.status === "ordered") && (
+                    {canOrder && r.status === "ordered" && (
                       <button
                         type="button"
-                        className="btn secondary btn-sm"
+                        className="btn btn-sm"
                         onClick={() => openStatus(r, "arriving")}
                       >
                         Arriving
                       </button>
                     )}
-                    {canEdit &&
-                      (r.status === "needed" ||
-                        r.status === "ordered" ||
-                        r.status === "arriving") && (
+                    <OrderMore>
+                      <button
+                        type="button"
+                        className="btn secondary btn-sm"
+                        onClick={() => void copyText(copyPayload)}
+                      >
+                        Copy part
+                      </button>
+                      {!isTech ? (
+                        <>
+                          <a
+                            className="btn secondary btn-sm"
+                            href={vendorHref("autozone")}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => prepareVendorOpen(vehicleForOrder(r))}
+                          >
+                            AutoZone
+                          </a>
+                          <a
+                            className="btn secondary btn-sm"
+                            href={vendorHref("firstcall")}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => prepareVendorOpen(vehicleForOrder(r))}
+                          >
+                            First Call
+                          </a>
+                        </>
+                      ) : null}
+                      {canOrder && r.status === "needed" && (
                         <button
                           type="button"
                           className="btn secondary btn-sm"
-                          onClick={() => openStatus(r, "received")}
+                          onClick={() => openStatus(r, "arriving")}
                         >
-                          Received
+                          Arriving
                         </button>
                       )}
-                    {canEdit &&
-                      r.status !== "received" &&
+                      {r.status !== "received" &&
                       r.status !== "cancelled" &&
                       (r.user_id === user?.id ||
                         user?.role === "admin" ||
-                        user?.role === "office") && (
+                        user?.role === "office") ? (
                         <button
                           type="button"
                           className="btn secondary btn-sm"
@@ -738,9 +938,55 @@ export function PartsOrderPage() {
                         >
                           Cancel
                         </button>
-                      )}
+                      ) : null}
+                    </OrderMore>
+                    {r.still_needed_due && r.user_id === user?.id ? (
+                      <>
+                        <span className="muted">Still needed?</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          disabled={actingId === r.id}
+                          onClick={() => void answerStillNeeded(r.id, "yes")}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          type="button"
+                          className="btn secondary btn-sm"
+                          disabled={actingId === r.id}
+                          onClick={() => void answerStillNeeded(r.id, "no")}
+                        >
+                          No
+                        </button>
+                      </>
+                    ) : null}
                   </div>
                 )}
+                {r.events && r.events.length > 0 ? (
+                  <details style={{ marginTop: "0.45rem" }}>
+                    <summary>Status log</summary>
+                    <ul className="muted" style={{ margin: "0.35rem 0 0", paddingLeft: "1.1rem" }}>
+                      {r.events.map((ev) => (
+                        <li key={ev.id}>
+                          {formatWhen(ev.created_at)}
+                          {ev.actor_name ? ` · ${ev.actor_name}` : ""}
+                          {ev.event_type === "still_needed_ping"
+                            ? ` · Still needed? ping${
+                                ev.note && ev.note.startsWith("eta=")
+                                  ? ` · ETA ${ev.note.slice(4, 14)}`
+                                  : ""
+                              }`
+                            : ""}
+                          {ev.event_type !== "still_needed_ping" && (ev.from_status || ev.to_status)
+                            ? ` · ${ev.from_status || "new"} to ${ev.to_status || ev.from_status}`
+                            : ""}
+                          {ev.event_type !== "still_needed_ping" && ev.note ? ` · ${ev.note}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
               </article>
             );
           })

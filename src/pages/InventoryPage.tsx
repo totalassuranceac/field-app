@@ -11,7 +11,6 @@ import {
 } from "../pricebookMap";
 import { partImageSrc } from "../partImage";
 import { PickupPanel } from "../components/PickupPanel";
-import { VendorRunPanel } from "../components/VendorRunPanel";
 import { LogItem, LogList } from "../components/CollapsibleLog";
 import { BarcodeScanButton } from "../components/BarcodeScan";
 
@@ -2248,7 +2247,7 @@ export function InventoryPage() {
       <header className="home-hero no-print inv-page-header">
         <div>
           <p className="home-kicker">Warehouse · trucks</p>
-          <h1 className="home-title">Inventory</h1>
+          <h1 className="home-title">Stock room</h1>
           <p className="home-sub">
             {summary.parts} parts · {summary.lines_with_stock} in stock
             {summary.needs_order ? ` · ${summary.needs_order} to order` : ""}
@@ -2313,24 +2312,6 @@ export function InventoryPage() {
         <button
           type="button"
           role="tab"
-          className={`home-action${tab === "vendor" ? " primary" : ""}`}
-          aria-selected={tab === "vendor"}
-          onClick={() => {
-            setTab("vendor");
-            closePartDetail();
-          }}
-        >
-          <span className="home-action-icon" aria-hidden>
-            🏪
-          </span>
-          <span className="home-action-text">
-            <strong>Part pickup</strong>
-            <span>Parts ready at supply house</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          role="tab"
           className={`home-action${tab === "order" ? " primary" : ""}${
             summary.needs_order ? " status-tile tone-warn" : ""
           }`}
@@ -2368,79 +2349,42 @@ export function InventoryPage() {
             <span>Print pickup list</span>
           </span>
         </button>
+      </div>
+      <details className="no-print" style={{ margin: "0.35rem 0 0.75rem" }}>
+        <summary style={{ fontWeight: 700, cursor: "pointer" }}>Tools</summary>
+      <div className="inv-also-actions">
         <button
           type="button"
-          role="tab"
-          className={`home-action${tab === "history" ? " primary" : ""}`}
-          aria-selected={tab === "history"}
-          onClick={() => {
-            setTab("history");
-            closePartDetail();
-          }}
-        >
-          <span className="home-action-icon" aria-hidden>
-            📋
-          </span>
-          <span className="home-action-text">
-            <strong>History</strong>
-            <span>Counts & moves</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`home-action${tab === "catalog" ? " primary" : ""}`}
-          aria-selected={tab === "catalog"}
+          className={`btn secondary btn-sm${tab === "catalog" ? " primary" : ""}`}
+          aria-pressed={tab === "catalog"}
           onClick={() => {
             setTab("catalog");
             closePartDetail();
           }}
         >
-          <span className="home-action-icon" aria-hidden>
-            ⇅
-          </span>
-          <span className="home-action-text">
-            <strong>Import / export</strong>
-            <span>ServiceTitan · photos</span>
-          </span>
+          Import / export
         </button>
         {canManage ? (
           <button
             type="button"
-            role="tab"
-            className={`home-action${tab === "sections" ? " primary" : ""}`}
-            aria-selected={tab === "sections"}
+            className={`btn secondary btn-sm${tab === "sections" ? " primary" : ""}`}
+            aria-pressed={tab === "sections"}
             onClick={() => {
               setTab("sections");
               closePartDetail();
             }}
           >
-            <span className="home-action-icon" aria-hidden>
-              🗂
-            </span>
-            <span className="home-action-text">
-              <strong>Warehouse map</strong>
-              <span>Shelves · attic · overhead</span>
-            </span>
+            Warehouse map
           </button>
         ) : null}
       </div>
+      </details>
 
       {tab === "stock" && (
         <>
           {/* Home Depot style: list OR detail, not both cramped */}
           {!selectedPart ? (
             <div className="card no-print inv-browse-card">
-              <div className="inv-browse-toolbar">
-                <button
-                  type="button"
-                  className="btn secondary btn-sm"
-                  onClick={() => void printBarcodeDirectory()}
-                  title="Print all part numbers with barcodes for a warehouse folder"
-                >
-                  Print barcode folder list
-                </button>
-              </div>
               <div className="inv-search-bar">
                 {canManage ? (
                   <BarcodeScanButton
@@ -2464,7 +2408,7 @@ export function InventoryPage() {
                           await openPart(hit);
                           setAdjustDelta("1");
                           setOk(
-                            `Scanned ${hit.code || hit.name} — set qty below and tap + Receive.`
+                            `Scanned ${hit.code || hit.name} — open Adjust and tap + Receive.`
                           );
                         } catch (e) {
                           setError(e instanceof Error ? e.message : "Lookup failed");
@@ -2514,6 +2458,19 @@ export function InventoryPage() {
                 </button>
                 ).
               </p>
+              <details className="no-print">
+                <summary style={{ fontWeight: 700, cursor: "pointer" }}>Labels</summary>
+                <div className="inv-browse-toolbar">
+                  <button
+                    type="button"
+                    className="btn secondary btn-sm"
+                    onClick={() => void printBarcodeDirectory()}
+                    title="Print all part numbers with barcodes for a warehouse folder"
+                  >
+                    Print barcode folder list
+                  </button>
+                </div>
+              </details>
 
               <ul className="inv-browse-list">
                 {parts.map((p) => {
@@ -2929,8 +2886,8 @@ export function InventoryPage() {
 
                   <details className="inv-advanced no-print">
                     <summary className="inv-advanced-summary">
-                      Advanced — counts, levels, vendors
-                      <span className="muted">rarely needed day-to-day</span>
+                      Adjust
+                      <span className="muted">count, receive, issue</span>
                     </summary>
                     <div className="inv-advanced-body">
                   <label className="inv-truck-stock-toggle">
@@ -3034,26 +2991,6 @@ export function InventoryPage() {
                         placeholder="e.g. cycle count"
                       />
                     </label>
-                    <button
-                      className="btn secondary"
-                      type="button"
-                      style={{ marginTop: "0.35rem" }}
-                      disabled={pushStBusy}
-                      onClick={() => void pushPartToSt()}
-                      title="Create or update this material in ServiceTitan"
-                    >
-                      {pushStBusy ? "Pushing…" : "Push part to ServiceTitan"}
-                    </button>
-                    <button
-                      className="btn danger"
-                      type="button"
-                      style={{ marginTop: "0.5rem" }}
-                      disabled={deleteBusy}
-                      onClick={() => void deletePart()}
-                      title="Remove from this app and deactivate in ServiceTitan pricebook"
-                    >
-                      {deleteBusy ? "Deleting…" : "Delete from app + ServiceTitan"}
-                    </button>
                   </div>
 
                   {canLevels ? (
@@ -3223,6 +3160,33 @@ export function InventoryPage() {
                   </div>
                     </div>
                   </details>
+                  <details className="inv-advanced no-print">
+                    <summary className="inv-advanced-summary">
+                      More
+                      <span className="muted">ServiceTitan and delete</span>
+                    </summary>
+                    <div className="inv-advanced-body">
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={pushStBusy}
+                        onClick={() => void pushPartToSt()}
+                        title="Create or update this material in ServiceTitan"
+                      >
+                        {pushStBusy ? "Pushing…" : "Push part to ServiceTitan"}
+                      </button>
+                      <button
+                        className="btn danger"
+                        type="button"
+                        style={{ marginTop: "0.5rem" }}
+                        disabled={deleteBusy}
+                        onClick={() => void deletePart()}
+                        title="Remove from this app and deactivate in ServiceTitan pricebook"
+                      >
+                        {deleteBusy ? "Deleting…" : "Delete from app + ServiceTitan"}
+                      </button>
+                    </div>
+                  </details>
                 </>
               )}
             </div>
@@ -3233,12 +3197,6 @@ export function InventoryPage() {
       {tab === "pickup" && (
         <div className="card">
           <PickupPanel locations={locations} canManage={canManage} />
-        </div>
-      )}
-
-      {tab === "vendor" && (
-        <div className="inv-vendor-tab">
-          <VendorRunPanel />
         </div>
       )}
 

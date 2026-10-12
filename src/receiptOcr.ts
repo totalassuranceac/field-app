@@ -9,6 +9,8 @@
  * Odometer is never read from the receipt (handwritten notes ignored).
  */
 
+import { storeFromReceiptText, canonicalBrand, type BrandAlias } from "./lib/fuelStoreFromReceipt";
+
 export interface ReceiptParseResult {
   gallons: number | null;
   total_cost: number | null;
@@ -17,6 +19,9 @@ export interface ReceiptParseResult {
   store_number: string | null;
   card_last4: string | null;
   store_name: string | null;
+  store_brand?: string | null;
+  store_needs_review?: boolean;
+  store_review_reason?: string | null;
   raw_text: string;
   confidence: "high" | "medium" | "low";
   needs_retake: boolean;
@@ -838,69 +843,6 @@ function cleanStoreDigits(raw: string | null | undefined): string | null {
   return n;
 }
 
-/**
- * Fleet Stripes locations — street OCR is often clearer than the brand line
- * ("VSirine i" instead of "Stripes 2221", but "6418 Weber" still reads).
- * 2221 is by far the most-used store in this fleet.
- */
-const STRIPES_LOCATION_HINTS: { re: RegExp; id: string }[] = [
-  // Stripes 2221 — Weber Rd, Corpus Christi (6418 / 6814 both appear on slips)
-  { re: /\bweber\b/i, id: "2221" },
-  { re: /\bw[e3]b[e3]r\b/i, id: "2221" }, // OCR: W3ber, etc.
-  { re: /\b6[48]18\b/, id: "2221" },
-  { re: /361[\s\-]?855[\s\-]?8865/, id: "2221" },
-  { re: /361[\s\-]?\d{0,3}[\s\-]?8865/, id: "2221" }, // partial phone OCR
-  // Stripes 5216 — South Padre Island Dr
-  { re: /south\s*padre|s\.?\s*p\.?\s*i\.?\s*d/i, id: "5216" },
-  { re: /\b601\b[^\n]{0,20}padre/i, id: "5216" },
-  { re: /361[\s\-]?814[\s\-]?8206/, id: "5216" },
-  // Stripes 9386 — NAS Drive / Navy Dr
-  { re: /\bnavy\b|\bn\.?a\.?s\.?\b/i, id: "9386" },
-  { re: /361[\s\-]?937[\s\-]?0251/, id: "9386" },
-  // Stripes 40823 — Rodd Field Rd
-  { re: /\brodd\s*field\b/i, id: "40823" },
-  { re: /361[\s\-]?985[\s\-]?0998/, id: "40823" },
-];
-
-/**
- * Fleet Circle K locations — brand line often OCRs as Cirele/Circte; street+phone still read.
- * Only apply when street/phone match — never invent a store from a wrong prior receipt.
- */
-const CIRCLEK_LOCATION_HINTS: { re: RegExp; id: string }[] = [
-  // Circle K 2706973 — 2730 Agnes St, Corpus Christi
-  { re: /\bagnes\b/i, id: "2706973" },
-  { re: /\b2730\b[^\n]{0,24}agnes/i, id: "2706973" },
-  { re: /361[\s\-]?888[\s\-]?9397/, id: "2706973" },
-  // Circle K 2741849 — 2202 Holly Rd, Corpus Christi
-  { re: /\bholly\s*r/i, id: "2741849" },
-  { re: /\b2202\b[^\n]{0,24}holly/i, id: "2741849" },
-  { re: /361[\s\-]?854[\s\-]?7769/, id: "2741849" },
-  // Circle K 2741135 — E Causeway (from prior slips)
-  { re: /\bcauseway\b/i, id: "2741135" },
-  { re: /\b4502\b[^\n]{0,24}causeway/i, id: "2741135" },
-];
-
-/** Soft Circle K brand — OCR: Circte K, Cirele K, CIRCLEK, C1rcle K */
-const CIRCLE_K_BRAND_RE =
-  /\b(?:CIRCLE\s*K|CIRCLEK|C[I1L]RC[IL1]E\s*K|C[I1L]R[CE][CTL][CE]\s*K|CIRCTE\s*K|CIRELE\s*K|CIRCKE\s*K)\b/i;
-
-function isCircleK(text: string): boolean {
-  if (CIRCLE_K_BRAND_RE.test(text)) return true;
-  // Layout signature when brand fails: N.NNN Gallons @ $x.xxx/Gal + Pay at Pump / UNL-REG
-  if (
-    /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(text) &&
-    /(?:UNL-?REG|PAY\s*AT\s*PUMP|DUPLICATE\s*RECEIPT|CARD\s*NUM)/i.test(text)
-  ) {
-    return true;
-  }
-  // Fleet address alone on a fuel slip
-  for (const h of CIRCLEK_LOCATION_HINTS) {
-    if (h.re.test(text) && /\d+\.\d{2,4}\s*GALLONS?\s*@|TOTAL\s*:|USD\s*\$/i.test(text)) {
-      return true;
-    }
-  }
-  return false;
-}
 
 /**
  * Fix common Circle K brand OCR before field parsers run.
@@ -916,56 +858,6 @@ function normalizeCircleKText(text: string): string {
     .replace(/\bCIRCKE\s*K\b/gi, "Circle K");
 }
 
-function looksLikeStripesReceipt(text: string): boolean {
-  // Never treat 7-Eleven as Stripes (OH THANK HEAVEN / FUEL TOTAL / PRICE/GAL)
-  if (isSevenEleven(text)) return false;
-  return (
-    /strip|strine|sirine|5trip|vsir|welcome\s*to/i.test(text) ||
-    (/\bGALLONS?\s*:/i.test(text) && /\bPRICE\s*\/\s*G|FUEL\s*SALE|CREDIT\s*DE\b/i.test(text)) ||
-    (/\bweber\b|south\s*padre/i.test(text) && !/\bSTORE\s*[:#]/i.test(text))
-  );
-}
-
-/** Street numbers mistaken for store IDs (6418 Weber → not store 6418). */
-function isStreetNotStoreId(id: string, nearby: string): boolean {
-  if (/weber|padre|rd\b|road|dr\b|drive|ave|street|hwy|spid/i.test(nearby)) return true;
-  // House numbers on known fleet streets
-  if (id === "6418" || id === "6814" || id === "601") return true;
-  return false;
-}
-
-function isSevenEleven(text: string): boolean {
-  return (
-    /\b7[\s\-]?ELEVEN\b/i.test(text) ||
-    /\b7\s*EL[E3]V[E3]N\b/i.test(text) ||
-    // Slogan when brand OCR fails: "OH THANK HEAVEN"
-    /\bTHANK\s+HEAVEN\b/i.test(text) ||
-    (/\bSTORE\s*[:#]\s*\d{4,6}\b/i.test(text) && /\bPRICE\s*\/\s*GAL|FUEL\s*TOTAL\b/i.test(text))
-  );
-}
-
-/** Murphy USA, Murphy Express, and same-format SITE/QTY slips. */
-function isMurphyReceipt(text: string): boolean {
-  return (
-    /\bMURPHY\s*(?:USA|EXPRESS|DRIVE)\b/i.test(text) ||
-    /\bmurphyusa\.com\b/i.test(text) ||
-    /\bmurphydrive\b/i.test(text) ||
-    (/\bMURPHY\b/i.test(text) && /\bSITE\s*[:#]/i.test(text)) ||
-    // Same layout without brand OCR: SITE + QTY(GAL) or FUEL TOTAL + PRICE/GAL
-    (/\bSITE\s*[:#]\s*\d{3,5}\b/i.test(text) &&
-      (/\bQTY\s*\(\s*GAL/i.test(text) ||
-        (/\bFUEL\s*TOTAL\b/i.test(text) && /\bPRICE\s*\/\s*GAL\b/i.test(text))))
-  );
-}
-
-/** Printed brand on Murphy slips (Express vs USA). */
-function murphyBrandLabel(text: string): string {
-  if (/\bMURPHY\s*EXPRESS\b/i.test(text)) return "Murphy Express";
-  if (/\bMURPHY\s*USA\b/i.test(text)) return "Murphy USA";
-  if (/\bMURPHY\s*DRIVE\b/i.test(text)) return "Murphy";
-  if (/\bMURPHY\b/i.test(text)) return "Murphy";
-  return "Murphy";
-}
 
 /** SITE / store IDs that must never become card last-4 (Murphy, Stripes ST#, etc.). */
 function extractSiteStoreIds(text: string, lines: string[]): Set<string> {
@@ -986,187 +878,6 @@ function extractSiteStoreIds(text: string, lines: string[]): Set<string> {
   return ids;
 }
 
-function parseStore(text: string, lines: string[]): { store_number: string | null; store_name: string | null } {
-  // --- Brand first: never apply Stripes address hints to a 7-Eleven / Circle K / Murphy slip ---
-  // (Previously Navy/NAS → Stripes 9386 ran before 7-Eleven and hijacked Kingsville slips.)
-
-  // --- Murphy Express 8691 / Murphy USA 7738 / SITE: #### ---
-  if (isMurphyReceipt(text)) {
-    const brand = murphyBrandLabel(text);
-    // Header brand + store id (exact as printed when possible)
-    const header =
-      text.match(/\bMURPHY\s*EXPRESS\s*(\d{3,5})\b/i) ||
-      text.match(/\bMURPHY\s*USA\s*(\d{3,5})\b/i) ||
-      text.match(/\bMURPHY\s+(\d{3,5})\b/i);
-    let id = cleanStoreDigits(header?.[1]);
-    if (!id) {
-      const site = text.match(/\bSITE\s*[:#]?\s*(\d{3,5})\b/i);
-      id = cleanStoreDigits(site?.[1]);
-    }
-    if (!id) {
-      for (const line of lines.slice(0, 14)) {
-        const m =
-          line.match(/MURPHY\s*(?:USA|EXPRESS)?\s*(\d{3,5})\b/i) ||
-          line.match(/SITE\s*[:#]?\s*(\d{3,5})\b/i);
-        id = cleanStoreDigits(m?.[1]);
-        if (id) break;
-      }
-    }
-    if (id) return { store_number: id, store_name: `${brand} ${id}` };
-    return { store_number: null, store_name: brand };
-  }
-
-  // --- 7-Eleven: STORE:42360 ---
-  if (isSevenEleven(text)) {
-    const storeLine =
-      text.match(/\bSTORE\s*[:#]?\s*(\d{3,6})\b/i) ||
-      text.match(/\bSTORE\s*[:#]?\s*(\d{3,6})\b/i);
-    // Soft OCR: STORE: 42366 vs 42360
-    const id = cleanStoreDigits(storeLine?.[1]);
-    if (id) return { store_number: id, store_name: `7-Eleven ${id}` };
-    // Line-by-line STORE
-    for (const line of lines) {
-      const m = line.match(/STORE\s*[:#]?\s*(\d{3,6})/i);
-      const lid = cleanStoreDigits(m?.[1]);
-      if (lid) return { store_number: lid, store_name: `7-Eleven ${lid}` };
-    }
-    return { store_number: null, store_name: "7-Eleven" };
-  }
-
-  // --- Circle K + site number (soft brand + address fallbacks) ---
-  if (isCircleK(text)) {
-    // Prefer address/phone when brand is weak — 2741849 is ground truth for Holly Rd
-    for (const hint of CIRCLEK_LOCATION_HINTS) {
-      if (hint.re.test(text)) {
-        return { store_number: hint.id, store_name: `Circle K ${hint.id}` };
-      }
-    }
-    const withNum =
-      text.match(/CIRCLE\s*K\s+(\d{4,8})\b/i) ||
-      text.match(/CIRCLEK\s+(\d{4,8})\b/i) ||
-      text.match(/(?:C[I1L]R[CE][CTL][CE]\s*K|CIRCTE\s*K|CIRELE\s*K)\s+(\d{4,8})\b/i);
-    let id = cleanStoreDigits(withNum?.[1]);
-    if (!id) {
-      const idx = lines.findIndex((l) => CIRCLE_K_BRAND_RE.test(l) || /CIRCLE/i.test(l));
-      if (idx >= 0) {
-        for (let i = idx; i < Math.min(idx + 4, lines.length); i++) {
-          // Site # is 5–8 digits; skip Order Number (often 7 digits) if labeled
-          if (/ORDER\s*NUM/i.test(lines[i])) continue;
-          const nums = lines[i].match(/\b(\d{5,8})\b/g);
-          if (!nums) continue;
-          for (const n of nums) {
-            // Skip phone fragments and zip-like
-            if (n === "78415" || n.length === 10) continue;
-            id = cleanStoreDigits(n);
-            if (id) break;
-          }
-          if (id) break;
-        }
-      }
-    }
-    // Bare 7-digit site in header when Gallons @ layout present
-    // Prefer fleet Circle K range 270xxxx / 274xxxx; never take Order Number lines
-    if (!id && /\d+\.\d{2,4}\s*GALLONS?\s*@/i.test(text)) {
-      const fleet = text.match(/\b(27[04]\d{4})\b/);
-      id = cleanStoreDigits(fleet?.[1]);
-      if (!id) {
-        for (let li = 0; li < Math.min(12, lines.length); li++) {
-          const line = lines[li];
-          const prevLine = li > 0 ? lines[li - 1] : "";
-          if (/ORDER\s*NUM|PHONE|REGISTER|ZIP|TX\s+\d{5}/i.test(line + " " + prevLine)) {
-            continue;
-          }
-          const m = line.match(/^\s*(\d{6,8})\s*$/);
-          id = cleanStoreDigits(m?.[1]);
-          if (id) break;
-        }
-      }
-    }
-    if (id) return { store_number: id, store_name: `Circle K ${id}` };
-    return { store_number: null, store_name: "Circle K" };
-  }
-
-  // Circle K address when brand OCR totally failed (before Stripes street hijack)
-  for (const hint of CIRCLEK_LOCATION_HINTS) {
-    if (hint.re.test(text)) {
-      return { store_number: hint.id, store_name: `Circle K ${hint.id}` };
-    }
-  }
-
-  // Address / phone when brand OCR fails ("VSirine" + "6418 Weber" → 2221)
-  for (const hint of STRIPES_LOCATION_HINTS) {
-    if (hint.re.test(text)) {
-      return { store_number: hint.id, store_name: `Stripes ${hint.id}` };
-    }
-  }
-
-  // --- Stripes ---
-  // Prefer HEADER store id: "Stripes #40823" / "Welcome To Stripes 40823"
-  // Footer ST#2453 is often a register/site code on this format — use only as fallback.
-  const stripesPatterns = [
-    /\bSTRIPES?\s*#\s*(\d{3,6})\b/i, // explicit # (strongest)
-    /\bSTRIPES?\s+(\d{3,6})\b/i,
-    /\bSTR[I1L]P[E3]S?\s*#?\s*(\d{3,6})\b/i,
-    /\b5TRIPES?\s*#?\s*(\d{3,6})\b/i,
-    /\bS\s*T\s*R\s*I\s*P\s*E\s*S\s*#?\s*(\d{3,6})\b/i,
-    /\b(?:VS?IRINE|S[I1L]RINE|STRINE|STRIP)\s*#?\s*(\d{3,6})\b/i,
-  ];
-  // Header region only (first ~25 lines) so footer ST# never wins first
-  const headerText = lines.slice(0, 25).join("\n");
-  for (const re of stripesPatterns) {
-    const m = headerText.match(re) || text.match(re);
-    const id = cleanStoreDigits(m?.[1]);
-    if (!id) continue;
-    const idx = m?.index ?? 0;
-    const src = headerText.includes(m![0]) ? headerText : text;
-    const nearby = src.slice(Math.max(0, idx - 8), idx + (m?.[0].length || 0) + 24);
-    if (isStreetNotStoreId(id, nearby)) continue;
-    return { store_number: id, store_name: `Stripes ${id}` };
-  }
-  // Footer ST# only if no header store found
-  const stHash = text.match(/\bST\s*#\s*(\d{3,6})\b/i);
-  {
-    const id = cleanStoreDigits(stHash?.[1]);
-    if (id && !isStreetNotStoreId(id, text)) {
-      return { store_number: id, store_name: `Stripes ${id}` };
-    }
-  }
-  // Bare store id ONLY on true Stripes slips — not every GALLONS: (7-Eleven also has GALLONS)
-  if (looksLikeStripesReceipt(text) && !/\bFUEL\s*TOTAL\b|\bPRICE\s*\/\s*GAL\b/i.test(text)) {
-    for (const id of ["2221", "5216", "2215", "2213", "2131", "2165", "7121", "9386"]) {
-      if (new RegExp(`\\b${id}\\b`).test(text)) {
-        return { store_number: id, store_name: `Stripes ${id}` };
-      }
-    }
-  }
-  // Top lines: "Welcome to" / mangled brand
-  for (let i = 0; i < Math.min(12, lines.length); i++) {
-    const line = lines[i];
-    if (/thank|heaven|diesel|gallons|price|weber|padre|christi|eleven/i.test(line)) continue;
-    if (!/strip|strlpe|str1pe|5trip|sirine|strine|vsir|welcome/i.test(line)) continue;
-    const same = cleanStoreDigits(line.match(/(\d{3,5})\b/)?.[1]);
-    if (same && !isStreetNotStoreId(same, line + " " + (lines[i + 1] || ""))) {
-      return { store_number: same, store_name: `Stripes ${same}` };
-    }
-    const next = lines[i + 1] || "";
-    if (/weber|padre|rd\b|road|dr\b|corpus|phone|\d{3}[\s\-]\d{3}/i.test(next)) continue;
-    const nextId = cleanStoreDigits(next.match(/^\s*#?\s*(\d{3,5})\s*$/)?.[1] || next.match(/\b(\d{3,5})\b/)?.[1]);
-    if (nextId && !isStreetNotStoreId(nextId, next)) {
-      return { store_number: nextId, store_name: `Stripes ${nextId}` };
-    }
-  }
-
-  // Generic STORE:42009 — digits only
-  {
-    const storeColon = text.match(/\bSTORE\s*[:#]\s*(\d{3,6})\b/i);
-    const id = cleanStoreDigits(storeColon?.[1]);
-    if (id) {
-      return { store_number: id, store_name: `Store ${id}` };
-    }
-  }
-
-  return { store_number: null, store_name: null };
-}
 
 /**
  * Map OCR confusable characters on a card-pan tail into digits.
@@ -1596,7 +1307,10 @@ function parseReceiptText(text: string): Omit<ReceiptParseResult, "raw_text"> {
     gallons = gallons != null ? roundGallons(gallons) : null;
   }
 
-  const { store_number, store_name } = parseStore(normalized, lines);
+  // Store # ONLY from this receipt's own text (brand at top + labeled store line). Never a guess.
+  const st = storeFromReceiptText(normalized);
+  const store_number = st.store_id;
+  const store_name = st.store_label;
   let card_last4 = parseCardLast4(normalized, lines);
   // Don't use store / SITE number as card (Murphy 7738 ≠ card 0058; Stripes 2221 ≠ card)
   const siteIds = extractSiteStoreIds(normalized, lines);
@@ -1888,6 +1602,8 @@ export type OcrHints = {
   /** Extraction strategies learned from corrections (after:USD$, reject_ppg, prefer_G_token, …) */
   patterns?: Record<string, Record<string, string[]>>;
   known_values: Record<string, Record<string, string[]>>;
+  /** Learned header-line -> brand aliases (fuel). Never carries a store number. */
+  brand_aliases?: { key: string; brand: string }[];
 };
 
 function storeKeyClient(store: string | null | undefined, raw: string): string {
@@ -1941,6 +1657,8 @@ function gallonsFromLine(line: string): number | null {
   return n > 0.5 && n < 120 ? n : null;
 }
 
+const NUM_ONLY = /^-?\d+(?:\.\d+)?$/;
+
 function cardFromLine(line: string): string | null {
   const L = line.replace(/[xX#•·]/g, "*");
   const m = L.match(/\*{2,}\s*(\d{4})\b/) || line.match(/(?:[^\d\s]){4,}(\d{4})\b/);
@@ -1954,9 +1672,11 @@ function cardFromLine(line: string): string | null {
 export function applyOcrLearning(
   parsed: Omit<ReceiptParseResult, "raw_text"> | ReceiptParseResult,
   rawText: string,
-  hints: OcrHints | null | undefined
+  hints: OcrHints | null | undefined,
+  opts: { storeMode?: "receipt_only" | "legacy" } = {}
 ): Omit<ReceiptParseResult, "raw_text"> {
   if (!hints) return parsed;
+  const receiptOnlyStore = (opts.storeMode ?? "receipt_only") === "receipt_only";
   const out = { ...parsed };
   const storeKey = storeKeyClient(out.store_number, rawText);
   const keys = [storeKey, "global"];
@@ -1978,12 +1698,12 @@ export function applyOcrLearning(
     for (const sk of keys) {
       const map = hints.subs[sk]?.[field];
       if (map?.[cur] != null) return map[cur];
-      if (map) {
+      // Numeric near-match ONLY when both sides are plain numbers ("2.659" ~ "2.6590").
+      // Never parseFloat a label: parseFloat("7-Eleven 41980") === 7 === parseFloat("7-Eleven").
+      if (map && NUM_ONLY.test(cur)) {
         const n = parseFloat(cur);
-        if (!Number.isNaN(n)) {
-          for (const [wrong, right] of Object.entries(map)) {
-            if (Math.abs(parseFloat(wrong) - n) < 0.001) return right;
-          }
+        for (const [wrong, right] of Object.entries(map)) {
+          if (NUM_ONLY.test(wrong) && Math.abs(parseFloat(wrong) - n) < 0.001) return right;
         }
       }
     }
@@ -1997,8 +1717,10 @@ export function applyOcrLearning(
   out.total_cost = t0 == null || t0 === "" ? out.total_cost : parseFloat(String(t0));
   const c0 = applySub("card_last4", out.card_last4);
   out.card_last4 = c0 == null || c0 === "" ? out.card_last4 : String(c0);
-  const s0 = applySub("store_number", out.store_number);
-  out.store_number = s0 == null || s0 === "" ? out.store_number : String(s0);
+  if (!receiptOnlyStore) {
+    const s0 = applySub("store_number", out.store_number);
+    out.store_number = s0 == null || s0 === "" ? out.store_number : String(s0);
+  }
   const d0 = applySub("fuel_date", out.fuel_date);
   out.fuel_date = d0 == null || d0 === "" ? out.fuel_date : String(d0);
 
@@ -2197,10 +1919,8 @@ export function applyOcrLearning(
     }
   }
 
-  // 5) Store: ST# is a WEAK signal on many Stripes slips (footer register id ≠ store #).
-  // Prefer existing header store (e.g. Stripes #40823). Only fill ST# if store missing,
-  // or explicitly learned prefer_st_hash AND ST# is longer/better.
-  {
+  // Legacy store rewrite (parts/vendor path only). Fuel never rewrites the store here.
+  if (!receiptOnlyStore) {
     const st = rawText.match(/\bST\s*#\s*(\d{3,6})\b/i);
     const header =
       rawText.match(/\bSTRIPES?\s*#\s*(\d{3,6})\b/i) ||
@@ -2278,6 +1998,37 @@ export function applyOcrLearning(
   out.confidence = coreHits >= 3 ? "high" : coreHits >= 2 ? "medium" : "low";
 
   return out;
+}
+
+/** Final say on the fuel store fields: ONLY this receipt's text (+ learned brand-name aliases, never numbers). */
+export function applyReceiptStore<T extends { store_number: string | null; store_name: string | null }>(
+  parsed: T,
+  rawText: string,
+  hints?: OcrHints | null
+): T & { store_brand: string | null; store_needs_review: boolean; store_review_reason: string | null } {
+  const st = storeFromReceiptText(rawText || "", (hints?.brand_aliases as BrandAlias[] | undefined) || []);
+  let reason = st.reason;
+  let review = st.needs_review;
+  // Flag (never fill) when this exact read was hand-corrected before
+  if (st.store_label && !review) {
+    for (const sk of Object.keys(hints?.subs || {})) {
+      const fixed: string | undefined = hints?.subs?.[sk]?.store_number?.[st.store_label];
+      // Same brand, different digits = a known OCR digit misread (e.g. "Stripes 2271" fixed to "Stripes 2221")
+      if (fixed && fixed !== st.store_label && canonicalBrand(fixed) === st.brand) {
+        review = true;
+        reason = `This store # read was corrected by hand before (to "${fixed}") - check the photo`;
+        break;
+      }
+    }
+  }
+  return {
+    ...parsed,
+    store_number: st.store_label,
+    store_name: st.store_label,
+    store_brand: st.brand,
+    store_needs_review: review,
+    store_review_reason: reason,
+  };
 }
 
 let cachedHints: OcrHints | null = null;

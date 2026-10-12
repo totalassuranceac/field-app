@@ -427,7 +427,7 @@ export function PartsPurchasesPage() {
   if (!canLog && !can(user, "viewPartsPurchase")) {
     return (
       <div className="page-header">
-        <h1>Bought parts</h1>
+        <h1>Purchase receipts</h1>
         <p className="muted">You don’t have access to log company-card parts purchases.</p>
       </div>
     );
@@ -437,8 +437,8 @@ export function PartsPurchasesPage() {
     <div className="parts-purchases-page">
       <div className="page-header">
         <div>
-          <h1>Bought parts</h1>
-          <p>Bought something with the company card? Photo the receipt and fill in store, date, total, and what it was for.</p>
+          <h1>Purchase receipts</h1>
+          <p>Parts and materials, not fuel. Photo the company-card receipt and fill in store, date, total, and what it was for.</p>
         </div>
       </div>
 
@@ -524,6 +524,7 @@ export function PartsPurchasesPage() {
           <div className="warranty-photo-block">
             <PhotoCapture
               required
+              alignPaper
               label="Receipt photo *"
               hint={scanning ? "Reading receipt…" : "Take a photo of the full receipt."}
               previewUrl={preview}

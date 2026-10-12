@@ -1,4 +1,37 @@
 import type { Env } from "./types";
+import { secretsMatch } from "./secretCompare";
+
+/** Twilio X-Twilio-Signature: HMAC-SHA1 of url + sorted key/value pairs, base64. */
+export async function twilioSignatureValid(
+  authToken: string,
+  url: string,
+  params: Record<string, string | string[]>,
+  header: string
+): Promise<boolean> {
+  const token = authToken.trim();
+  const sig = header.trim();
+  if (!token || !sig) return false;
+  const pairs: [string, string][] = [];
+  for (const [key, value] of Object.entries(params)) {
+    const vals = (Array.isArray(value) ? value : [value]).map((v) => String(v)).sort();
+    for (const one of vals) pairs.push([key, one]);
+  }
+  pairs.sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+  const data = url + pairs.map(([k, v]) => k + v).join("");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(token),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  const bytes = new Uint8Array(mac);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const expected = btoa(bin);
+  return secretsMatch(sig, expected);
+}
 
 export function smsConfigured(env: Env): boolean {
   const hasAuth = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN);
@@ -31,6 +64,8 @@ export type SendSmsResult =
       /** How the Twilio request was addressed — never both at once */
       sender_mode: "messaging_service" | "from";
       messaging_service_sid?: string;
+      /** Twilio message status when the API returns one (queued, sent, ...). */
+      status?: string;
     }
   | { ok: false; error: string };
 
@@ -104,6 +139,7 @@ export async function sendSms(
     );
     const data = (await res.json()) as {
       sid?: string;
+      status?: string;
       message?: string;
       error_message?: string;
       code?: number;
@@ -116,6 +152,7 @@ export async function sendSms(
     return {
       ok: true,
       sid: data.sid || "sent",
+      status: data.status,
       sender_mode: senderMode,
       messaging_service_sid:
         senderMode === "messaging_service" ? messagingService : undefined,
@@ -137,9 +174,9 @@ export async function logSms(
     error?: string | null;
     context?: string | null;
   }
-): Promise<void> {
+): Promise<number | null> {
   try {
-    await db
+    const result = await db
       .prepare(
         `INSERT INTO sms_log (from_user_id, to_user_id, to_phone, body, status, provider_sid, error, context)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -155,8 +192,74 @@ export async function logSms(
         row.context || null
       )
       .run();
+    const id = Number(result.meta?.last_row_id);
+    return Number.isFinite(id) && id > 0 ? id : null;
   } catch {
     // table may not exist until migration
+    return null;
+  }
+}
+
+/** Eric Gonzalez mobile — Jeff Hilliard Atlas wake (last-10 match). */
+export const ERIC_GONZALEZ_SMS_LAST10 = "3614460930";
+
+/**
+ * One-shot Atlas webhook when Eric texts the Field App Twilio number.
+ * Never throws. Skips quietly if secrets missing.
+ */
+export async function maybePingAtlasEricSmsReply(
+  env: Env,
+  opts: {
+    fromPhone: string | null;
+    fromRaw?: string;
+    body: string;
+    smsLogId?: number | null;
+  }
+): Promise<void> {
+  try {
+    const digits = String(opts.fromPhone || opts.fromRaw || "").replace(/\D/g, "");
+    const last10 = digits.length >= 10 ? digits.slice(-10) : "";
+    if (last10 !== ERIC_GONZALEZ_SMS_LAST10) return;
+
+    const url = (env.ATLAS_ERIC_SMS_WEBHOOK_URL || "").trim();
+    const auth = (env.ATLAS_ERIC_SMS_WEBHOOK_AUTH || "").trim();
+    if (!url || !auth) {
+      console.log("[atlas-eric-sms] skip — ATLAS_ERIC_SMS_WEBHOOK_* not set");
+      return;
+    }
+
+    const payload = {
+      source: "field-app-sms-inbound",
+      type: "eric_jeff_sms_reply",
+      from: "+1" + ERIC_GONZALEZ_SMS_LAST10,
+      from_last10: ERIC_GONZALEZ_SMS_LAST10,
+      body: String(opts.body || "").slice(0, 1500),
+      received_at: new Date().toISOString(),
+      sms_log_id: opts.smsLogId != null && opts.smsLogId > 0 ? opts.smsLogId : null,
+    };
+
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 5_000);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: auth,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      console.log(
+        `[atlas-eric-sms] webhook ${res.ok ? "ok" : "fail"} status=${res.status}`
+      );
+    } finally {
+      clearTimeout(t);
+    }
+  } catch (e) {
+    console.log(
+      `[atlas-eric-sms] webhook error: ${e instanceof Error ? e.message : String(e)}`
+    );
   }
 }
 

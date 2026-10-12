@@ -1,5 +1,5 @@
-import { FormEvent, useMemo, useState } from "react";
-import { Link, Navigate } from "react-router-dom";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -42,9 +42,12 @@ function canUseInvoiceLookup(role: string | undefined): boolean {
 
 export function InvoiceLookupPage() {
   const { user } = useAuth();
+  const [params] = useSearchParams();
   const allowed = canUseInvoiceLookup(user?.role);
+  const initialQuery = (params.get("invoice") || params.get("q") || "").trim();
+  const openedFromUrl = useRef(false);
 
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(initialQuery);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<LookupResponse | null>(null);
@@ -57,10 +60,6 @@ export function InvoiceLookupPage() {
     () => (data?.results || []).filter((r) => r.section === "st_installed"),
     [data]
   );
-
-  if (!allowed) {
-    return <Navigate to="/" replace />;
-  }
 
   async function runSearch(raw: string) {
     const query = raw.trim();
@@ -83,6 +82,19 @@ export function InvoiceLookupPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  useEffect(() => {
+    if (!allowed || openedFromUrl.current) return;
+    const initial = (params.get("invoice") || params.get("q") || "").trim();
+    if (!initial) return;
+    openedFromUrl.current = true;
+    setQ(initial);
+    if (initial.length >= 3) void runSearch(initial);
+  }, [allowed, params]);
+
+  if (!allowed) {
+    return <Navigate to="/" replace />;
   }
 
   function onSubmit(e: FormEvent) {

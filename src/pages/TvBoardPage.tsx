@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api";
+import { api, can } from "../api";
 import { useAuth } from "../auth";
 import type { LivePosition } from "./LiveMapPage";
 
@@ -111,30 +111,16 @@ function ensureLeaflet(): Promise<LType> {
 
 type FleetRosterRow = {
   unit: string;
-  tech: string;
   color: string;
   moving: boolean;
 };
 
-/** Prefer first name for glanceable TV list (Abel from Abel Garcia). */
-function shortTechName(full: string | null | undefined): string {
-  const t = (full || "").trim();
-  if (!t) return "—";
-  // "Last, First" → First
-  if (t.includes(",")) {
-    const parts = t.split(",").map((s) => s.trim()).filter(Boolean);
-    if (parts.length >= 2) return parts[1].split(/\s+/)[0] || parts[1];
-  }
-  return t.split(/\s+/)[0] || t;
-}
-
 function buildRoster(positions: LivePosition[]): FleetRosterRow[] {
   const rows = positions.map((p) => {
     const unit = String(p.unit_number || p.name || "?").trim();
-    const tech = shortTechName(p.driver_name);
     const color = p.provider === "onestep" ? "#1a6b4f" : "#175cd3";
     const moving = typeof p.speed_mph === "number" && p.speed_mph > 3;
-    return { unit, tech, color, moving };
+    return { unit, color, moving };
   });
   rows.sort((a, b) =>
     a.unit.localeCompare(b.unit, undefined, { numeric: true, sensitivity: "base" })
@@ -182,9 +168,7 @@ function TvLiveMap({
         iconAnchor: [18, 18],
       });
       const marker = L.marker([p.lat, p.lng], { icon });
-      const title = p.unit_number
-        ? `Unit ${p.unit_number}${p.driver_name ? ` · ${p.driver_name}` : ""}`
-        : p.driver_name || p.name || "Vehicle";
+      const title = p.unit_number ? `Unit ${p.unit_number}` : p.name || "Vehicle";
       marker.bindPopup(
         `<div class="fleet-popup">
           <strong>${escapeHtml(title)}</strong><br/>
@@ -407,7 +391,13 @@ export function TvBoardPage() {
           <div className="tv-board-titles">
             <h1 className="tv-board-title">Operations board</h1>
             <p className="tv-board-sub">
-              Shop date {data?.shop_date || "—"} · board 45s · map 30s
+              Shop date {data?.shop_date || "—"}
+              {" · "}
+              Trucks down {c ? c.out_of_service : "—"}
+              {" · "}
+              Parts waiting {c ? c.pickups_waiting : "—"}
+              {" · "}
+              Today&apos;s jobs {data ? jobs.length : "—"}
             </p>
           </div>
         </div>
@@ -420,6 +410,18 @@ export function TvBoardPage() {
       {loading && !data && <p className="tv-board-loading">Loading…</p>}
 
       <div className="tv-board-kpis">
+        <div className={`tv-kpi tone-${toneCount(c?.out_of_service ?? 0)}`}>
+          <span className="tv-kpi-n">{c?.out_of_service ?? "—"}</span>
+          <span className="tv-kpi-l">Trucks down</span>
+        </div>
+        <div className={`tv-kpi tone-${toneCount(c?.pickups_waiting ?? 0)}`}>
+          <span className="tv-kpi-n">{c?.pickups_waiting ?? "—"}</span>
+          <span className="tv-kpi-l">Parts waiting</span>
+        </div>
+        <div className="tv-kpi tone-ok">
+          <span className="tv-kpi-n">{data ? jobs.length : "—"}</span>
+          <span className="tv-kpi-l">Today&apos;s jobs</span>
+        </div>
         <div className={`tv-kpi tone-${toneCount(c?.emergencies ?? 0)}`}>
           <span className="tv-kpi-n">{c?.emergencies ?? "—"}</span>
           <span className="tv-kpi-l">Emergencies / critical</span>
@@ -428,17 +430,9 @@ export function TvBoardPage() {
           <span className="tv-kpi-n">{c?.needs_schedule ?? "—"}</span>
           <span className="tv-kpi-l">Need schedule</span>
         </div>
-        <div className={`tv-kpi tone-${toneCount(c?.out_of_service ?? 0)}`}>
-          <span className="tv-kpi-n">{c?.out_of_service ?? "—"}</span>
-          <span className="tv-kpi-l">Out of service</span>
-        </div>
         <div className={`tv-kpi tone-${toneCount(c?.weekly_checks_due ?? 0)}`}>
           <span className="tv-kpi-n">{c?.weekly_checks_due ?? "—"}</span>
           <span className="tv-kpi-l">Weekly checks due</span>
-        </div>
-        <div className={`tv-kpi tone-${toneCount(c?.pickups_waiting ?? 0)}`}>
-          <span className="tv-kpi-n">{c?.pickups_waiting ?? "—"}</span>
-          <span className="tv-kpi-l">Parts pickup</span>
         </div>
         <div className={`tv-kpi tone-${toneCount(c?.open_warranties ?? 0)}`}>
           <span className="tv-kpi-n" title="Dropped off + submitted claims aging 3+ working days">
@@ -453,28 +447,32 @@ export function TvBoardPage() {
       </div>
 
       <div className="tv-board-main">
-        <TvLiveMap onRoster={setFleetRoster} />
+        {can(user, "viewLiveMap") ? (
+          <TvLiveMap onRoster={setFleetRoster} />
+        ) : (
+          <section className="tv-panel">
+            <p className="tv-empty">Managers only. The fleet map is hidden on this screen.</p>
+          </section>
+        )}
 
-        {/* Unit → tech (replaces old “In the shop now” slot) */}
+        {/* Units on the map. No employee names on the wall. */}
         <section className="tv-panel tv-roster-panel">
           <h2>
-            Who&apos;s out
+            Units out
             <span className="tv-panel-count">{fleetRoster.length}</span>
           </h2>
           {fleetRoster.length === 0 ? (
             <p className="tv-empty">No units on the map yet.</p>
           ) : (
             <ul className="tv-roster-list">
-              {fleetRoster.map((row) => (
-                <li key={`${row.unit}-${row.tech}`} className="tv-roster-row">
+              {fleetRoster.map((row, idx) => (
+                <li key={`${row.unit}-${idx}`} className="tv-roster-row">
                   <span
                     className="tv-roster-dot"
                     style={{ background: row.color }}
                     title={row.moving ? "Moving" : "Stopped / idle"}
                   />
                   <strong className="tv-roster-unit">{row.unit}</strong>
-                  <span className="tv-roster-sep">–</span>
-                  <span className="tv-roster-tech">{row.tech}</span>
                 </li>
               ))}
             </ul>
@@ -499,10 +497,7 @@ export function TvBoardPage() {
                   >
                     <div className="tv-job-unit">Unit {j.unit_number}</div>
                     <div className="tv-job-title">{j.title}</div>
-                    <div className="tv-job-meta">
-                      {j.assigned_driver || j.reporter_name || "—"}
-                      {j.schedule_notes ? ` · ${j.schedule_notes}` : ""}
-                    </div>
+                    {j.schedule_notes ? <div className="tv-job-meta">{j.schedule_notes}</div> : null}
                   </li>
                 ))}
               </ul>
@@ -525,10 +520,7 @@ export function TvBoardPage() {
                   >
                     <div className="tv-job-unit">Unit {j.unit_number}</div>
                     <div className="tv-job-title">{j.title}</div>
-                    <div className="tv-job-meta">
-                      {j.assigned_driver || j.reporter_name || "—"}
-                      {j.schedule_notes ? ` · ${j.schedule_notes}` : ""}
-                    </div>
+                    {j.schedule_notes ? <div className="tv-job-meta">{j.schedule_notes}</div> : null}
                   </li>
                 ))}
               </ul>

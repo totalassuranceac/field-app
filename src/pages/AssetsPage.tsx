@@ -37,6 +37,16 @@ interface Peer {
   role: string;
 }
 
+interface OwnedBottle {
+  id: number;
+  bottle_type: string;
+  serial: string;
+  owner_kind: string;
+  owner_name: string;
+  unit_number: string;
+  status: string;
+}
+
 interface Asset {
   id: number;
   asset_tag?: string | null;
@@ -118,6 +128,7 @@ function isCheckedOut(a: Asset): boolean {
 export function AssetsPage() {
   const { user } = useAuth();
   const canManage = can(user, "manageCompanyAssets");
+  const canOwnBottles = can(user, "manageGasBottleOwners");
   const canView = can(user, "viewCompanyAssets");
   const isField = user?.role === "driver";
 
@@ -131,6 +142,12 @@ export function AssetsPage() {
   const [matrix, setMatrix] = useState<MatrixRow[]>([]);
   const [events, setEvents] = useState<Record<string, unknown>[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [ownedBottles, setOwnedBottles] = useState<OwnedBottle[]>([]);
+  const [bottleType, setBottleType] = useState("N2");
+  const [bottleOwnerKind, setBottleOwnerKind] = useState("company");
+  const [bottleOwnerId, setBottleOwnerId] = useState("");
+  const [bottleVehicleId, setBottleVehicleId] = useState("");
+  const [bottleSerial, setBottleSerial] = useState("");
 
   // Swap form
   const [swapTruck, setSwapTruck] = useState("");
@@ -252,13 +269,75 @@ export function AssetsPage() {
     setMatrix(sum.matrix || []);
     setEvents(ev.events || []);
     setPeers(users.users || []);
+    if (isField) {
+      const tools = await api<{ bottles?: OwnedBottle[] }>("/growth/tools").catch(() => ({
+        bottles: [] as OwnedBottle[],
+      }));
+      setOwnedBottles(tools.bottles || []);
+    } else if (canOwnBottles) {
+      const owned = await api<{ bottles: OwnedBottle[] }>("/growth/bottles").catch(() => ({
+        bottles: [] as OwnedBottle[],
+      }));
+      setOwnedBottles(owned.bottles || []);
+    }
     // seed swap lines
     const lines: Record<number, { empty_in: string; full_out: string }> = {};
     for (const t of sum.types || []) {
       lines[t.id] = { empty_in: "0", full_out: "0" };
     }
     setSwapLines((prev) => (Object.keys(prev).length ? prev : lines));
-  }, []);
+  }, [canOwnBottles, isField]);
+
+  async function saveOwnedBottle() {
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      await api("/growth/bottles", {
+        method: "POST",
+        body: JSON.stringify({
+          bottle_type: bottleType,
+          owner_kind: bottleOwnerKind,
+          owner_user_id: bottleOwnerKind === "employee" ? Number(bottleOwnerId) : null,
+          vehicle_id: bottleVehicleId ? Number(bottleVehicleId) : null,
+          serial: bottleSerial,
+        }),
+      });
+      setBottleSerial("");
+      setOk("Bottle owner saved.");
+      await loadBottles();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that bottle");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retireOwnedBottle(id: number) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/growth/bottles/${id}/retire`, { method: "POST", body: "{}" });
+      await loadBottles();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not retire that bottle");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restoreOwnedBottle(id: number) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/growth/bottles/${id}/restore`, { method: "POST", body: "{}" });
+      await loadBottles();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not restore that bottle");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const loadAssets = useCallback(async () => {
     const params = new URLSearchParams();
@@ -620,6 +699,36 @@ export function AssetsPage() {
       {error && <div className="error inv-flash">{error}</div>}
       {ok && <div className="success inv-flash">{ok}</div>}
 
+      {isField ? (
+        <section className="card">
+          <h2>Whose bottle</h2>
+          <p>
+            Company bottles stay on the truck. An employee&apos;s bottle leaves with them when they come off the truck.
+          </p>
+          {ownedBottles.length === 0 ? (
+            <p className="muted">No bottles are marked yet.</p>
+          ) : (
+            <ul className="growth-file-list">
+              {ownedBottles.map((bottle) => (
+                <li key={bottle.id}>
+                  <strong>
+                    {bottle.bottle_type} · {bottle.owner_kind === "employee" ? "Employee" : "Company"}
+                    {bottle.serial ? ` · ${bottle.serial}` : ""}
+                  </strong>
+                  <p>
+                    {bottle.status === "left_with_employee"
+                      ? "Left with the employee."
+                      : bottle.unit_number
+                        ? `On truck ${bottle.unit_number}.`
+                        : "Active."}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+
       <div className="warranty-filters no-print">
         <button
           type="button"
@@ -665,6 +774,125 @@ export function AssetsPage() {
               </p>
             )}
           </div>
+
+          {canOwnBottles && (
+            <section className="card">
+              <h2>Whose bottle</h2>
+              <p>
+                Company bottles stay on the truck. An employee's bottle leaves with them when they come off the truck.
+              </p>
+              <form
+                className="growth-tool-fields"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveOwnedBottle();
+                }}
+              >
+                <label>
+                  Gas
+                  <select value={bottleType} onChange={(event) => setBottleType(event.target.value)}>
+                    <option value="N2">Nitrogen</option>
+                    <option value="O2">Oxygen</option>
+                    <option value="ACE">Acetylene</option>
+                  </select>
+                </label>
+                <label>
+                  Owner
+                  <select
+                    value={bottleOwnerKind}
+                    onChange={(event) => setBottleOwnerKind(event.target.value)}
+                  >
+                    <option value="company">Company</option>
+                    <option value="employee">Employee</option>
+                  </select>
+                </label>
+                {bottleOwnerKind === "employee" ? (
+                  <label>
+                    Employee
+                    <select value={bottleOwnerId} onChange={(event) => setBottleOwnerId(event.target.value)}>
+                      <option value="">Choose</option>
+                      {(user
+                        ? [{ id: user.id, display_name: user.display_name }, ...peers.filter((person) => person.id !== user.id)]
+                        : peers
+                      ).map((person) => (
+                        <option key={person.id} value={person.id}>
+                          {person.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <label>
+                  Truck
+                  <select value={bottleVehicleId} onChange={(event) => setBottleVehicleId(event.target.value)}>
+                    <option value="">None</option>
+                    {matrix
+                      .filter((row) => row.vehicle_id)
+                      .map((row) => (
+                        <option key={row.vehicle_id} value={row.vehicle_id || ""}>
+                          {row.unit_number || row.location_name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  Serial
+                  <input
+                    value={bottleSerial}
+                    maxLength={80}
+                    placeholder="Optional"
+                    onChange={(event) => setBottleSerial(event.target.value)}
+                  />
+                </label>
+                <div className="growth-row-actions">
+                  <button type="submit" className="btn" disabled={busy}>
+                    Save bottle
+                  </button>
+                </div>
+              </form>
+              {ownedBottles.length === 0 ? (
+                <p className="muted">No bottles are marked yet.</p>
+              ) : (
+                <ul className="growth-file-list">
+                  {ownedBottles.map((bottle) => (
+                    <li key={bottle.id}>
+                      <strong>
+                        {bottle.bottle_type} · {bottle.owner_name}
+                        {bottle.serial ? ` · ${bottle.serial}` : ""}
+                      </strong>
+                      <p>
+                        {bottle.status === "left_with_employee"
+                          ? "Left with the employee."
+                          : bottle.unit_number
+                            ? `On truck ${bottle.unit_number}.`
+                            : "Active."}
+                      </p>
+                      <div className="growth-row-actions">
+                        {bottle.status === "left_with_employee" ? (
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={() => void restoreOwnedBottle(bottle.id)}
+                          >
+                            Back in service
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="btn secondary"
+                          disabled={busy}
+                          onClick={() => void retireOwnedBottle(bottle.id)}
+                        >
+                          Retire
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
 
           {canManage && (
             <CollapsibleSection

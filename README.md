@@ -67,14 +67,7 @@ npm run dev
 
 Open http://127.0.0.1:5173
 
-**Demo logins** (created on first API boot if DB is empty, or after seed + bootstrap):
-
-| User | Password | Role |
-|------|----------|------|
-| `admin` | `ChangeMe123!` | admin |
-| `mechanic` | `ChangeMe123!` | mechanic |
-
-Change these immediately in production.
+**Bootstrap admin:** On an empty DB only, the Worker creates a local admin login. Change that password immediately. Production has no demo login and does not print default passwords here.
 
 ## Google Workspace login
 
@@ -102,7 +95,7 @@ Production (Total Assurance account):
 - **App URL:** https://total-assurance-fleet.totalassurance.workers.dev  
 - **Account:** `f6da342467e60df683731c55dfc0e7b4`  
 - **D1:** `fleet_db` (`9126adda-009e-4aff-8f78-dddf54be8ffa`)  
-- Default login after seed/bootstrap: `admin` / `ChangeMe123!` (change immediately)
+- Bootstrap creates admin only on an empty DB — change password immediately; production has no demo login.
 
 ```bash
 # First-time account setup

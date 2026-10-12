@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 
@@ -280,14 +281,13 @@ export function InspectionsPage() {
               <span className="weekly-act-title">All good</span>
               <span className="weekly-act-hint">Van is working</span>
             </button>
-            <button
+            <Link
               className="weekly-act issue"
-              type="button"
-              onClick={() => openQuick(w.vehicle_id, "issue")}
+              to={`/issues?new=1&vehicle=${w.vehicle_id}&note=${encodeURIComponent("Weekly check failed")}`}
             >
               <span className="weekly-act-title">Needs repair</span>
-              <span className="weekly-act-hint">Something’s wrong</span>
-            </button>
+              <span className="weekly-act-hint">Open Report a problem</span>
+            </Link>
           </div>
         )}
       </article>
@@ -298,7 +298,7 @@ export function InspectionsPage() {
     <div className="weekly-page">
       <div className="page-header">
         <div>
-          <h1>Weekly checks</h1>
+          <h1>Weekly check</h1>
           <p className="weekly-lead">
             Check your van once a week. Pick one button — that’s it.
           </p>
@@ -548,7 +548,15 @@ export function InspectionsPage() {
                       </div>
                       <select
                         value={checks[c.key]}
-                        onChange={(e) => setChecks({ ...checks, [c.key]: e.target.value })}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          setChecks({ ...checks, [c.key]: next });
+                          if (next === "fail" && vehicleId) {
+                            window.location.assign(
+                              `/issues?new=1&vehicle=${encodeURIComponent(vehicleId)}&note=${encodeURIComponent(c.label + " failed on the weekly check")}`
+                            );
+                          }
+                        }}
                       >
                         <option value="ok">OK</option>
                         <option value="attention">Attention</option>

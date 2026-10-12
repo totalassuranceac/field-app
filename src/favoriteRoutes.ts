@@ -1,4 +1,4 @@
-import { can, canOpenStudio, type User } from "./api";
+﻿import { can, type User } from "./api";
 
 export type FavoriteRoute = {
   path: string;
@@ -8,44 +8,48 @@ export type FavoriteRoute = {
 
 /** All sections that can appear as Home shortcuts (permissions still apply). */
 export const FAVORITE_CATALOG: FavoriteRoute[] = [
-  { path: "/vehicles", label: "Trucks", hint: "Units & assignments" },
-  { path: "/live", label: "Live map", hint: "Fleet GPS" },
-  { path: "/yard", label: "Yard", hint: "Shop yard board" },
-  { path: "/fuel", label: "Fuel", hint: "Log fuel" },
-  { path: "/fuel/receipt-review", label: "Fuel receipts", hint: "OCR review" },
+  { path: "/vehicles", label: "Fleet units", hint: "Units & assignments" },
+  { path: "/live", label: "Fleet map", hint: "Fleet GPS" },
+  { path: "/yard", label: "Fleet compliance", hint: "Stickers · insurance · cam/GPS" },
+  { path: "/fuel", label: "Log fuel", hint: "Log fuel" },
+  { path: "/fuel/receipt-review", label: "Verify fuel", hint: "Verify receipt photos" },
   { path: "/inspections", label: "Weekly check", hint: "Van weekly checks" },
-  { path: "/alerts", label: "Fuel alerts", hint: "Card / fuel issues" },
-  { path: "/downtime", label: "Trucks down", hint: "Out of service" },
+  { path: "/alerts", label: "Fuel problems", hint: "Card / fuel issues" },
+  { path: "/downtime", label: "Out of service", hint: "Out of service" },
   { path: "/reports", label: "Reports", hint: "Fleet reports" },
   { path: "/inventory", label: "Stock room", hint: "Parts inventory" },
-  { path: "/part-pickup", label: "Part pickup request", hint: "Vendor pickups" },
-  { path: "/parts-dropoff", label: "Brought to shop", hint: "Shop drop-offs" },
-  { path: "/parts-runs", label: "Warehouse delivery", hint: "Job deliveries" },
-  { path: "/truck-stock", label: "Count truck stock", hint: "Truck counts" },
-  { path: "/parts-receipts", label: "Bought parts", hint: "Purchase receipts" },
+  { path: "/live-inventory", label: "Live inventory", hint: "Counts, restock, on-hand" },
+  { path: "/part-pickup", label: "Will-call", hint: "Still at the store" },
+  { path: "/parts-dropoff", label: "Shop counter", hint: "Already at the shop" },
+  { path: "/deliveries", label: "Deliveries", hint: "Parts in / picked up" },
+  { path: "/parts-runs", label: "Deliver to job", hint: "Warehouse brings parts to a job" },
+  { path: "/truck-stock", label: "Truck stock count", hint: "Count what is on the truck" },
+  { path: "/parts-receipts", label: "Purchase receipts", hint: "Company card receipt" },
   { path: "/dump-runs", label: "Dump runs", hint: "Dump tickets" },
   { path: "/assets", label: "Company assets", hint: "Gear & bottles" },
   { path: "/warranties", label: "Warranties", hint: "Claims & drop-offs" },
-  { path: "/invoice-lookup", label: "Invoice lookup", hint: "Address → model & serial" },
-  { path: "/issues", label: "Shop board", hint: "Repairs" },
+  { path: "/invoice-lookup", label: "Invoice lookup", hint: "Address -> model & serial" },
+  { path: "/issues", label: "Repair board", hint: "Repairs" },
   { path: "/service", label: "Oil changes", hint: "Service due" },
   { path: "/parts-orders", label: "Order for shop", hint: "Shop orders" },
-  { path: "/admin", label: "People", hint: "Employees & logins" },
-  { path: "/warehouse-cameras", label: "Security cameras", hint: "NVR / shop cams" },
+  { path: "/admin", label: "Employees", hint: "Employees & logins" },
+  { path: "/warehouse-cameras", label: "Shop cameras", hint: "NVR / shop cams" },
   { path: "/time-off", label: "Time off", hint: "PTO requests" },
-  { path: "/clock", label: "Job clock", hint: "Dispatch · Arrive · Complete" },
-  { path: "/ops-performance", label: "Ops performance", hint: "Jobs · sales · ZC" },
-  { path: "/day-board", label: "Day board", hint: "Tech × jobs for a day" },
+  { path: "/clock", label: "Clock in / out", hint: "Field App clock - not ST Time Clock" },
+  { path: "/ops-performance", label: "Shop scoreboard", hint: "Jobs / sales / comebacks" },
+  { path: "/day-board", label: "Today's jobs", hint: "Tech x jobs for a day" },
+  { path: "/install-book", label: "Book install", hint: "Miller / Install + NC" },
   { path: "/tool-loans", label: "Tool loan", hint: "Borrow tools" },
   { path: "/tool-loan-ledger", label: "Tool loan payroll", hint: "Charges" },
   { path: "/onboarding", label: "New hire packet", hint: "Hire forms" },
   { path: "/termination", label: "Separation notice", hint: "Exit paperwork" },
   { path: "/feedback", label: "App feedback", hint: "Send feedback" },
   { path: "/howto", label: "How-to guides", hint: "App help" },
+  { path: "/tools-checklist", label: "My tools", hint: "Your next tools" },
+  { path: "/nate", label: "NATE study", hint: "Practice toward the test" },
   { path: "/handbook", label: "Handbook", hint: "Policies" },
   { path: "/notifications", label: "Inbox", hint: "Notifications" },
   { path: "/tv", label: "TV board", hint: "Shop TV" },
-  { path: "/studio", label: "Studio", hint: "Rate ads" },
   { path: "/settings", label: "Settings", hint: "Account" },
 ];
 
@@ -104,11 +108,15 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return adminShell || isMechanic || isSupervisor || (isOffice && can(user, "viewReports"));
     case "/inventory":
       return adminShell || can(user, "viewInventory") || isWarehouse;
+    case "/live-inventory":
+      return role === "admin" || isWarehouse;
     case "/part-pickup":
     case "/parts-dropoff":
     case "/parts-runs":
     case "/truck-stock":
       return true;
+    case "/deliveries":
+      return can(user, "viewDeliveries");
     case "/parts-receipts":
       return can(user, "logPartsPurchase") || can(user, "viewPartsPurchase");
     case "/dump-runs":
@@ -137,6 +145,8 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return can(user, "viewOpsPerformance");
     case "/day-board":
       return can(user, "viewDayBoard");
+    case "/install-book":
+      return role === "admin" || role === "office" || role === "supervisor";
     case "/tool-loans":
       return true;
     case "/tool-loan-ledger":
@@ -146,14 +156,14 @@ export function canFavoritePath(user: User | null, path: string): boolean {
       return can(user, "manageUsers") || can(user, "manageEmployees") || role === "office";
     case "/feedback":
     case "/howto":
+    case "/tools-checklist":
+    case "/nate":
     case "/handbook":
     case "/notifications":
     case "/settings":
       return true;
     case "/tv":
       return adminShell || isOffice || isMechanic || isSupervisor;
-    case "/studio":
-      return canOpenStudio(user);
     default:
       return false;
   }

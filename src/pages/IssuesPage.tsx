@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { LogItem, LogList } from "../components/CollapsibleLog";
@@ -15,6 +15,7 @@ import {
   unpackWorkPerformed,
 } from "../issueCatalog";
 import type { Vehicle } from "./VehiclesPage";
+import { cleanUiText } from "../lib/utf8Mojibake";
 
 /** What shop should read first — description for free-text "other" reports */
 function issueHeadline(i: {
@@ -22,14 +23,15 @@ function issueHeadline(i: {
   description: string | null;
   issue_category: string | null;
 }): string {
-  const desc = (i.description || "").trim();
-  if (desc && (i.issue_category === "other" || /other/i.test(i.title))) {
-    return desc.length > 100 ? `${desc.slice(0, 100)}…` : desc;
+  const title = cleanUiText(i.title);
+  const desc = cleanUiText((i.description || "").trim());
+  if (desc && (i.issue_category === "other" || /other/i.test(title))) {
+    return desc.length > 100 ? `${desc.slice(0, 100)}...` : desc;
   }
-  if (desc && desc.length > 8 && desc.toLowerCase() !== i.title.toLowerCase()) {
-    return `${i.title} — ${desc.length > 60 ? `${desc.slice(0, 60)}…` : desc}`;
+  if (desc && desc.length > 8 && desc.toLowerCase() !== title.toLowerCase()) {
+    return `${title} - ${desc.length > 60 ? `${desc.slice(0, 60)}...` : desc}`;
   }
-  return i.title;
+  return title;
 }
 
 interface Issue {
@@ -179,6 +181,7 @@ interface CommonRow {
 export function IssuesPage() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const isDriver = user?.role === "driver";
   const isOffice = user?.role === "office";
   /** Shop tools: mechanic / admin (and office can schedule now) */
@@ -201,6 +204,15 @@ export function IssuesPage() {
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
   const [isEmergency, setIsEmergency] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get("new") !== "1") return;
+    setShowNew(true);
+    const v = searchParams.get("vehicle");
+    if (v) setVehicleId(v);
+    const note = searchParams.get("note");
+    if (note) setDescription(note);
+  }, [searchParams]);
 
   /** Calendar day for “Done today / by date” supervisor view */
   const [completedDay, setCompletedDay] = useState(todayIsoDate);
@@ -336,13 +348,22 @@ export function IssuesPage() {
     }
   }
 
+  const focusVehicle = searchParams.get("vehicle");
+  const scopedIssues = useMemo(
+    () =>
+      focusVehicle && searchParams.get("new") !== "1"
+        ? issues.filter((i) => String(i.vehicle_id) === focusVehicle)
+        : issues,
+    [issues, focusVehicle, searchParams]
+  );
+  const staleOpenCount = useMemo(() => issues.filter(isStaleOpen).length, [issues]);
   const needsSchedule = useMemo(
-    () => issues.filter((i) => i.status === "open"),
-    [issues]
+    () => scopedIssues.filter((i) => i.status === "open"),
+    [scopedIssues]
   );
   const onBoard = useMemo(
-    () => issues.filter((i) => i.status === "scheduled" || i.status === "in_progress"),
-    [issues]
+    () => scopedIssues.filter((i) => i.status === "scheduled" || i.status === "in_progress"),
+    [scopedIssues]
   );
   /** Shop views: every problem under its unit (no split vehicles on the list) */
   const needsByVehicle = useMemo(
@@ -350,7 +371,7 @@ export function IssuesPage() {
     [needsSchedule]
   );
   const boardByVehicle = useMemo(() => groupIssuesByVehicle(onBoard), [onBoard]);
-  const allByVehicle = useMemo(() => groupIssuesByVehicle(issues), [issues]);
+  const allByVehicle = useMemo(() => groupIssuesByVehicle(scopedIssues), [scopedIssues]);
   /** Print: units in numerical order (cover + one page each) */
   const printByVehicle = useMemo(() => {
     const groups = groupIssuesByVehicle(
@@ -1147,9 +1168,8 @@ export function IssuesPage() {
       <div className="page-header">
         <div>
           <h1>
-            {isDriver
-              ? "Report a problem"
-              : "Shop board"}
+            {isDriver ? "Report a problem" : "Repair board"}
+            {!isDriver && staleOpenCount > 0 ? ` · ${staleOpenCount} open 3+ days` : ""}
           </h1>
           <p>
             {isDriver
@@ -1679,7 +1699,20 @@ export function IssuesPage() {
                 Most common issues
                 <select
                   value={category}
-                  onChange={(e) => setCategory(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    if (
+                      isDriver &&
+                      (next === "flat_tire" || next === "wont_start" || next === "warning_light")
+                    ) {
+                      const q = new URLSearchParams();
+                      if (vehicleId) q.set("vehicle", vehicleId);
+                      q.set("category", next);
+                      navigate(`/fleet-shop/report?${q.toString()}`);
+                      return;
+                    }
+                    setCategory(next);
+                  }}
                   required
                   disabled={submitting}
                 >
@@ -2341,12 +2374,13 @@ export function IssuesPage() {
                 <tbody>
                   {done.map((i) => {
                     const up = unpackWorkPerformed(i.work_performed);
-                    const workLine =
+                    const workLine = cleanUiText(
                       up.work ||
-                      up.diagnostics ||
-                      i.work_performed ||
-                      i.completion_notes ||
-                      i.title;
+                        up.diagnostics ||
+                        i.work_performed ||
+                        i.completion_notes ||
+                        i.title
+                    );
                     return (
                       <tr key={i.id}>
                         <td className="col-time">
@@ -2364,7 +2398,7 @@ export function IssuesPage() {
                         </td>
                         <td>
                           <div className="shop-print-issue-main">
-                            {i.mechanic_diagnosis || i.title}
+                            {cleanUiText(i.mechanic_diagnosis || i.title)}
                           </div>
                           <div className="shop-print-issue-sub">
                             {workLine && workLine.length > 220

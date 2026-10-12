@@ -1,17 +1,21 @@
-﻿/**
+/**
  * Office Day Board — Phase 1 READ-ONLY.
  * Live ST appointments for a Chicago calendar day. No ST writes.
  */
 
 import type { Env, PublicUser } from "./types";
+import { getSetting } from "./audit";
 import { isOfficeSide } from "./auth";
-import { isChicagoWeekend } from "./pto";
+import { jobNotesFor, type JobNote } from "./jobNoteRules";
+import { resolveHardLockPairs } from "./installCrewPairs";
+import { isChicagoWeekend, ptoCoversChicagoDate } from "./pto";
 import { stApiGet, stConfigured, stTenantId } from "./servicetitan";
 import {
   loadStTechnicians,
   matchUserToStTechnician,
   type StTechnician,
 } from "./zeroCharge";
+import { formatAddress } from "./jobClock";
 
 const TZ = "America/Chicago";
 
@@ -22,22 +26,50 @@ export type DayBoardJob = {
   address: string | null;
   /** Which ST field won for hover debug (e.g. invoice.locationAddress.street) */
   address_source?: string | null;
+  /** Street - city, ST - zip when the invoice or CRM location has a city or ZIP. */
+  address_full?: string | null;
   customer_name: string | null;
   customer_phone: string | null;
   job_type: string | null;
+  /** Appointment start (ST `start`) — board sort + primary time label */
   window_start: string | null;
+  /** Appointment end (ST `end`) */
   window_end: string | null;
+  /** Arrival window start if different from appointment start (smaller subtitle) */
+  arrival_window_start?: string | null;
+  /** Arrival window end if different from appointment end */
+  arrival_window_end?: string | null;
   status: string | null;
-  /** Sheet-like “done” (yellow) — ST Done/Completed only */
+  /** ST Finished / Done / Completed */
   is_done: boolean;
-  /** Red OFF/Out cell */
+  /** PTO / Out — light red (not ST Canceled) */
   is_off: boolean;
-  /** st = in ServiceTitan (blue text); board = not in ST yet (black) — Phase 2 */
+  /** ST Dispatch Status phase for board colors */
+  st_phase: DayBoardStPhase;
+  /** st = in ServiceTitan; board = not in ST yet */
   ink: "st" | "board";
   note: string | null;
+  /** Bring / heads-up / talk notes. Missing on older cached rows. */
+  job_notes?: JobNote[];
   /** unused — pairs are row labels (Name/Helper), not chip text */
   helpers: string[];
+  /** Service pending chip (No Cool) — D1 day_board_pending.id */
+  pending_id?: number | null;
+  /** pending | linking | failed (board ink only) */
+  board_status?: string | null;
 };
+
+export type DayBoardStPhase =
+  | "scheduled"
+  | "confirmed"
+  | "dispatched"
+  | "arrived"
+  | "finished"
+  | "canceled"
+  | "hold"
+  | "nonjob"
+  | "off"
+  | "other";
 
 export type DayBoardPto = {
   request_id: number;
@@ -64,6 +96,8 @@ export type DayBoardResponse = {
   view: "office" | "self";
   st_write_enabled: false;
   rows: DayBoardTechRow[];
+  /** true = PTO query succeeded; empty pto[] is authoritative (do not client-stick). */
+  pto_ok?: boolean;
   message?: string;
   error?: string;
 };
@@ -201,7 +235,14 @@ function isDoneStatus(status: string | null | undefined): boolean {
     .replace(/_/g, " ");
   if (!s) return false;
   if (isOffStatus(s)) return false;
-  return s === "done" || s === "completed" || s === "complete" || /\bdone\b/.test(s);
+  return (
+    s === "done" ||
+    s === "completed" ||
+    s === "complete" ||
+    s === "finished" ||
+    /\bdone\b/.test(s) ||
+    s.includes("finish")
+  );
 }
 
 function crewFromTeam(team: string | null | undefined): "service" | "install" {
@@ -210,6 +251,7 @@ function crewFromTeam(team: string | null | undefined): "service" | "install" {
   return "service";
 }
 
+/** PTO / Out only — ST Canceled is its own phase (red), not this. */
 function isOffStatus(status: string | null | undefined): boolean {
   const s = String(status || "")
     .trim()
@@ -219,10 +261,60 @@ function isOffStatus(status: string | null | undefined): boolean {
     s === "out" ||
     s === "off" ||
     s.includes("out of office") ||
-    s === "unused" ||
-    s === "canceled" ||
-    s === "cancelled"
+    s === "unused"
   );
+}
+
+/** ST canceled/cancelled — never show on Day Board (gone from sheet). */
+function isCanceledStatus(status: string | null | undefined): boolean {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ");
+  if (!s) return false;
+  return (
+    s === "canceled" ||
+    s === "cancelled" ||
+    s.includes("canceled") ||
+    s.includes("cancelled")
+  );
+}
+
+function stPhaseFromStatus(status: string | null | undefined): DayBoardStPhase {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ");
+  if (!s) return "scheduled";
+  if (isOffStatus(s)) return "off";
+  if (s === "canceled" || s === "cancelled") return "canceled";
+  if (s === "hold" || s.includes("hold")) return "hold";
+  if (s.includes("non") && s.includes("job")) return "nonjob";
+  if (
+    s === "done" ||
+    s === "completed" ||
+    s === "complete" ||
+    s === "finished" ||
+    /\bdone\b/.test(s) ||
+    s.includes("finish")
+  ) {
+    return "finished";
+  }
+  if (s === "dispatched" || s.includes("dispatch")) return "dispatched";
+  if (
+    s === "arrived" ||
+    s === "working" ||
+    s === "in progress" ||
+    s.includes("arriv") ||
+    s.includes("working") ||
+    s.includes("on site") ||
+    s.includes("onsite")
+  ) {
+    return "arrived";
+  }
+  if (s === "confirmed" || s.includes("confirm")) return "confirmed";
+  if (s === "scheduled" || s.includes("schedul")) return "scheduled";
+  return "scheduled";
 }
 
 function customerPhoneFromAppt(a: Record<string, unknown>): string | null {
@@ -526,6 +618,118 @@ async function enrichJobs(
 
   return map;
 }
+
+type StContact = {
+  id?: number;
+  type?: string;
+  value?: string;
+  memo?: string | null;
+};
+
+/** Prefer MobilePhone, then Phone (ignore email/fax). */
+function phoneFromContacts(rows: StContact[] | undefined | null): string | null {
+  if (!rows?.length) return null;
+  let mobile: string | null = null;
+  let phone: string | null = null;
+  for (const c of rows) {
+    const typ = String(c.type || "").toLowerCase();
+    const val = typeof c.value === "string" ? c.value.trim() : "";
+    if (!val) continue;
+    if (typ === "mobilephone" || typ === "mobile") {
+      if (!mobile) mobile = val;
+    } else if (typ === "phone" || typ === "landline" || typ === "home" || typ === "work") {
+      if (!phone) phone = val;
+    }
+  }
+  return mobile || phone;
+}
+
+/**
+ * Batch-load CRM customer + location contacts for missing phones.
+ * Soft-fail on 403 (Contacts Read often missing). Cache = Maps for this board load only.
+ */
+async function enrichCrmPhones(
+  env: Env,
+  db: D1Database,
+  tenantId: string,
+  customerIds: number[],
+  locationIds: number[]
+): Promise<{
+  byCustomerId: Map<number, string>;
+  byLocationId: Map<number, string>;
+  scopeMissing: boolean;
+}> {
+  const byCustomerId = new Map<number, string>();
+  const byLocationId = new Map<number, string>();
+  let scopeMissing = false;
+
+  const custIds = [...new Set(customerIds.filter((n) => n > 0))];
+  const locIds = [...new Set(locationIds.filter((n) => n > 0))];
+  const CONCURRENCY = 6;
+
+  async function pull(kind: "customer" | "location", id: number): Promise<void> {
+    const path =
+      kind === "customer"
+        ? `/crm/v2/tenant/${tenantId}/customers/${id}/contacts`
+        : `/crm/v2/tenant/${tenantId}/locations/${id}/contacts`;
+    const res = await stApiGet(env, db, path);
+    if (!res.ok) {
+      if (res.status === 403 || res.status === 401) scopeMissing = true;
+      return;
+    }
+    const body = res.json as { data?: StContact[] };
+    const phone = phoneFromContacts(body.data || []);
+    if (!phone) return;
+    if (kind === "customer") byCustomerId.set(id, phone);
+    else byLocationId.set(id, phone);
+  }
+
+  for (let i = 0; i < locIds.length; i += CONCURRENCY) {
+    await Promise.all(locIds.slice(i, i + CONCURRENCY).map((id) => pull("location", id)));
+  }
+  for (let i = 0; i < custIds.length; i += CONCURRENCY) {
+    await Promise.all(custIds.slice(i, i + CONCURRENCY).map((id) => pull("customer", id)));
+  }
+
+  return { byCustomerId, byLocationId, scopeMissing };
+}
+
+/** jobTypeId → name for one board load (JPM job-types). Soft-fail empty map. */
+async function loadJobTypeNameMap(
+  env: Env,
+  db: D1Database,
+  tenantId: string
+): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  for (let page = 1; page <= 5; page++) {
+    const res = await stApiGet(
+      env,
+      db,
+      `/jpm/v2/tenant/${tenantId}/job-types?page=${page}&pageSize=200`
+    );
+    if (!res.ok) break;
+    const body = res.json as {
+      data?: Array<{ id?: number; name?: string }>;
+      hasMore?: boolean;
+    };
+    for (const row of body.data || []) {
+      const id = Number(row.id);
+      const name = typeof row.name === "string" ? row.name.trim() : "";
+      if (id > 0 && name) map.set(id, name);
+    }
+    if (!body.hasMore) break;
+  }
+  return map;
+}
+
+type ChipEnrichment = {
+  jobTypeNames: Map<number, string>;
+  phonesByCustomerId: Map<number, string>;
+  phonesByLocationId: Map<number, string>;
+  techAssist?: boolean;
+  solderTypeIds?: number[];
+};
+
 function techIdsFromAppt(row: Record<string, unknown>): number[] {
   const out = new Set<number>();
   if (Array.isArray(row.technicianIds)) {
@@ -599,6 +803,33 @@ function shortNote(raw: unknown): string | null {
     .trim();
   if (!s) return null;
   return s.length > 80 ? `${s.slice(0, 79)}…` : s;
+}
+
+/**
+ * Tech-useful dispatch note. Prefer residual after Miller-style leading street;
+ * never use a pure address street as the note body.
+ */
+function dispatchNote(raw: unknown, max = 400): string | null {
+  let s = String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return null;
+  const leading = parseLeadingStreet(s);
+  if (leading) {
+    const escaped = leading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const stripped = s
+      .replace(new RegExp("^" + escaped + "\\s*[–—\\-]\\s*", "i"), "")
+      .trim();
+    if (stripped && !looksLikeStreet(stripped)) {
+      s = stripped;
+    } else if (looksLikeStreet(s) || s.length <= leading.length + 3) {
+      return null;
+    }
+  } else if (looksLikeStreet(s) && s.length <= 80 && !/[;:]/.test(s)) {
+    return null;
+  }
+  if (s.length > max) return `${s.slice(0, max - 1)}…`;
+  return s;
 }
 
 type RawAppt = Record<string, unknown>;
@@ -687,15 +918,61 @@ async function fetchAppointmentsForDay(
   return fb;
 }
 
+/** Keep a formatted address only when it has a city or a 5-digit ZIP. */
+function fullAddressOrNull(
+  job: Record<string, unknown> | null | undefined,
+  appt: { location?: unknown; locationAddress?: unknown }
+): string | null {
+  const candidates = [
+    job ? formatAddress(job._resolvedLocation) : null,
+    job ? formatAddress(job.location) : null,
+    job ? formatAddress(job.locationAddress) : null,
+    formatAddress(appt.location),
+    formatAddress(appt.locationAddress),
+  ];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    if (/\b\d{5}(?:-\d{4})?\b/.test(raw)) return raw;
+    const parts = raw.split(" - ").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2 && /[A-Za-z]/.test(parts[1] || "")) return raw;
+  }
+  return null;
+}
+
 function parseJobChip(
   a: RawAppt,
-  job?: Record<string, unknown> | null
+  job?: Record<string, unknown> | null,
+  enrich?: ChipEnrichment | null
 ): DayBoardJob {
   const apptId = a.id != null ? String(a.id) : "";
   const jobId = a.jobId != null ? String(a.jobId) : null;
-  const status = a.status != null ? String(a.status) : null;
+  // Appointment status drives live phase; job Done/Completed must still gray out.
+  const apptStatus =
+    (a.status != null ? String(a.status) : null) ||
+    (typeof a.appointmentStatus === "string" ? a.appointmentStatus : null);
+  const jobStatus =
+    job && job.jobStatus != null
+      ? String(job.jobStatus)
+      : job && job.status != null
+        ? String(job.status)
+        : null;
+  const status =
+    isDoneStatus(apptStatus) || isDoneStatus(jobStatus)
+      ? isDoneStatus(apptStatus)
+        ? apptStatus
+        : jobStatus
+      : apptStatus || jobStatus;
+  const typeId =
+    (job && job.jobTypeId != null ? Number(job.jobTypeId) : 0) ||
+    (a.jobTypeId != null ? Number(a.jobTypeId) : 0) ||
+    0;
+  const typeFromId =
+    typeId > 0 && enrich?.jobTypeNames?.has(typeId)
+      ? enrich.jobTypeNames.get(typeId) || ""
+      : "";
   const typeName =
     (typeof a.jobTypeName === "string" && a.jobTypeName) ||
+    (job && typeof job.jobTypeName === "string" && job.jobTypeName) ||
     (a.jobType && typeof a.jobType === "object"
       ? String((a.jobType as Record<string, unknown>).name || "")
       : "") ||
@@ -703,6 +980,7 @@ function parseJobChip(
     (job && job.jobType && typeof job.jobType === "object"
       ? String((job.jobType as Record<string, unknown>).name || "")
       : "") ||
+    typeFromId ||
     (typeof a.type === "string" ? a.type : "") ||
     null;
   const customer =
@@ -715,11 +993,16 @@ function parseJobChip(
       ? String((job.customer as Record<string, unknown>).name || "")
       : "") ||
     null;
+  // Prefer tech-useful dispatch notes; skip address-only streets as note body
   const note =
-    shortNote(a.specialInstructions) ||
-    shortNote(a.summary) ||
-    shortNote(a.notes) ||
-    shortNote(a.appointmentSummary) ||
+    dispatchNote(a.specialInstructions) ||
+    dispatchNote(job?.specialInstructions) ||
+    dispatchNote(a.notes) ||
+    dispatchNote(a.appointmentSummary) ||
+    dispatchNote(job?.notes) ||
+    dispatchNote(job?.summaryOfWork) ||
+    dispatchNote(job?.summary) ||
+    dispatchNote(a.summary) ||
     null;
 
   const jobNumber =
@@ -781,6 +1064,7 @@ function parseJobChip(
   const best = cands.find((c) => looksLikeStreet(c.street)) || cands[0] || null;
   const address = best?.street || null;
   const address_source = best?.source || null;
+  const address_full = fullAddressOrNull(job, a);
 
   const phoneFromJob =
     (job ? customerPhoneFromAppt(job) : null) ||
@@ -788,29 +1072,75 @@ function parseJobChip(
       ? customerPhoneFromAppt({ customer: job.customer })
       : null);
 
+  const locationId =
+    (job && job.locationId != null ? Number(job.locationId) : 0) ||
+    (a.locationId != null ? Number(a.locationId) : 0) ||
+    0;
+  const customerId =
+    (job && job.customerId != null ? Number(job.customerId) : 0) ||
+    (a.customerId != null ? Number(a.customerId) : 0) ||
+    (job && job.customer && typeof job.customer === "object"
+      ? Number((job.customer as Record<string, unknown>).id)
+      : 0) ||
+    0;
+  const phoneFromCrm =
+    (locationId > 0 ? enrich?.phonesByLocationId?.get(locationId) : null) ||
+    (customerId > 0 ? enrich?.phonesByCustomerId?.get(customerId) : null) ||
+    null;
+
   return {
     st_appointment_id: apptId,
     st_job_id: jobId,
     job_number: jobNumber,
     address,
     address_source,
+    address_full,
     customer_name: customer && String(customer).trim() ? String(customer).trim() : null,
-    customer_phone: customerPhoneFromAppt(a) || phoneFromJob,
+    customer_phone: customerPhoneFromAppt(a) || phoneFromJob || phoneFromCrm,
     job_type: typeName && String(typeName).trim() ? String(typeName).trim() : null,
+    // Prefer appointment start/end — arrival windows pile everyone at 8:15–10:00
     window_start:
-      (typeof a.arrivalWindowStart === "string" && a.arrivalWindowStart) ||
       (typeof a.start === "string" && a.start) ||
+      (typeof a.arrivalWindowStart === "string" && a.arrivalWindowStart) ||
       null,
     window_end:
-      (typeof a.arrivalWindowEnd === "string" && a.arrivalWindowEnd) ||
       (typeof a.end === "string" && a.end) ||
+      (typeof a.arrivalWindowEnd === "string" && a.arrivalWindowEnd) ||
       null,
+    arrival_window_start:
+      typeof a.arrivalWindowStart === "string" ? a.arrivalWindowStart : null,
+    arrival_window_end:
+      typeof a.arrivalWindowEnd === "string" ? a.arrivalWindowEnd : null,
     status,
-    is_done: isDoneStatus(status),
-    is_off: isOffStatus(status),
+    ...(() => {
+      const st_phase = stPhaseFromStatus(status);
+      return {
+        st_phase,
+        is_done: st_phase === "finished" || isDoneStatus(status),
+        is_off: isOffStatus(status),
+      };
+    })(),
     ink: "st",
     note,
     helpers: [],
+    // jobNotesFor applies needsSolder and emits SOLDER_TEXT when the job needs solder.
+    job_notes:
+      enrich?.techAssist === false
+        ? []
+        : jobNotesFor({
+            job_type_id: typeId > 0 ? typeId : null,
+            job_type: typeName && String(typeName).trim() ? String(typeName).trim() : null,
+            texts: [
+              typeof job?.summary === "string" ? job.summary : null,
+              typeof job?.summaryOfWork === "string" ? job.summaryOfWork : null,
+              typeof a.summary === "string" ? a.summary : null,
+              typeof a.specialInstructions === "string" ? a.specialInstructions : null,
+              typeof job?.specialInstructions === "string" ? job.specialInstructions : null,
+              typeof a.notes === "string" ? a.notes : null,
+              typeof job?.notes === "string" ? job.notes : null,
+            ],
+            solder_type_ids: enrich?.solderTypeIds,
+          }),
   };
 }
 
@@ -855,6 +1185,8 @@ function normPersonName(raw: string | null | undefined): string {
 /**
  * Approved time-off covering this Chicago calendar day.
  * Weekends never count — Sat/Sun returns empty even if the stored range includes them.
+ * Hours-aware: when hours_deducted > 0, only the first N weekdays from start_date
+ * are marked (N = ceil(hours/8)) so one-day PTO never sticks across the range.
  * Matches via user_id; also carries full display_name / employee name for attach.
  * ok=false means the query failed — caller must NOT clear existing PTO marks.
  */
@@ -902,12 +1234,16 @@ async function loadPtoForDate(
     for (const r of rows.results || []) {
       const uid = Number(r.user_id);
       if (!(uid > 0)) continue;
+      const start = String(r.start_date);
+      const end = String(r.end_date);
+      // One-day / hours-capped PTO must only mark covered Chicago weekdays
+      if (!ptoCoversChicagoDate(start, end, date, r.hours_deducted)) continue;
       const list = map.get(uid) || [];
       list.push({
         request_id: Number(r.id),
         label: ptoTypeLabel(r.request_type, r.hours_deducted),
-        start_date: String(r.start_date),
-        end_date: String(r.end_date),
+        start_date: start,
+        end_date: end,
       });
       map.set(uid, list);
       const full =
@@ -951,12 +1287,15 @@ async function loadPtoForDate(
       for (const r of rows.results || []) {
         const uid = Number(r.user_id);
         if (!(uid > 0)) continue;
+        const start = String(r.start_date);
+        const end = String(r.end_date);
+        if (!ptoCoversChicagoDate(start, end, date, r.hours_deducted)) continue;
         const list = map.get(uid) || [];
         list.push({
           request_id: Number(r.id),
           label: ptoTypeLabel(r.request_type, r.hours_deducted),
-          start_date: String(r.start_date),
-          end_date: String(r.end_date),
+          start_date: start,
+          end_date: end,
         });
         map.set(uid, list);
       }
@@ -1028,7 +1367,7 @@ type FaInstallPair = {
   partnerUserId: number | null;
 };
 
-async function loadFaInstallPairs(
+export async function loadFaInstallPairs(
   db: D1Database
 ): Promise<Map<number, FaInstallPair>> {
   const out = new Map<number, FaInstallPair>();
@@ -1117,6 +1456,27 @@ async function loadFaInstallPairs(
   return out;
 }
 
+/** Overlay Chris HARD LOCK lead→helper on FA pair map (lead first). */
+export function applyHardLockFaPairs(
+  faPairs: Map<number, FaInstallPair>,
+  fieldUsers: Array<{ id: number; display_name: string }>
+): void {
+  const hard = resolveHardLockPairs(fieldUsers);
+  for (const { lead, helper } of hard) {
+    faPairs.set(lead.id, {
+      partnerFull: helper.display_name,
+      partnerUserId: helper.id,
+    });
+    // Ensure helper does not also own a reverse card that would flip lead/helper
+    if (faPairs.has(helper.id)) {
+      const rev = faPairs.get(helper.id)!;
+      if (rev.partnerUserId === lead.id) {
+        faPairs.delete(helper.id);
+      }
+    }
+  }
+}
+
 /**
  * Board sticky/pair label: always "First L" (Abel H, Jaden D).
  * Pairs: "Abel H/Geo M". Never bare "Chris".
@@ -1141,6 +1501,77 @@ function shortBoardLabel(full: string): string {
   const last = parts[parts.length - 1];
   const initial = last.charAt(0).toUpperCase();
   return `${first} ${initial}`;
+}
+
+
+/** Not listed Miller jobs (D1 only — never ServiceTitan). */
+async function loadMillerBoardOnlyJobs(
+  db: D1Database,
+  date: string
+): Promise<DayBoardJob[]> {
+  try {
+    const q = await db
+      .prepare(
+        `SELECT id, address, customer_name, job_type_name, window_start, window_end,
+                technician_ids, tech_labels, note, location_id, customer_id
+         FROM miller_board_jobs
+         WHERE active = 1 AND work_date = ?`
+      )
+      .bind(date)
+      .all<{
+        id: number;
+        address: string;
+        customer_name: string | null;
+        job_type_name: string | null;
+        window_start: string;
+        window_end: string;
+        technician_ids: string;
+        tech_labels: string | null;
+        note: string | null;
+        location_id: number | null;
+        customer_id: number | null;
+      }>();
+    const out: DayBoardJob[] = [];
+    for (const r of q.results || []) {
+      let techIds: number[] = [];
+      try {
+        const parsed = JSON.parse(String(r.technician_ids || "[]"));
+        if (Array.isArray(parsed)) {
+          techIds = parsed.map((n) => Number(n)).filter((n) => n > 0);
+        }
+      } catch {
+        techIds = [];
+      }
+      const job: DayBoardJob = {
+        st_appointment_id: `board-${r.id}`,
+        st_job_id: null,
+        job_number: null,
+        address: String(r.address || "").trim() || "Not listed",
+        address_source: "miller_board",
+        customer_name: r.customer_name ? String(r.customer_name) : null,
+        customer_phone: null,
+        job_type: r.job_type_name ? String(r.job_type_name) : "Not listed",
+        window_start: r.window_start || null,
+        window_end: r.window_end || null,
+        arrival_window_start: r.window_start || null,
+        arrival_window_end: r.window_end || null,
+        status: "Scheduled",
+        st_phase: "scheduled",
+        is_done: false,
+        is_off: false,
+        ink: "board",
+        note: r.note ? String(r.note) : "Not listed (no ServiceTitan)",
+        helpers: [],
+      };
+      // Attach one copy per tech via caller; stash tech ids on a side channel
+      (job as DayBoardJob & { _board_tech_ids?: number[] })._board_tech_ids = techIds;
+      out.push(job);
+    }
+    return out;
+  } catch {
+    // Table may not exist until migration 089 runs
+    return [];
+  }
 }
 
 function mergeJobLists(a: DayBoardJob[], b: DayBoardJob[]): DayBoardJob[] {
@@ -1317,10 +1748,17 @@ function isExcludedBoardChrisName(
     .replace(/^@/, "")
     .replace(/[^a-z0-9]+/g, "");
   if (n === "chris" || n === "chris marroquin" || n.startsWith("chris marroquin ")) return true;
-  if (n === "chris brady" || n.startsWith("chris brady ")) return true;
+  if (n === "chris brady" || n.startsWith("chris brady ") || n === "christopher brady") return true;
+  if (n.startsWith("christopher brady")) return true;
   // Shortened First L forms after label pass
   if (n === "chris m" || n === "chris b") return true;
-  if (u === "chris" || u === "chrismarroquin" || u === "cmarroquin" || u === "chrisbrady") {
+  if (
+    u === "chris" ||
+    u === "chrismarroquin" ||
+    u === "cmarroquin" ||
+    u === "chrisbrady" ||
+    u === "christopherbrady"
+  ) {
     return true;
   }
   if (n.startsWith("chris/") || n.endsWith("/chris")) return true;
@@ -1340,11 +1778,12 @@ function isChrisMillerName(
     .toLowerCase()
     .replace(/^@/, "")
     .replace(/[^a-z0-9]+/g, "");
-  if (u === "chrismiller" || u === "cmiller") return true;
+  if (u === "chrismiller" || u === "cmiller" || u === "christophermiller") return true;
   if (n === "chris miller" || n.startsWith("chris miller ")) return true;
+  if (n === "christopher miller" || n.startsWith("christopher miller ")) return true;
   if (n === "chris m") return true; // First L after label pass
   // "Miller, Chris" / "C Miller"
-  if (/\bmiller\b/.test(n) && /\bchris\b/.test(n)) return true;
+  if (/\bmiller\b/.test(n) && /\bchris(?:topher)?\b/.test(n)) return true;
   return false;
 }
 
@@ -1515,14 +1954,52 @@ export async function buildDayBoard(
     .filter((n) => n > 0);
   const jobMap = await enrichJobs(env, db, tenantId, jobIdNums);
 
+  // Job type names. Skip CRM phone enrichment on the hot path (biggest sequential burn
+  // after invoices) — keep phones already on appointment/job; missing stay blank.
+  const jobTypeNames = await loadJobTypeNameMap(env, db, tenantId);
+  let techAssist = true;
+  let solderTypeIds: number[] | undefined;
+  try {
+    techAssist = (await getSetting(db, "tech_assist", "1")) !== "0";
+    const rawIds = await getSetting(db, "job_rule_solder_type_ids", "339591774,336193175");
+    const ids = rawIds.split(",").map((s) => Number(s.trim())).filter((n) => n > 0);
+    if (ids.length) solderTypeIds = ids;
+  } catch {
+    techAssist = true;
+  }
+  const chipEnrich: ChipEnrichment = {
+    jobTypeNames,
+    phonesByCustomerId: new Map(),
+    phonesByLocationId: new Map(),
+    techAssist,
+    solderTypeIds,
+  };
+
   // Jobs by technician id
   const jobsByTech = new Map<number, DayBoardJob[]>();
   const unassigned: DayBoardJob[] = [];
 
   for (const a of apptRes.appointments) {
     const jid = Number(a.jobId);
-    const chip = parseJobChip(a, jid > 0 ? jobMap.get(jid) : undefined);
+    const jobRow = jid > 0 ? jobMap.get(jid) : undefined;
+    // Hide canceled completely (sheet mirror) — never linger on board
+    const jobStatus =
+      jobRow && jobRow.jobStatus != null
+        ? String(jobRow.jobStatus)
+        : jobRow && jobRow.status != null
+          ? String(jobRow.status)
+          : null;
+    if (
+      isCanceledStatus(a.status != null ? String(a.status) : null) ||
+      isCanceledStatus(jobStatus) ||
+      (typeof a.appointmentStatus === "string" &&
+        isCanceledStatus(a.appointmentStatus))
+    ) {
+      continue;
+    }
+    const chip = parseJobChip(a, jobRow, chipEnrich);
     if (!chip.st_appointment_id) continue;
+    if (chip.st_phase === "canceled") continue;
     let ids = techIdsFromAppt(a);
     if (!ids.length) {
       const fromDispatch = assignLookup.map.get(Number(a.id));
@@ -1541,6 +2018,38 @@ export async function buildDayBoard(
   }
 
   // Sort jobs by window start
+  // Not listed (Miller board-only) — ink:board, no ST create
+  const boardOnly = await loadMillerBoardOnlyJobs(db, bounds.date);
+  for (const job of boardOnly) {
+    const techIds =
+      (job as DayBoardJob & { _board_tech_ids?: number[] })._board_tech_ids || [];
+    delete (job as DayBoardJob & { _board_tech_ids?: number[] })._board_tech_ids;
+    for (const tid of techIds) {
+      const list = jobsByTech.get(tid) || [];
+      // clone per tech so later mutates stay isolated
+      list.push({ ...job });
+      jobsByTech.set(tid, list);
+    }
+  }
+
+  // Service pending (No Cool / after-hours) — ink:board until linked
+  try {
+    const { loadPendingJobsForBoard } = await import("./dayBoardPending");
+    const pendingJobs = await loadPendingJobsForBoard(db, bounds.date);
+    for (const job of pendingJobs) {
+      const tid = Number(
+        (job as DayBoardJob & { _pending_tech_id?: number })._pending_tech_id || 0
+      );
+      delete (job as DayBoardJob & { _pending_tech_id?: number })._pending_tech_id;
+      if (!(tid > 0)) continue;
+      const list = jobsByTech.get(tid) || [];
+      list.push({ ...job });
+      jobsByTech.set(tid, list);
+    }
+  } catch {
+    /* table optional until migration 094 */
+  }
+
   for (const [, list] of jobsByTech) {
     list.sort((x, y) =>
       String(x.window_start || "").localeCompare(String(y.window_start || ""))
@@ -1597,11 +2106,27 @@ export async function buildDayBoard(
         pto: [],
       });
     }
+    // Name-dedupe ST orphans against FA rows (e.g. Justin FA + unmatched ST id)
+    const seenNames = new Set<string>();
+    for (const row of rows) {
+      const nk = normPersonName(row.display_name);
+      if (nk) seenNames.add(nk);
+    }
     for (const [stId, jobs] of jobsByTech) {
       if (seenSt.has(stId)) continue;
       if (millerStIds.has(stId)) continue;
       const stName = techNameById.get(stId) || `ST tech ${stId}`;
       if (isHiddenDayBoardPerson(stName)) continue;
+      const nk = normPersonName(stName);
+      if (nk && seenNames.has(nk)) {
+        const hit = rows.find((r) => normPersonName(r.display_name) === nk);
+        if (hit) {
+          if (!hit.st_technician_id) hit.st_technician_id = stId;
+          hit.jobs = mergeJobLists(hit.jobs || [], jobs);
+          seenSt.add(stId);
+        }
+        continue;
+      }
       rows.push({
         user_id: null,
         display_name: stName,
@@ -1611,6 +2136,8 @@ export async function buildDayBoard(
         jobs,
         pto: [],
       });
+      if (nk) seenNames.add(nk);
+      seenSt.add(stId);
     }
     // Board lock: Adam = service tech (always listed, even OFF / no jobs)
     for (const row of rows) {
@@ -1626,6 +2153,10 @@ export async function buildDayBoard(
       const ac = a.crew === "install" ? 1 : 0;
       const bc = b.crew === "install" ? 1 : 0;
       if (ac !== bc) return ac - bc;
+      // Chris LOCK: Adam Bosquez (service supervisor) always first, then others A-Z
+      const aAdam = isBoardExtraName(a.display_name, null);
+      const bAdam = isBoardExtraName(b.display_name, null);
+      if (aAdam !== bAdam) return aAdam ? -1 : 1;
       return a.display_name.localeCompare(b.display_name, undefined, {
         sensitivity: "base",
       });
@@ -1672,6 +2203,12 @@ export async function buildDayBoard(
       : list;
 
   rows = paintPto(rows);
+
+  // Chris HARD LOCK pairs (lead first): Beto/Geo, Kai/Charles, Marcus/Jayden, Warren/Lurch
+  applyHardLockFaPairs(
+    faPairs,
+    fieldUsers.map((u) => ({ id: u.id, display_name: u.display_name }))
+  );
 
   // FA install pairs: one row label Name/Helper (Oct sheet), shared jobs.
   // Pair merge splits when either side has PTO (helper stays available).
@@ -1733,6 +2270,136 @@ export async function buildDayBoard(
     view,
     st_write_enabled: false,
     rows,
+    pto_ok: ptoLoad.ok,
     message,
   };
+}
+
+/* ——— Short shared D1 cache (HIT ≤45s / SWR 45s–10min) ——— */
+
+const DAY_BOARD_CACHE_FRESH_MS = 45_000;
+const DAY_BOARD_CACHE_STALE_MS = 10 * 60_000;
+/** Today can paint from last good snapshot all workday, then refresh behind it. */
+const DAY_BOARD_CACHE_TODAY_MS = 14 * 60 * 60_000;
+
+let dayBoardCacheTableReady = false;
+
+export async function ensureDayBoardCacheTable(db: D1Database): Promise<void> {
+  if (dayBoardCacheTableReady) return;
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS day_board_cache (
+         cache_key TEXT PRIMARY KEY,
+         payload TEXT NOT NULL,
+         built_at TEXT NOT NULL
+       )`
+    )
+    .run();
+  dayBoardCacheTableReady = true;
+}
+
+export function dayBoardCacheKey(
+  dateIso: string,
+  view: "office" | "self",
+  userId: number
+): string {
+  const d = (dateIso || "").trim().slice(0, 10);
+  if (view === "self") return `${d}|self|${userId}`;
+  return `${d}|office|all`;
+}
+
+export type DayBoardCacheHit = {
+  payload: DayBoardResponse;
+  builtAtMs: number;
+  ageMs: number;
+};
+
+function parseBuiltAtMs(raw: string): number {
+  const s = String(raw || "").trim();
+  if (!s) return 0;
+  // D1 datetime('now') is UTC-ish "YYYY-MM-DD HH:MM:SS"
+  const ms = Date.parse(s.includes("T") ? s : s.replace(" ", "T") + "Z");
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+export async function readDayBoardCache(
+  db: D1Database,
+  cacheKey: string,
+  maxAgeMs: number = DAY_BOARD_CACHE_STALE_MS
+): Promise<DayBoardCacheHit | null> {
+  try {
+    await ensureDayBoardCacheTable(db);
+    const row = await db
+      .prepare(
+        `SELECT payload, built_at FROM day_board_cache WHERE cache_key = ?`
+      )
+      .bind(cacheKey)
+      .first<{ payload: string; built_at: string }>();
+    if (!row?.payload) return null;
+    const builtAtMs = parseBuiltAtMs(row.built_at);
+    if (!builtAtMs) return null;
+    const ageMs = Date.now() - builtAtMs;
+    if (ageMs < 0 || ageMs > maxAgeMs) return null;
+    const payload = JSON.parse(row.payload) as DayBoardResponse;
+    if (!payload || !Array.isArray(payload.rows)) return null;
+    return { payload, builtAtMs, ageMs };
+  } catch {
+    return null;
+  }
+}
+
+export async function writeDayBoardCache(
+  db: D1Database,
+  cacheKey: string,
+  payload: DayBoardResponse
+): Promise<void> {
+  try {
+    await ensureDayBoardCacheTable(db);
+    // Don't cache hard failures with empty boards
+    if (payload.error && !(payload.rows || []).length) return;
+    await db
+      .prepare(
+        `INSERT INTO day_board_cache (cache_key, payload, built_at)
+         VALUES (?, ?, datetime('now'))
+         ON CONFLICT(cache_key) DO UPDATE SET
+           payload = excluded.payload,
+           built_at = excluded.built_at`
+      )
+      .bind(cacheKey, JSON.stringify(payload))
+      .run();
+  } catch {
+    /* cache write best-effort */
+  }
+}
+
+export function dayBoardCacheFreshMs(): number {
+  return DAY_BOARD_CACHE_FRESH_MS;
+}
+
+export function dayBoardCacheStaleMs(): number {
+  return DAY_BOARD_CACHE_STALE_MS;
+}
+
+export function dayBoardCacheTodayMs(): number {
+  return DAY_BOARD_CACHE_TODAY_MS;
+}
+
+/** Office-shaped snapshot of today so the first human open is a cache hit. */
+export async function warmTodayDayBoard(env: Env, db: D1Database): Promise<void> {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const warmer: PublicUser = {
+    id: 0,
+    email: "system@local",
+    username: "system",
+    display_name: "Day board warmer",
+    role: "admin",
+    employee_id: null,
+    is_warehouse: false,
+    phone: null,
+    must_change_password: false,
+  };
+  const payload = await buildDayBoard(env, db, warmer, today);
+  payload.st_write_enabled = false;
+  if (payload.error && !(payload.rows || []).length) return;
+  await writeDayBoardCache(db, dayBoardCacheKey(payload.date || today, "office", 0), payload);
 }

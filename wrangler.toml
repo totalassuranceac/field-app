@@ -36,7 +36,13 @@ GOOGLE_ALLOWED_EXTRA = ""
 #   npx wrangler secret put ATLAS_WARRANTY_WEBHOOK_AUTH
 # Env keys: ATLAS_WARRANTY_WEBHOOK_URL, ATLAS_WARRANTY_WEBHOOK_AUTH (see worker/types.ts)
 
-# ~7–8am Central (13:00 UTC): shop bring-in + light ops nudges
+# 5:00am America/Chicago: truck restock lists only (10:00 UTC daylight, 11:00 UTC standard).
+# The worker builds the list only when the Chicago hour is 5. Opening Restock still builds yesterday if this was missed.
+# ~8am Central (13:00 UTC): shop bring-in + light ops nudges. Not the restock list.
 # Evening (every 20 min 21:00–03:40 UTC ≈ 4pm–10:40pm CT): after-hours ST assignment SMS poll
+# Clock watch: every 5 minutes, all day.
+# No-clock-in texts stay weekdays 7:00 AM-6:00 PM Chicago.
+# Left-on-job runs any hour so an overnight open job is caught.
+# Flag default off: one settings read, then return. No shop bring-in and no assignment texts.
 [triggers]
-crons = ["0 13 * * *", "0,20,40 21-23 * * *", "0,20,40 0-3 * * *"]
+crons = ["0 10 * * *", "0 11 * * *", "0 13 * * *", "0,20,40 21-23 * * *", "0,20,40 0-3 * * *", "*/5 * * * *"]

@@ -40,25 +40,106 @@ export interface Env {
   ST_CLIENT_ID?: string;
   ST_CLIENT_SECRET?: string;
   ST_APP_KEY?: string;
-  /**
-   * Clock→ST Phase 2 flag. Phase 1 always ignores this (hard-off in jobClock.ts).
-   * Set to "1" only when Chris unlocks live appointment status writes.
+    /**
+   * Clock→ST Phase 2 gate (appointment status only; never payroll/money).
+   * unset/0/false/off = off (D1 queue only)
+   * dry/dry-run = log intended PATCH; leave queued
+   * 1/true/live/on = live PATCH /jpm/v2/.../appointments/{id} status
    */
   CLOCK_ST_WRITE?: string;
-  /** Optional shared secret for POST /api/st/assignment-sms webhook */
+  /**
+   * Miller Install quick-add Book Job gate.
+   * unset / dry / dry-run / off = dry (payload only; NO ST Create Job)
+   * live / 1 / true / on = live POST /jpm/v2/.../jobs
+   * Soft default dry. Require READY + Chris Y before live.
+   */
+  MILLER_BOOK_JOB?: string;
+  /**
+   * Day Board pending service (No Cool) → ST link gate.
+   * unset / dry = no ST Create Job (chip fails with dry hint)
+   * live / 1 / true / on = live POST /jpm/v2/.../jobs (notificationsEnabled false)
+   */
+  DAY_BOARD_PENDING_ST?: string;
+
+  /** Required for POST /api/st/assignment-sms. Unset = route disabled. */
   ST_ASSIGNMENT_WEBHOOK_SECRET?: string;
+  /** Agent SMS key. wrangler secret only. Unset = agent-send disabled. */
+  AGENT_SMS_KEY?: string;
+  /**
+   * Clock-in nudge kill switch / override.
+   * unset = follow settings clockin_nudge_enabled (default off).
+   * off/false/0 = force off.
+   * dry = log texts, do not call Twilio.
+   * live/on/true/1 = send. Do not set this until Chris says Y.
+   */
+  CLOCKIN_NUDGE_ENABLED?: string;
+  /**
+   * Review-text kill switch.
+   * unset = follow settings review_text_mode (default off).
+   * off/false/0/no = force off. Not set in this build.
+   */
+  REVIEW_TEXT_ENABLED?: string;
+  /**
+   * Review-text live send flag. Must be the string "on" before test or live can send.
+   * Not set in this build. Do not put this in wrangler.toml [vars].
+   */
+  REVIEW_TEXT_LIVE_SEND?: string;
+  /**
+   * Review-text test allowlist (comma, semicolon, or newline). US numbers only.
+   * In test mode a real text goes only to these numbers. Not set in this build.
+   * No phone number belongs in source.
+   */
+  REVIEW_TEXT_TEST_NUMBER?: string;
+  /**
+   * Install-crew board-mismatch nudge kill switch.
+   * unset = follow settings onsite_nudge_mode (default off).
+   * off/false/0 = force off.
+   */
+  ONSITE_NUDGE_ENABLED?: string;
   /** Shared with ta-ads worker — signs Field App → Studio handoff tokens */
   STUDIO_SSO_SECRET?: string;
   /** Override live Studio URL (default https://ta-ads.totalassurance.workers.dev) */
   STUDIO_URL?: string;
   /**
-   * Optional Atlas ping on new warranty drop-off (POST /warranties 201 only).
-   * Set via `wrangler secret put ATLAS_WARRANTY_WEBHOOK_URL` / `_AUTH`.
-   * Missing either = skip ping; drop-off still succeeds.
+   * Atlas ping on new warranty drop-off (POST /warranties 201 only).
+   * URL is required. AUTH and HEADER are optional. A missing URL skips the ping;
+   * the drop-off still succeeds.
    */
   ATLAS_WARRANTY_WEBHOOK_URL?: string;
-  /** Full Authorization header value (e.g. "Bearer …" or raw token as Atlas expects). */
+  /**
+   * OPTIONAL. Key/token value. If it has no space and the header is Authorization,
+   * it is sent as `Bearer <value>`. If it already starts with `Bearer `/`Basic `/etc.,
+   * it is sent verbatim.
+   */
   ATLAS_WARRANTY_WEBHOOK_AUTH?: string;
+  /**
+   * OPTIONAL header name for the key (default Authorization; e.g. X-Api-Key, X-Webhook-Secret).
+   * Must match /^[A-Za-z0-9-]{1,40}$/ else fall back to Authorization.
+   */
+  ATLAS_WARRANTY_WEBHOOK_HEADER?: string;
+  /**
+   * Optional one-shot Atlas wake when Eric Gonzalez (361-446-0930) texts inbound.
+   * `wrangler secret put ATLAS_ERIC_SMS_WEBHOOK_URL` / `ATLAS_ERIC_SMS_WEBHOOK_AUTH`.
+   * Missing either = skip quietly; Twilio inbound still 200.
+   */
+  ATLAS_ERIC_SMS_WEBHOOK_URL?: string;
+  /** Full Authorization header value as Atlas expects. */
+  ATLAS_ERIC_SMS_WEBHOOK_AUTH?: string;
+  /**
+   * Optional Atlas wake after fuel receipt photo is saved (verify photo vs OCR).
+   * `wrangler secret put ATLAS_FUEL_RECEIPT_WEBHOOK_URL` / `_AUTH`.
+   * Missing either = skip quietly; /fuel still succeeds.
+   */
+  ATLAS_FUEL_RECEIPT_WEBHOOK_URL?: string;
+  /** Full Authorization header value as Atlas expects. */
+  ATLAS_FUEL_RECEIPT_WEBHOOK_AUTH?: string;
+  /**
+   * Optional Workers AI. Not bound in this build. Done-today split stays on rules
+   * until Chris adds the binding and sets done_today_ai=1.
+   */
+  AI?: {
+    run: (model: string, input: { prompt: string }) => Promise<unknown>;
+  };
 }
 
 export interface UserRow {
@@ -192,4 +273,7 @@ export interface VehicleIssueRow {
 
 export type Variables = {
   user: PublicUser;
+  /** Real logged-in account (admin) even while view-as is active */
+  realUser: PublicUser;
+  viewAsUserId: number | null;
 };

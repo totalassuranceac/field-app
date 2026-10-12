@@ -1,11 +1,13 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { handleAgentSmsSend } from "./agentSms";
 import {
   assertDriverVehicleAccess,
   clearSessionCookie,
   createSession,
   destroySession,
   ensureBootstrapAdmin,
+  endOpenViewAsAudit,
   getDriverHomeVehicleIds,
   getDriverVehicleIds,
   getSessionToken,
@@ -13,18 +15,38 @@ import {
   googleConfigured,
   hashPassword,
   isGoogleEmailAllowed,
+  isTrueAdminUser,
+  resolveSessionAuth,
   ROLE_PERMS,
   roleAtLeast,
+  isNamedFleetMapUser,
   randomToken,
   sessionCookie,
+  setSessionViewAs,
   sqlInIds,
+  startViewAsAudit,
   toPublicUser,
   dbRoleFor,
   verifyPassword,
 } from "./auth";
 import { getSetting, setSetting, writeAudit } from "./audit";
+import { mountFleetShop, recordRepairBoardStage } from "./fleetShop";
+import { mountDoneToday } from "./doneToday";
+import { mountTechAssist } from "./techAssist";
+import { registerSafetyRoutes } from "./safety";
+import { registerResponsibilityRoutes } from "./responsibility";
+import {
+  registerGrowthRoutes,
+  releasePersonalGearForEmployee,
+  releasePersonalGearForUser,
+  restorePersonalTools,
+  restorePersonalToolsForEmployee,
+} from "./growth";
+import { registerHrWriteupRoutes } from "./hrWriteups";
+import { applyPartsRunTransfer, registerPartsRunStockRoutes } from "./partsRunStock";
+import { attachHandoffCounts, createHandoff, handoffSettings, handoffsReady, listHandoffs, proofRequiredArrivalReturn, proofRequiredWarranty, publicHandoff, renderHandoffReceiptHtml, saveHandoffSettings, warrantyHasHandoff } from "./vendorHandoffs";
 import { evaluateMileageAlerts, insertAlerts } from "./redflags";
-import { getLivePositions } from "./gps";
+import { getLivePositions, isPoolDriverLabel } from "./gps";
 import { computeTrackingHealth, type VehicleTrackRow } from "./trackingHealth";
 import { catalogEntry } from "./issueCatalog";
 import {
@@ -39,6 +61,7 @@ import {
   notifyWeeklyChecksDue,
   shortSms,
   sweepUnreadNotifications,
+  clearSelfActorNoise,
   userIdsForEmployees,
   userIdsForIssue,
   usersByRoles,
@@ -52,12 +75,35 @@ import {
   applyTwilioStatusToLog,
   fetchTwilioMessageStatus,
   logSms,
+  maybePingAtlasEricSmsReply,
   normalizePhone,
   sendSms,
   smsConfigured,
+  twilioSignatureValid,
 } from "./sms";
 import { alertFleetIncident } from "./alertChannels";
 import { getOcrHints, recordOcrFeedback, type OcrFieldSnapshot } from "./ocrLearn";
+import { storeMatchesReceiptText } from "../src/lib/fuelStoreFromReceipt";
+import { repairUtf8Mojibake, repairFuelEntryTextFields, toAsciiUiText } from "./utf8Mojibake";
+import {
+  addDaysYmd,
+  arrivalReturnBlock,
+  chicagoTodayYmd,
+  cleanArrivalPhotoKey,
+  deliverToError,
+  etaIsStale,
+  isShopStockJobRef,
+  jobRefError,
+  jobRefMatchKey,
+  jobRefMatches,
+  neededByError,
+  normalizeJobRef,
+  orderFieldsError,
+  parseArrivalQty,
+  sectionPlaceLabel,
+  truckPlaceLabel,
+  unmatchedArrivalBody,
+} from "./partsReceivePlan";
 import {
   applyDueAnniversariesAll,
   applyDueAnniversary,
@@ -66,13 +112,17 @@ import {
   completedYearsOfService,
   deductForApprovedRequest,
   ensurePtoTables,
+  bankKindForTimeOffType,
   hoursForDateRange,
   lastAnniversary,
   localIsoDate as ptoLocalIsoDate,
   normalizeBirthdayMd,
   parseFlexibleDate,
   PTO_REHIRE_BREAK_DAYS,
+  splitWeekdaysByBankHours,
   upcomingRecognition,
+  todayRecognition,
+  weekdayDaysInclusive,
   writePtoLedger,
   type EmployeePtoProfile,
   type PtoKind,
@@ -84,6 +134,7 @@ import {
   setPartTruckStock,
   importParts,
   setStockQty,
+  shopBinForPart,
   transferStock,
   updatePartLevels,
   updateLocationLevels,
@@ -97,6 +148,30 @@ import {
   softDeletePart,
   type PartImportRow,
 } from "./inventory";
+import { applyCounterLineToVan, bookArrivalStock, releaseArrivalStock } from "./stockBook";
+import {
+  adjustLiveQty,
+  buildYesterdayRestock,
+  confirmRestock,
+  editPartsUsed,
+  fillRestock,
+  listCountLines,
+  listLiveLocations,
+  listNeedsMatch,
+  listPartsUsed,
+  listRestocks,
+  liveReport,
+  markLocationLive,
+  matchPartsUsed,
+  myTrucks,
+  postPartsUsed,
+  pullRestockLine,
+  saveCountLine,
+  searchLiveParts,
+  shortRestockLine,
+  voidPartsUsed,
+} from "./liveInventory";
+import { isRestockBuildCron } from "./liveInventoryPlan";
 import {
   ensureCompanyAssets,
   bottleSummary,
@@ -129,8 +204,7 @@ import {
   applyStUsageDeductions,
   syncStMaterialsInsertOnlyPage,
   cronSyncStMaterialsInsertOnly,
-  refreshStMaterialNamesPage,
-} from "./servicetitan";
+  refreshStMaterialNamesPage, stTenantId } from "./servicetitan";
 import type { Env, PublicUser, Role, UserRow, Variables } from "./types";
 import {
   ledgerBalanceForUserId,
@@ -140,12 +214,25 @@ import {
   toPayFriday,
 } from "./toolLoanLedger";
 import { suggestTankCapacity } from "./tankCapacity";
-import { buildZeroChargePayload } from "./zeroCharge";
+import { autoMatchUsersToStTechnicians, buildZeroChargePayload } from "./zeroCharge";
 import {
+  ackClockEventSynced,
   clockStWriteEnabled,
+  clockStWriteMode,
   getTodaysJobsForUser,
   recordClockStep,
+  syncQueuedClockEvents,
 } from "./jobClock";
+import { JobLengthsError, buildJobLengths } from "./jobLengths";
+import { clockShopIn, clockShopOut, getOpenShopSession } from "./shopClock";
+import { openJobClockBlock, recordDayClockOut } from "./clockDay";
+import { runClockAuditAfterPunch } from "./clockAudit";
+import {
+  evaluatePermitGate,
+  permitBlocksComplete,
+  setD1PermitStatus,
+} from "./installPermitGate";
+import { maybeNotifyLeadOnHelperLastClockOut } from "./helperLastClockOut";
 import {
   buildOpsPerformance,
   buildOpsPersonJobs,
@@ -157,9 +244,47 @@ import {
   maybeSmsAfterHoursAssignment,
   parseAssignmentWebhookPayload,
   pollAfterHoursAssignments,
-  verifyAssignmentWebhookSecret,
+  assignmentWebhookAuth,
 } from "./assignmentSms";
-import { buildDayBoard, canViewDayBoard } from "./dayBoard";
+import {
+  buildDayBoard,
+  canViewDayBoard,
+  dayBoardCacheFreshMs,
+  dayBoardCacheKey,
+  dayBoardCacheStaleMs,
+  dayBoardCacheTodayMs,
+  dayBoardView,
+  readDayBoardCache,
+  warmTodayDayBoard,
+  writeDayBoardCache,
+} from "./dayBoard";
+import { listOpenClockinNudges, runClockinNudges } from "./clockinNudge";
+import {
+  listReviewTextLog,
+  markReviewed,
+  recordInboundOptKeyword,
+  reviewTextPreviews,
+  runReviewTextTick,
+  sendTestReviewText,
+  verifySamplePayments,
+} from "./reviewText";
+import { maskPhone, parseTestNumbers, resolveMode } from "./reviewTextPlan";
+import { onsiteNudgeReport, setOnsiteGeocoder, setOnsiteNudgeMode } from "./onsiteNudge";
+import {
+  canMillerBookJob,
+  checkSignedProposal,
+  createMillerBookJob,
+  createMillerCustomPreset,
+  listMillerCustomPresets,
+  deleteMillerCustomPreset,
+  millerBookMeta,
+  updateMillerCustomPreset,
+  searchMillerLocations,
+  findOpenJobsAtLocation,
+  findOpenJobsAtAddressText,
+  type MillerExistingJob,
+  type MillerProposalStatus,
+} from "./millerBookJob";
 import { buildStudioHandoffUrl, canOpenStudioServer } from "./studioSso";
 import {
   invoiceLookupPrintHtml,
@@ -172,7 +297,7 @@ import {
  * D1 BLOB columns sometimes arrive as ArrayBuffer, Uint8Array, number[],
  * or (rarely) base64 / comma-joined text. Passing a plain number[] to
  * `new Response(...)` stringifies to "137,80,78,71,..." which browsers
- * reject as a broken image — that was killing every inventory thumbnail.
+ * reject as a broken image â€” that was killing every inventory thumbnail.
  */
 function blobToUint8Array(data: unknown): Uint8Array | null {
   if (data == null) return null;
@@ -240,10 +365,34 @@ function imageResponse(
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-app.use("/api/*", cors({ origin: (o) => o || "*", credentials: true }));
+const FLEET_ORIGINS = new Set<string>(["https://total-assurance-fleet.totalassurance.workers.dev"]);
+app.use(
+  "/api/*",
+  cors({
+    origin: (origin, c) => {
+      if (!origin || origin === "null") return null;
+      try {
+        if (origin === new URL(c.req.url).origin) return origin;
+      } catch {
+        /* ignore */
+      }
+      if (FLEET_ORIGINS.has(origin)) return origin;
+      const base = String(c.env.APP_BASE_URL || "").trim();
+      if (base) {
+        try {
+          if (new URL(base).origin === origin) return origin;
+        } catch {
+          /* ignore */
+        }
+      }
+      return null;
+    },
+    credentials: true,
+  })
+);
 
 app.use("/api/*", async (c, next) => {
-  // Auth/health must stay instant — never run bootstrap work on the hot path
+  // Auth/health must stay instant â€” never run bootstrap work on the hot path
   const p = new URL(c.req.url).pathname;
   if (
     p === "/api/health" ||
@@ -282,7 +431,7 @@ function scheduleWaitUntil(
   try {
     c.executionCtx.waitUntil(task);
   } catch {
-    // Local/dev without ExecutionContext — best effort only
+    // Local/dev without ExecutionContext â€” best effort only
     void task;
   }
 }
@@ -303,6 +452,23 @@ function requireRoles(roles: Role[]) {
   };
 }
 
+/** Admin, office, supervisor, plus Chuck and Speedy. Field techs stay off. */
+function requireLiveMap() {
+  return async (
+    c: {
+      get: (k: "user") => PublicUser;
+      json: (b: unknown, s?: number) => Response;
+    },
+    next: () => Promise<void>
+  ) => {
+    const user = c.get("user");
+    if (!roleAtLeast(user.role, ROLE_PERMS.viewLiveMap) && !isNamedFleetMapUser(user)) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    await next();
+  };
+}
+
 
 
 // ---------- Auth ----------
@@ -316,9 +482,22 @@ app.get("/api/health", (c) =>
 
 app.get("/api/auth/me", async (c) => {
   const token = getSessionToken(c);
-  const user = await getUserFromSession(c.env.DB, token);
-  if (!user) return c.json({ user: null });
-  return c.json({ user: toPublicUser(user), googleEnabled: googleConfigured(c.env) });
+  const auth = await resolveSessionAuth(c.env.DB, token);
+  if (!auth) return c.json({ user: null, view_as: null, real_user: null });
+  const real = toPublicUser(auth.realUser);
+  const effective = toPublicUser(auth.effectiveUser);
+  const viewing = auth.viewAsUserId != null && auth.viewAsUserId !== auth.realUser.id;
+  const user = viewing
+    ? { ...effective, real_role: real.role, viewing_as: true as const }
+    : effective;
+  return c.json({
+    user,
+    real_user: viewing ? real : null,
+    view_as: viewing
+      ? { user_id: effective.id, display_name: effective.display_name, role: effective.role }
+      : null,
+    googleEnabled: googleConfigured(c.env),
+  });
 });
 
 const FAVORITE_PATH_ALLOW = new Set([
@@ -416,7 +595,11 @@ app.post("/api/auth/login", async (c) => {
 
 app.post("/api/auth/logout", async (c) => {
   const token = getSessionToken(c);
-  const user = await getUserFromSession(c.env.DB, token);
+  const auth = await resolveSessionAuth(c.env.DB, token);
+  const user = auth?.realUser ?? (await getUserFromSession(c.env.DB, token));
+  if (auth?.viewAsUserId && user) {
+    await endOpenViewAsAudit(c.env.DB, user.id, auth.viewAsUserId);
+  }
   await destroySession(c.env.DB, token);
   if (user) {
     await writeAudit(c.env.DB, toPublicUser(user), "logout", "user", user.id, "Logged out");
@@ -512,7 +695,7 @@ app.get("/api/auth/invite/:token", async (c) => {
 });
 
 /**
- * Public: finish invite — confirm username admin gave them, set password, log in.
+ * Public: finish invite â€” confirm username admin gave them, set password, log in.
  */
 app.post("/api/auth/invite/complete", async (c) => {
   const body = await c.req.json<{
@@ -714,24 +897,42 @@ app.get("/api/auth/google/callback", async (c) => {
   return new Response(null, { status: 302, headers });
 });
 
+
+
 // ---------- Protected API ----------
 const api = new Hono<{ Bindings: Env; Variables: Variables }>();
 api.use("*", async (c, next) => {
   const token = getSessionToken(c);
-  const user = await getUserFromSession(c.env.DB, token);
-  if (!user) return c.json({ error: "Unauthorized" }, 401);
-  const pub = toPublicUser(user);
+  const auth = await resolveSessionAuth(c.env.DB, token);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+  const real = toPublicUser(auth.realUser);
+  const pub = toPublicUser(auth.effectiveUser);
   c.set("user", pub);
+  c.set("realUser", real);
+  c.set("viewAsUserId", auth.viewAsUserId);
 
-  // Viewer = same browse surface as admin, but never mutate (except own password)
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method.toUpperCase();
+
+  // Soft: no password access while viewing as someone else
+  if (
+    auth.viewAsUserId != null &&
+    method !== "GET" &&
+    method !== "HEAD" &&
+    method !== "OPTIONS" &&
+    (path.includes("/auth/change-password") || path.includes("/reset-password"))
+  ) {
+    return c.json({ error: "Exit view-as before changing passwords." }, 403);
+  }
+
+  // Viewer = same browse surface as admin, but never mutate (except own password / exit view-as)
   if (pub.role === "viewer") {
-    const method = c.req.method.toUpperCase();
     if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
-      const path = new URL(c.req.url).pathname;
       const allowed =
         path.includes("/auth/change-password") ||
         path.includes("/auth/logout") ||
         path.endsWith("/auth/change-password") ||
+        path.includes("/auth/view-as") ||
         path.includes("/me/favorites");
       if (!allowed) {
         return c.json(
@@ -849,6 +1050,104 @@ api.delete("/me/favorites", async (c) => {
 });
 
 /** Employee sets their own password (or finishes forced change after admin reset). */
+
+/** Admin-only: session view-as (impersonate) an active non-admin user for support/QA. */
+api.post("/auth/view-as", async (c) => {
+  const real = c.get("realUser");
+  if (!isTrueAdminUser(real)) {
+    return c.json({ error: "Only admins can view as another person." }, 403);
+  }
+  const token = getSessionToken(c);
+  if (!token) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json<{ user_id?: number }>().catch(() => ({} as { user_id?: number }));
+  const targetId = Number(body.user_id);
+  if (!Number.isFinite(targetId) || targetId <= 0) {
+    return c.json({ error: "user_id required" }, 400);
+  }
+  if (targetId === real.id) {
+    return c.json({ error: "Already signed in as that user." }, 400);
+  }
+  const targetRow = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    .bind(targetId)
+    .first<UserRow>();
+  if (!targetRow || !targetRow.active) {
+    return c.json({ error: "Active user not found." }, 404);
+  }
+  const target = toPublicUser(targetRow);
+  // Default block: cannot view-as another admin (Chris can allow via setting later)
+  if (isTrueAdminUser(target)) {
+    const allow = await getSetting(c.env.DB, "view_as_allow_admins", "0");
+    if (!["1", "true", "yes", "on"].includes(String(allow).trim().toLowerCase())) {
+      return c.json({ error: "Cannot view as another admin (blocked by default)." }, 403);
+    }
+  }
+  try {
+    // End any prior open audit + set session
+    await endOpenViewAsAudit(c.env.DB, real.id, c.get("viewAsUserId"));
+    await setSessionViewAs(c.env.DB, token, targetId);
+    await startViewAsAudit(c.env.DB, real, target);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column|view_as_user_id/i.test(msg)) {
+      return c.json(
+        { error: "View-as migration not applied yet (sessions.view_as_user_id). Run migrations/086_session_view_as.sql." },
+        500
+      );
+    }
+    throw e;
+  }
+  await writeAudit(
+    c.env.DB,
+    real,
+    "view_as_start",
+    "user",
+    targetId,
+    `${real.display_name} started viewing as ${target.display_name}`,
+    null,
+    { target_user_id: targetId, target_display: target.display_name }
+  );
+  return c.json({
+    ok: true,
+    view_as: { user_id: target.id, display_name: target.display_name, role: target.role },
+    user: { ...target, real_role: real.role, viewing_as: true },
+    real_user: real,
+  });
+});
+
+api.post("/auth/view-as/exit", async (c) => {
+  const real = c.get("realUser");
+  if (!isTrueAdminUser(real)) {
+    return c.json({ error: "Only admins can exit view-as." }, 403);
+  }
+  const token = getSessionToken(c);
+  if (!token) return c.json({ error: "Unauthorized" }, 401);
+  const priorId = c.get("viewAsUserId");
+  const priorName = c.get("user")?.display_name;
+  try {
+    await setSessionViewAs(c.env.DB, token, null);
+    await endOpenViewAsAudit(c.env.DB, real.id, priorId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column|view_as_user_id/i.test(msg)) {
+      return c.json({ error: "View-as migration not applied yet." }, 500);
+    }
+    throw e;
+  }
+  if (priorId) {
+    await writeAudit(
+      c.env.DB,
+      real,
+      "view_as_end",
+      "user",
+      priorId,
+      `${real.display_name} exited view-as${priorName ? ` (${priorName})` : ""}`,
+      { target_user_id: priorId },
+      null
+    );
+  }
+  return c.json({ ok: true, view_as: null, user: real, real_user: null });
+});
+
 api.post("/auth/change-password", async (c) => {
   const pub = c.get("user");
   const token = getSessionToken(c);
@@ -925,8 +1224,8 @@ api.patch("/auth/profile", async (c) => {
 });
 
 // Live GPS (OneStep + Verizon) + tracking health (stale / not reporting / cam policy)
-// Field drivers cannot see where others are — supervisors / warehouse / shop / office only.
-api.get("/live/positions", requireRoles(ROLE_PERMS.viewLiveMap), async (c) => {
+// Field drivers cannot see where others are â€” supervisors / warehouse / shop / office only.
+api.get("/live/positions", requireLiveMap(), async (c) => {
   const force = c.req.query("refresh") === "1";
   try {
     const data = await getLivePositions(c.env, force);
@@ -955,7 +1254,7 @@ api.get("/live/positions", requireRoles(ROLE_PERMS.viewLiveMap), async (c) => {
 });
 
 /** Fleet tracking / equipment issues for admin & mechanic eyes */
-api.get("/tracking/health", requireRoles(ROLE_PERMS.viewLiveMap), async (c) => {
+api.get("/tracking/health", requireLiveMap(), async (c) => {
   try {
     const staleHours = Number(await getSetting(c.env.DB, "gps_stale_hours", "6"));
     const data = await getLivePositions(c.env, c.req.query("refresh") === "1");
@@ -999,6 +1298,34 @@ api.get("/dashboard", async (c) => {
   )
     .bind(String(soonDays), String(soonDays), ...(vScope?.binds || []))
     .first<{ c: number }>();
+
+  // Registration renewals (Texas sticker) - expired, due ≤soonDays, or date missing
+  let registration_attention = 0;
+  let registration_expired = 0;
+  let registration_due_soon = 0;
+  let registration_missing = 0;
+  try {
+    const reg = await c.env.DB.prepare(
+      `SELECT
+         SUM(CASE WHEN v.registration_expires IS NULL OR TRIM(v.registration_expires) = '' THEN 1 ELSE 0 END) as missing,
+         SUM(CASE WHEN v.registration_expires IS NOT NULL AND TRIM(v.registration_expires) != ''
+                   AND v.registration_expires < date('now') THEN 1 ELSE 0 END) as expired,
+         SUM(CASE WHEN v.registration_expires IS NOT NULL AND TRIM(v.registration_expires) != ''
+                   AND v.registration_expires >= date('now')
+                   AND v.registration_expires <= date('now', '+' || ? || ' days') THEN 1 ELSE 0 END) as due_soon
+       FROM vehicles v
+       WHERE v.status = 'active'${vScope?.clause || ""}`
+    )
+      .bind(String(soonDays), ...(vScope?.binds || []))
+      .first<{ missing: number; expired: number; due_soon: number }>();
+    registration_missing = Number(reg?.missing || 0);
+    registration_expired = Number(reg?.expired || 0);
+    registration_due_soon = Number(reg?.due_soon || 0);
+    registration_attention =
+      registration_missing + registration_expired + registration_due_soon;
+  } catch {
+    /* ignore */
+  }
 
   // Weekly checks overdue (no inspection in last 7 days)
   const weeklyDue = await c.env.DB.prepare(
@@ -1065,11 +1392,34 @@ api.get("/dashboard", async (c) => {
     .bind(...(scope?.binds || []))
     .all();
 
-  // Non-drivers still get fleet-wide my_reminders empty unless we keep old name match —
-  // for admin/office, personal reminders by name are less critical; leave empty when not driver
-  // unless we want admin to see nothing personal — OK
+  let myRegistration: Array<{
+    id: number;
+    unit_number: string;
+    registration_expires: string;
+  }> = [];
+  try {
+    const regMine = await c.env.DB.prepare(
+      `SELECT v.id, v.unit_number, v.registration_expires
+       FROM vehicles v
+       WHERE v.status = 'active'
+         ${vScope?.clause || "AND 0"}
+         AND v.registration_expires IS NOT NULL
+         AND TRIM(v.registration_expires) != ''
+         AND v.registration_expires <= date('now', '+30 days')
+       ORDER BY v.registration_expires, v.unit_number`
+    )
+      .bind(...(vScope?.binds || []))
+      .all<{ id: number; unit_number: string; registration_expires: string }>();
+    myRegistration = regMine.results || [];
+  } catch {
+    /* column optional */
+  }
 
-  // Tracking stats: DB-only on home (never call live GPS here — it hung the whole app).
+  // Non-drivers still get fleet-wide my_reminders empty unless we keep old name match â€”
+  // for admin/office, personal reminders by name are less critical; leave empty when not driver
+  // unless we want admin to see nothing personal â€” OK
+
+  // Tracking stats: DB-only on home (never call live GPS here â€” it hung the whole app).
   // Live map page still loads OneStep/Verizon. Home uses vehicle gps_status columns.
   let trackingSummary: {
     not_reporting: number;
@@ -1095,7 +1445,7 @@ api.get("/dashboard", async (c) => {
         `SELECT id, unit_number, status, assigned_driver, gps_tracker, gps_status, dash_cam_status, cam_type
          FROM vehicles WHERE status != 'retired'`
       ).all<VehicleTrackRow>();
-      // Empty live positions — health still flags missing trackers / cam policy from DB
+      // Empty live positions â€” health still flags missing trackers / cam policy from DB
       const emptyLive = {
         fetched_at: new Date().toISOString(),
         positions: [] as never[],
@@ -1122,7 +1472,7 @@ api.get("/dashboard", async (c) => {
     }
   }
 
-  // Ops-wide counters (warehouse / admin bird’s-eye) — best-effort if tables missing
+  // Ops-wide counters (warehouse / admin birdâ€™s-eye) â€” best-effort if tables missing
   let openWarranties = 0;
   let openPickups = 0;
   let assetsAttention = 0;
@@ -1254,11 +1604,16 @@ api.get("/dashboard", async (c) => {
       assets_attention: assetsAttention,
       handbook_pending: handbookPending,
       emergencies,
+      registration_attention,
+      registration_expired,
+      registration_due_soon,
+      registration_missing,
     },
     tracking_issues: trackingIssues,
     my_reminders: {
       weekly_checks: myWeekly.results || [],
       repairs: myRepairs.results || [],
+      registration: myRegistration,
     },
     recent_fuel: recentFuel.results,
     recent_alerts: recentAlerts.results,
@@ -1268,7 +1623,7 @@ api.get("/dashboard", async (c) => {
 // Employees
 api.get("/employees", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
   const all = c.req.query("all") === "1";
-  // Keep this query simple (no correlated subquery) — safer on D1 and faster.
+  // Keep this query simple (no correlated subquery) â€” safer on D1 and faster.
   // Gas-card last4 is attached in one grouped pass afterward.
   const rows = await c.env.DB.prepare(
     all
@@ -1350,17 +1705,17 @@ function peopleMatchScore(
     const bLast = bTokens[bTokens.length - 1];
     if (aLast && aLast === bLast && aLast.length >= 3) {
       score = Math.max(score, 72);
-      reasons.push(`same last name “${aLast}”`);
+      reasons.push(`same last name â€œ${aLast}â€`);
       if (aTokens[0] && bTokens[0] && aTokens[0][0] === bTokens[0][0]) {
         score = Math.max(score, 85);
         reasons.push("same first initial");
       }
     }
-    // First name only match when both multi-part (avoid "Chris" matching everyone named Chris…)
+    // First name only match when both multi-part (avoid "Chris" matching everyone named Chrisâ€¦)
     // still useful when last names are missing
     if (aTokens.length === 1 && bTokens.includes(aTokens[0]) && aTokens[0].length >= 4) {
       score = Math.max(score, 55);
-      reasons.push(`first name “${aTokens[0]}”`);
+      reasons.push(`first name â€œ${aTokens[0]}â€`);
     }
   }
 
@@ -1371,7 +1726,7 @@ function peopleMatchScore(
   const dotted = aTokens.join(".");
   if (un && (un === compact || un === dotted || un === aTokens[0])) {
     score = Math.max(score, 88);
-    reasons.push(`login “${candidate.username}”`);
+    reasons.push(`login â€œ${candidate.username}â€`);
   }
   if (em && (em === compact || em === dotted || em === aTokens[0])) {
     score = Math.max(score, 80);
@@ -1531,7 +1886,7 @@ api.post("/employees", requireRoles(ROLE_PERMS.manageEmployees), async (c) => {
         {
           needs_confirm: true,
           message:
-            "Someone similar already exists — confirm this is a new person or link an existing login.",
+            "Someone similar already exists â€” confirm this is a new person or link an existing login.",
           users: userMatches,
           employees: employeeMatches,
         },
@@ -1651,11 +2006,13 @@ api.patch("/employees/:id", requireRoles(ROLE_PERMS.manageEmployees), async (c) 
     rehire_date?: string | null;
     force_restart_pto?: boolean;
     force_keep_pto?: boolean;
+    /** Display only. Null keeps the current role as the title. */
+    position_title?: string | null;
   }>();
 
   await ensurePtoTables(c.env.DB);
 
-  // Link helper ↔ tech (rides together)
+  // Link helper â†” tech (rides together)
   if (body.rides_with_employee_id !== undefined) {
     const partnerId =
       body.rides_with_employee_id == null || body.rides_with_employee_id === 0
@@ -1791,6 +2148,50 @@ api.patch("/employees/:id", requireRoles(ROLE_PERMS.manageEmployees), async (c) 
       /* optional */
     }
   }
+  if (body.position_title !== undefined) {
+    const title =
+      body.position_title == null || String(body.position_title).trim() === ""
+        ? null
+        : String(body.position_title).trim().slice(0, 80);
+    try {
+      await c.env.DB.prepare(
+        `UPDATE employees SET position_title = ?, updated_at = datetime('now') WHERE id = ?`
+      )
+        .bind(title, id)
+        .run();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such column/i.test(msg)) throw e;
+    }
+    try {
+      await c.env.DB.prepare(
+        `UPDATE users SET position_title = ?, updated_at = datetime('now') WHERE employee_id = ?`
+      )
+        .bind(title, id)
+        .run();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such column/i.test(msg)) throw e;
+    }
+  }
+
+  if (isLeaving) {
+    try {
+      await releasePersonalGearForEmployee(c.env.DB, id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such table|no such column/i.test(msg)) throw e;
+    }
+  }
+  if (isRehire) {
+    try {
+      await restorePersonalToolsForEmployee(c.env.DB, id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such table|no such column/i.test(msg)) throw e;
+    }
+  }
+
   const auditDetail = ptoTransition
     ? `Updated employee · ${ptoTransition.message}`
     : "Updated employee";
@@ -1944,10 +2345,10 @@ api.post("/vehicles/:id/assign", requireRoles(ROLE_PERMS.manageVehicles), async 
         ? driverName
           ? `Unit ${vehicle.unit_number} marked ${driverName} (unassigned, stays on map)`
           : `Cleared assignment on unit ${vehicle.unit_number}`
-        : `Assigned ${driverName} → unit ${vehicle.unit_number}`
+        : `Assigned ${driverName} â†’ unit ${vehicle.unit_number}`
     );
 
-    // Notify the individual(s) put on the truck — not a role group
+    // Notify the individual(s) put on the truck â€” not a role group
     if (!clear && (empId || helperId)) {
       const assigneeIds = await userIdsForEmployees(c.env.DB, [
         empId || 0,
@@ -1959,15 +2360,15 @@ api.post("/vehicles/:id/assign", requireRoles(ROLE_PERMS.manageVehicles), async 
           c,
           notifyAndSms(c.env, c.env.DB, assigneeIds, {
             kind: "vehicle_assigned",
-            title: `You’re on unit ${unitNo}`,
+            title: `Youâ€™re on unit ${unitNo}`,
             body: `${user.display_name} assigned you to unit ${unitNo}${
               body.note?.trim() ? ` · ${body.note.trim().slice(0, 100)}` : ""
             }`,
             entity: { type: "vehicle", id: vehicleId },
             sms: shortSms(
-              `TA: You’re assigned to unit ${unitNo}${
+              `TA: Youâ€™re assigned to unit ${unitNo}${
                 body.note?.trim() ? ` · ${body.note.trim().slice(0, 80)}` : ""
-              }. — ${user.display_name}`
+              }. â€” ${user.display_name}`
             ),
             excludeUserId: user.id,
             fromUserId: user.id,
@@ -2009,7 +2410,7 @@ api.get("/vehicles/:id/assignment-log", requireRoles(ROLE_PERMS.manageVehicles),
 });
 
 // Vehicles
-/** Personal units (P101, P-12…) carry their own insurance; company fleet shares one policy. */
+/** Personal units (P101, P-12â€¦) carry their own insurance; company fleet shares one policy. */
 function isPersonalVehicleUnit(unit: string | null | undefined): boolean {
   const u = String(unit || "")
     .trim()
@@ -2109,7 +2510,7 @@ api.get("/vehicles/lookup", async (c) => {
 api.get("/vehicles", async (c) => {
   const filter = c.req.query("filter");
   /**
-   * scope=fleet — full active fleet for fuel / ride-along (helpers pick another van).
+   * scope=fleet â€” full active fleet for fuel / ride-along (helpers pick another van).
    * Default: drivers only see home + usual-partner units.
    */
   const scope = (c.req.query("scope") || "").toLowerCase();
@@ -2133,6 +2534,18 @@ api.get("/vehicles", async (c) => {
       (insurance_expires IS NOT NULL AND insurance_expires <= date('now', '+' || ? || ' days') AND insurance_expires >= date('now'))
     )`;
     binds.push(String(soonDays), String(soonDays));
+  }
+  // Registration only: missing date OR expired OR due ≤ soonDays (TxDMV renewals)
+  if (filter === "registration" || filter === "reg") {
+    sql += ` AND status = 'active' AND (
+      registration_expires IS NULL OR TRIM(registration_expires) = ''
+      OR registration_expires < date('now')
+      OR (registration_expires >= date('now') AND registration_expires <= date('now', '+' || ? || ' days'))
+    )`;
+    binds.push(String(soonDays));
+  }
+  if (filter === "missing_registration" || filter === "reg_missing") {
+    sql += ` AND status = 'active' AND (registration_expires IS NULL OR TRIM(registration_expires) = '')`;
   }
   if (filter === "dash_cam") {
     // n/a is acceptable and not an issue
@@ -2165,7 +2578,7 @@ api.get("/vehicles", async (c) => {
   const stmt = c.env.DB.prepare(sql);
   const rows = binds.length ? await stmt.bind(...binds).all() : await stmt.all();
 
-  // Enrich with matched driver employee only (helpers move around — not stored permanently)
+  // Enrich with matched driver employee only (helpers move around â€” not stored permanently)
   const emps = await c.env.DB.prepare(
     "SELECT id, name FROM employees WHERE active = 1"
   ).all<{ id: number; name: string }>();
@@ -2262,7 +2675,7 @@ api.put("/vehicles/fleet-insurance", requireRoles(ROLE_PERMS.manageVehicleCompli
       "update",
       "settings",
       null,
-      `Fleet insurance expires → ${expires || "cleared"} (${updated} company units)`
+      `Fleet insurance expires â†’ ${expires || "cleared"} (${updated} company units)`
     );
     return c.json({ ok: true, fleet_insurance_expires: expires, units_updated: updated });
   } catch (e) {
@@ -2391,7 +2804,7 @@ api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) =>
   const personal = isPersonalVehicleUnit(unitForIns);
   let fleetUpdated = false;
 
-  // Company units share one insurance plan — changing it updates the fleet setting + all company rows
+  // Company units share one insurance plan â€” changing it updates the fleet setting + all company rows
   if (!personal && body.insurance_expires !== undefined) {
     const raw =
       body.insurance_expires === "" || body.insurance_expires == null
@@ -2523,7 +2936,7 @@ api.patch("/vehicles/:id", requireRoles(ROLE_PERMS.manageVehicles), async (c) =>
 });
 
 // Fuel
-/** Ensure fuel OCR review columns exist (migration 043). Do not run bulk backfills here — that can hang mobile. */
+/** Ensure fuel OCR review columns exist (migration 043). Do not run bulk backfills here â€” that can hang mobile. */
 let fuelOcrColsReady = false;
 async function ensureFuelOcrReviewColumns(db: D1Database): Promise<void> {
   if (fuelOcrColsReady) return;
@@ -2569,7 +2982,7 @@ function fuelOcrNeedsReview(
   }
   // Missing gallons or total always review
   if (final.gallons == null || final.total_cost == null) return true;
-  // OCR disagreed with submitted values — admin should confirm learning
+  // OCR disagreed with submitted values â€” admin should confirm learning
   if (anyDiff) return true;
   // No usable final data
   if (!anyCore) return true;
@@ -2603,7 +3016,7 @@ api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
     sql += " AND f.employee_id = ?";
     binds.push(Number(employeeId));
   }
-  // Drivers see fuel they logged / under their employee — any van (ride-alongs)
+  // Drivers see fuel they logged / under their employee â€” any van (ride-alongs)
   const fuelUser = c.get("user");
   let driverMineClause = "";
   if (fuelUser.role === "driver") {
@@ -2641,7 +3054,10 @@ api.get("/fuel", requireRoles(ROLE_PERMS.viewFuel), async (c) => {
     .bind(...totalBinds)
     .first();
 
-  return c.json({ entries: rows.results, totals });
+  const entries = (rows.results || []).map((r) =>
+    repairFuelEntryTextFields(r as Record<string, unknown>)
+  );
+  return c.json({ entries, totals });
 });
 
 api.get("/ocr/hints", async (c) => {
@@ -2697,6 +3113,8 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
       raw_text?: string;
       ocr?: OcrFieldSnapshot;
       final?: OcrFieldSnapshot;
+      store_needs_review?: boolean;
+      store_review_reason?: string | null;
     };
   }>();
 
@@ -2715,7 +3133,7 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
   }
   if (!employeeId) return c.json({ error: "employee_id required" }, 400);
 
-  // Any active fleet unit is allowed — helpers ride other vans when primary is off
+  // Any active fleet unit is allowed â€” helpers ride other vans when primary is off
   const vehicle = await c.env.DB.prepare(
     `SELECT id, unit_number, status FROM vehicles WHERE id = ?`
   )
@@ -2723,7 +3141,7 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
     .first<{ id: number; unit_number: string; status: string }>();
   if (!vehicle) return c.json({ error: "Vehicle not found" }, 404);
   if (vehicle.status === "retired") {
-    return c.json({ error: "That unit is retired — pick an active van" }, 400);
+    return c.json({ error: "That unit is retired â€” pick an active van" }, 400);
   }
   const homeVids = user.role === "driver" ? await getDriverHomeVehicleIds(c.env.DB, user) : [];
   const offUsualUnit =
@@ -2743,7 +3161,7 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
   const cardMismatch = Boolean(
     expectedCard && cardLast4 && expectedCard !== cardLast4 && (expectedCardRow?.n ?? 0) >= 1
   );
-  let stationNotes = body.station_notes?.trim() || "";
+  let stationNotes = repairUtf8Mojibake(body.station_notes?.trim() || "");
   if (cardMismatch) {
     const flag = `CARD MISMATCH: receipt/form ••${cardLast4} vs driver’s usual ••${expectedCard}`;
     stationNotes = stationNotes ? `${stationNotes} | ${flag}` : flag;
@@ -2751,6 +3169,25 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
   if (offUsualUnit) {
     const flag = `RIDE-ALONG / OTHER VAN: Unit ${vehicle.unit_number} (not tech’s usual unit)`;
     stationNotes = stationNotes ? `${stationNotes} | ${flag}` : flag;
+  }
+
+  stationNotes = repairUtf8Mojibake(stationNotes);
+
+  const prepayStop = /\bPREPAY\s*:/i.test(stationNotes);
+  const gallonsNum = body.gallons == null ? null : Number(body.gallons);
+  if (
+    prepayStop &&
+    (gallonsNum == null || !Number.isFinite(gallonsNum) || gallonsNum <= 0 || gallonsNum > 50)
+  ) {
+    return c.json(
+      {
+        error:
+          gallonsNum != null && Number.isFinite(gallonsNum) && gallonsNum > 50
+            ? "Those gallons look too high for a van tank. Enter what the pump showed."
+            : "Enter the gallons filled on a prepaid stop (what the pump showed).",
+      },
+      400
+    );
   }
 
   await ensureFuelOcrReviewColumns(c.env.DB);
@@ -2764,13 +3201,20 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
     store_number: body.store_number?.trim() || null,
     card_last4: cardLast4,
   };
-  // Only queue when OCR is uncertain, disagrees with final, or card mismatch — not every clean scan
+  const rawForStore = String(body.ocr_feedback?.raw_text || "");
+  const storeFinal = String(finalSnap.store_number || "").trim();
+  const storeOnReceipt = storeFinal ? storeMatchesReceiptText(storeFinal, rawForStore) : false;
+  const storeReviewReason =
+    (body.ocr_feedback?.store_needs_review && (body.ocr_feedback?.store_review_reason || "Store # needs a check")) ||
+    (!storeFinal ? "No store # on the receipt" : !storeOnReceipt ? "Saved store # is not printed on this receipt" : null);
+  // Only queue when OCR is uncertain, disagrees with final, card mismatch, or store # is not proven by the receipt
   const needsReviewFlag =
-    fuelOcrNeedsReview(ocrSnap, finalSnap) || cardMismatch ? 1 : 0;
+    fuelOcrNeedsReview(ocrSnap, finalSnap) || cardMismatch || Boolean(storeReviewReason) ? 1 : 0;
   const ocrJson = JSON.stringify({
     ocr: ocrSnap,
     final: finalSnap,
     raw_text: body.ocr_feedback?.raw_text || null,
+    store_review_reason: storeReviewReason,
     saved_at: new Date().toISOString(),
   });
 
@@ -2877,7 +3321,8 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
         user.id,
         body.ocr_feedback.raw_text || null,
         body.ocr_feedback.ocr,
-        body.ocr_feedback.final
+        body.ocr_feedback.final,
+        { kind: "fuel", learnAliases: false }
       );
     } catch {
       // non-fatal
@@ -2890,7 +3335,47 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
      JOIN vehicles v ON v.id = f.vehicle_id WHERE f.id = ?`
   )
     .bind(id)
-    .first();
+    .first<{
+      id: number;
+      employee_id: number;
+      vehicle_id: number;
+      unit_number: string;
+      fuel_date: string;
+      fuel_time: string | null;
+      gallons: number | null;
+      total_cost: number | null;
+      store_number: string | null;
+      card_last4: string | null;
+      receipt_key: string | null;
+      ocr_needs_review: number | null;
+      entered_by_user_id: number | null;
+    }>();
+
+  const receiptKey = String(body.receipt_key || "").trim();
+  if (receiptKey && id > 0) {
+    scheduleWaitUntil(
+      c,
+      notifyFuelReceiptVerify(c.env, {
+        source: "field-app",
+        event: "fuel_receipt_uploaded",
+        fuel_id: id,
+        vehicle_id: body.vehicle_id,
+        unit_number: entry?.unit_number || vehicle.unit_number || null,
+        employee_id: employeeId,
+        entered_by_user_id: user.id,
+        fuel_date: body.fuel_date,
+        fuel_time: body.fuel_time?.trim() || null,
+        gallons: body.gallons ?? null,
+        total_cost: body.total_cost ?? null,
+        store_number: body.store_number?.trim() || null,
+        card_last4: cardLast4,
+        receipt_key: receiptKey,
+        ocr_needs_review: needsReviewFlag === 1,
+        review_path: `/fuel/receipt-review?id=${id}`,
+        at: new Date().toISOString(),
+      })
+    );
+  }
 
   return c.json(
     {
@@ -2908,8 +3393,11 @@ api.post("/fuel", requireRoles(ROLE_PERMS.logFuel), async (c) => {
 });
 
 api.patch("/fuel/:id", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
+  const user = c.get("user");
   const id = Number(c.req.param("id"));
-  const before = await c.env.DB.prepare("SELECT * FROM fuel_entries WHERE id = ?").bind(id).first();
+  const before = await c.env.DB.prepare("SELECT * FROM fuel_entries WHERE id = ?")
+    .bind(id)
+    .first<Record<string, unknown>>();
   if (!before) return c.json({ error: "Not found" }, 404);
   const body = await c.req.json<Record<string, unknown>>();
   const fields = [
@@ -2939,8 +3427,44 @@ api.patch("/fuel/:id", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
   await c.env.DB.prepare(`UPDATE fuel_entries SET ${sets.join(", ")} WHERE id = ?`)
     .bind(...values)
     .run();
-  const after = await c.env.DB.prepare("SELECT * FROM fuel_entries WHERE id = ?").bind(id).first();
-  await writeAudit(c.env.DB, c.get("user"), "update", "fuel_entry", id, "Updated fuel entry", before, after);
+  const after = await c.env.DB.prepare(
+    `SELECT f.*, v.unit_number FROM fuel_entries f
+     JOIN vehicles v ON v.id = f.vehicle_id WHERE f.id = ?`
+  )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  await writeAudit(c.env.DB, user, "update", "fuel_entry", id, "Updated fuel entry", before, after);
+
+  // Newly attached (or replaced) fuel receipt photo â†’ Atlas verify wake
+  const prevKey = String(before.receipt_key || "").trim();
+  const nextKey = String(
+    body.receipt_key !== undefined ? body.receipt_key : before.receipt_key || ""
+  ).trim();
+  if (nextKey && nextKey !== prevKey && after) {
+    scheduleWaitUntil(
+      c,
+      notifyFuelReceiptVerify(c.env, {
+        source: "field-app",
+        event: "fuel_receipt_uploaded",
+        fuel_id: id,
+        vehicle_id: Number(after.vehicle_id),
+        unit_number: (after.unit_number as string) || null,
+        employee_id: Number(after.employee_id),
+        entered_by_user_id: user.id,
+        fuel_date: String(after.fuel_date || ""),
+        fuel_time: after.fuel_time != null ? String(after.fuel_time) : null,
+        gallons: after.gallons != null ? Number(after.gallons) : null,
+        total_cost: after.total_cost != null ? Number(after.total_cost) : null,
+        store_number: after.store_number != null ? String(after.store_number) : null,
+        card_last4: after.card_last4 != null ? String(after.card_last4) : null,
+        receipt_key: nextKey,
+        ocr_needs_review: Number(after.ocr_needs_review || 0) === 1,
+        review_path: `/fuel/receipt-review?id=${id}`,
+        at: new Date().toISOString(),
+      })
+    );
+  }
+
   return c.json({ entry: after });
 });
 
@@ -2961,7 +3485,7 @@ api.get("/fuel/receipt-review/count", requireRoles(ROLE_PERMS.editAnyFuel), asyn
 });
 
 /**
- * Admin OCR receipt review queue — photos + OCR vs submitted values.
+ * Admin OCR receipt review queue â€” photos + OCR vs submitted values.
  * ?filter=needs (default) | reviewed | all
  */
 api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
@@ -2977,7 +3501,7 @@ api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) 
   } else if (filter === "reviewed") {
     where += " AND f.ocr_reviewed_at IS NOT NULL";
   }
-  // "all" — no extra filter
+  // "all" â€” no extra filter
   if (wantId > 0) {
     where += " AND f.id = ?";
   }
@@ -3018,7 +3542,7 @@ api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) 
           ocr_payload = null;
         }
       }
-      return { ...row, ocr_payload };
+      return repairFuelEntryTextFields({ ...row, ocr_payload } as Record<string, unknown>);
     });
 
     return c.json({
@@ -3042,6 +3566,115 @@ api.get("/fuel/receipt-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) 
 /**
  * Admin corrects receipt fields from the photo and teaches OCR memory.
  */
+
+/**
+ * One-shot: scrub common UTF-8 mojibake in fuel station_notes (and optional notifications).
+ * Admin-only. Safe patterns only (â€¢→•, â€™→’, etc.). Does NOT run on deploy — Chris/Atlas invoke once.
+ * Query: ?dry_run=1 to preview counts; ?include_notifications=1 to also scrub notifications title/body.
+ */
+api.post("/admin/repair-utf8-mojibake", requireRoles(["admin"] as Role[]), async (c) => {
+  const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+  const includeNotifications =
+    c.req.query("include_notifications") === "1" || c.req.query("include_notifications") === "true";
+
+  const fuelRows = await c.env.DB.prepare(
+    `SELECT id, station_notes FROM fuel_entries
+     WHERE station_notes IS NOT NULL AND station_notes != ''
+       AND (instr(station_notes, char(226)) > 0 OR instr(station_notes, char(195)) > 0)`
+  ).all<{ id: number; station_notes: string }>();
+
+  let fuelFixed = 0;
+  const fuelSamples: Array<{ id: number; before: string; after: string }> = [];
+  for (const row of fuelRows.results || []) {
+    const before = row.station_notes || "";
+    const after = repairUtf8Mojibake(before);
+    if (after !== before) {
+      fuelFixed++;
+      if (fuelSamples.length < 10) {
+        fuelSamples.push({ id: row.id, before: before.slice(0, 120), after: after.slice(0, 120) });
+      }
+      if (!dryRun) {
+        await c.env.DB.prepare(`UPDATE fuel_entries SET station_notes = ? WHERE id = ?`)
+          .bind(after, row.id)
+          .run();
+      }
+    }
+  }
+
+  let notifFixed = 0;
+  const notifSamples: Array<{ id: number; before: string; after: string }> = [];
+  if (includeNotifications) {
+    const notifRows = await c.env.DB.prepare(
+      `SELECT id, title, body FROM notifications
+       WHERE (title IS NOT NULL AND (instr(title, char(226)) > 0 OR instr(title, char(195)) > 0))
+          OR (body IS NOT NULL AND (instr(body, char(226)) > 0 OR instr(body, char(195)) > 0))`
+    ).all<{ id: number; title: string; body: string | null }>();
+    for (const row of notifRows.results || []) {
+      const titleAfter = repairUtf8Mojibake(row.title || "");
+      const bodyAfter = repairUtf8Mojibake(row.body || "");
+      if (titleAfter !== (row.title || "") || bodyAfter !== (row.body || "")) {
+        notifFixed++;
+        if (notifSamples.length < 10) {
+          notifSamples.push({
+            id: row.id,
+            before: (row.title || "").slice(0, 80),
+            after: titleAfter.slice(0, 80),
+          });
+        }
+        if (!dryRun) {
+          await c.env.DB.prepare(`UPDATE notifications SET title = ?, body = ? WHERE id = ?`)
+            .bind(titleAfter, bodyAfter || null, row.id)
+            .run();
+        }
+      }
+    }
+  }
+
+  const issueRows = await c.env.DB.prepare(
+    `SELECT id, title, description FROM vehicle_issues
+     WHERE (title IS NOT NULL AND (instr(title, char(226)) > 0 OR instr(title, char(194)) > 0 OR instr(title, char(195)) > 0))
+        OR (description IS NOT NULL AND (instr(description, char(226)) > 0 OR instr(description, char(194)) > 0 OR instr(description, char(195)) > 0))`
+  ).all<{ id: number; title: string | null; description: string | null }>();
+  let issuesFixed = 0;
+  const issueSamples: Array<{ id: number; before: string; after: string }> = [];
+  for (const row of issueRows.results || []) {
+    const titleAfter = toAsciiUiText(row.title || "");
+    const descAfter = toAsciiUiText(row.description || "");
+    if (titleAfter !== (row.title || "") || descAfter !== (row.description || "")) {
+      issuesFixed++;
+      if (issueSamples.length < 10) {
+        issueSamples.push({
+          id: row.id,
+          before: (row.title || "").slice(0, 80),
+          after: titleAfter.slice(0, 80),
+        });
+      }
+      if (!dryRun) {
+        await c.env.DB.prepare(
+          `UPDATE vehicle_issues SET title = ?, description = ? WHERE id = ?`
+        )
+          .bind(titleAfter, descAfter || null, row.id)
+          .run();
+      }
+    }
+  }
+
+  return c.json({
+    ok: true,
+    dry_run: dryRun,
+    fuel_candidates: (fuelRows.results || []).length,
+    fuel_fixed: fuelFixed,
+    fuel_samples: fuelSamples,
+    notifications_fixed: notifFixed,
+    notification_samples: notifSamples,
+    issues_fixed: issuesFixed,
+    issue_samples: issueSamples,
+    hint: dryRun
+      ? "Re-POST without dry_run=1 to apply. Fuel notes and shop-board titles."
+      : "Applied. Spot-check Unit 007: Weekly check - Back camera broken.",
+  });
+});
+
 api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c) => {
   const user = c.get("user");
   const id = Number(c.req.param("id"));
@@ -3154,13 +3787,15 @@ api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c)
       finalSnap.total_cost,
       finalSnap.store_number,
       finalSnap.card_last4,
-      body.station_notes !== undefined ? body.station_notes || null : null,
+      body.station_notes !== undefined ? repairUtf8Mojibake(body.station_notes || "") || null : null,
       odometer,
       user.id,
       JSON.stringify({
         ocr: ocrSnap,
         final: finalSnap,
         raw_text: rawText,
+        store_review_reason: null,
+        store_verified_by_admin: true,
         admin_reviewed_at: new Date().toISOString(),
         admin_reviewed_by: user.id,
       }),
@@ -3168,10 +3803,13 @@ api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c)
     )
     .run();
 
-  // Teach OCR from original OCR read → admin-corrected final
+  // Teach OCR from original OCR read â†’ admin-corrected final
   let learned = 0;
   try {
-    const r = await recordOcrFeedback(c.env.DB, user.id, rawText, ocrSnap, finalSnap);
+    const r = await recordOcrFeedback(c.env.DB, user.id, rawText, ocrSnap, finalSnap, {
+      kind: "fuel",
+      learnAliases: true,
+    });
     learned = r.corrections || 0;
   } catch {
     /* non-fatal */
@@ -3199,7 +3837,7 @@ api.post("/fuel/:id/ocr-review", requireRoles(ROLE_PERMS.editAnyFuel), async (c)
   return c.json({ ok: true, entry, learned });
 });
 
-// ——— Parts purchase receipts (company card / vendor invoice photos) ———
+// â€”â€”â€” Parts purchase receipts (company card / vendor invoice photos) â€”â€”â€”
 
 let partsPurchaseVehicleColsReady = false;
 async function ensurePartsPurchaseVehicleCols(db: D1Database): Promise<void> {
@@ -3219,7 +3857,7 @@ async function ensurePartsPurchaseVehicleCols(db: D1Database): Promise<void> {
   partsPurchaseVehicleColsReady = true;
 }
 
-// ——— Dump / landfill ticket logs ———
+// â€”â€”â€” Dump / landfill ticket logs â€”â€”â€”
 api.get("/dump-runs", requireRoles(ROLE_PERMS.viewDumpRuns), async (c) => {
   try {
     const rows = await c.env.DB.prepare(
@@ -3310,7 +3948,7 @@ api.post("/dump-runs", requireRoles(ROLE_PERMS.logDumpRuns), async (c) => {
       .run();
     const id = result.meta.last_row_id as number;
 
-    // Learn: map weight → gallons + total_cost under store key "dump"
+    // Learn: map weight â†’ gallons + total_cost under store key "dump"
     if (body.ocr_feedback?.ocr && body.ocr_feedback?.final) {
       const ocr = { ...body.ocr_feedback.ocr, store_number: "dump" };
       const final = { ...body.ocr_feedback.final, store_number: "dump" };
@@ -3417,7 +4055,7 @@ api.patch("/dump-runs/:id", requireRoles(ROLE_PERMS.logDumpRuns), async (c) => {
       .run();
   }
 
-  // Learn from correction (wrong OCR/saved value → corrected)
+  // Learn from correction (wrong OCR/saved value â†’ corrected)
   if (body.ocr_feedback?.final || body.net_weight_lbs !== undefined || body.total_amount !== undefined) {
     const finalWeight =
       body.net_weight_lbs !== undefined ? Number(body.net_weight_lbs) : before.net_weight_lbs;
@@ -3524,7 +4162,7 @@ function preferVendorSpelling(a: string, b: string): string {
   const sb = score(b);
   if (sb > sa) return b.trim();
   if (sa > sb) return a.trim();
-  // Same quality — keep the longer / first
+  // Same quality â€” keep the longer / first
   return (a.trim().length >= b.trim().length ? a : b).trim();
 }
 
@@ -3544,7 +4182,7 @@ function canonicalizePartsStoreName(raw: string): string | null {
   if (k === "carrier" || k.startsWith("carrier ")) return "Carrier Enterprise";
   if (k === "ferguson" || k.startsWith("ferguson ")) return "Ferguson Supply";
   if (k === "lennox" || k.startsWith("lennox ")) return "Lennox Industries";
-  // Daikin owns Goodman — keep "Goodman" as the shop-facing name
+  // Daikin owns Goodman â€” keep "Goodman" as the shop-facing name
   if (
     k === "goodman" ||
     k.startsWith("goodman ") ||
@@ -3657,7 +4295,7 @@ async function resolvePickupVendorName(
 
 /** Vendor name suggestions for datalist (part_vendors + recent tickets + prior receipts). */
 api.get("/parts-purchases/vendors", requireRoles(ROLE_PERMS.logPartsPurchase), async (c) => {
-  /** lower(trim) → preferred display name */
+  /** lower(trim) â†’ preferred display name */
   const byKey = new Map<string, string>();
   function addName(raw: string | null | undefined) {
     const n = canonicalizePartsStoreName(String(raw || ""));
@@ -3828,7 +4466,7 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
       ? Number(body.parts_order_id)
       : null;
 
-  // Vehicle is optional — form only collects store, date, total, purpose, photo
+  // Vehicle is optional â€” form only collects store, date, total, purpose, photo
 
   try {
     const r = await c.env.DB.prepare(
@@ -3937,10 +4575,10 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
         500
       );
     }
-    // Older DBs without vehicle columns — retry insert without them
+    // Older DBs without vehicle columns â€” retry insert without them
     if (/no such column|vehicle_id/i.test(msg) && vehicleId) {
       return c.json(
-        { error: "Vehicle link not ready — refresh and try again (schema updating)." },
+        { error: "Vehicle link not ready â€” refresh and try again (schema updating)." },
         500
       );
     }
@@ -3948,7 +4586,7 @@ api.post("/parts-purchases", requireRoles(ROLE_PERMS.logPartsPurchase), async (c
   }
 });
 
-/** Normalize photo extension (handles .jpg.jpeg, HEIC→jpg label, empty names). */
+/** Normalize photo extension (handles .jpg.jpeg, HEICâ†’jpg label, empty names). */
 function receiptExt(file: File): string {
   const name = (file.name || "").toLowerCase();
   const type = (file.type || "").toLowerCase();
@@ -3972,7 +4610,7 @@ function receiptContentType(file: File, ext: string): string {
 
 /**
  * Photo upload (fuel receipts, warranty drop-off location, etc.)
- * Any signed-in user — folder is restricted to known prefixes.
+ * Any signed-in user â€” folder is restricted to known prefixes.
  * R2 when bound, otherwise D1 blob store.
  */
 api.post("/uploads/receipt", async (c) => {
@@ -4006,6 +4644,11 @@ api.post("/uploads/receipt", async (c) => {
     "asset-photos",
     "issue-photos",
     "tool-loan-paperwork",
+    "inventory-other",
+    "parts-arrivals",
+    "part-deliveries",
+    "vendor-handoffs",
+    "responsibility-acks",
   ];
   const folder =
     rawFolder && allowedFolders.some((f) => rawFolder === f || rawFolder.startsWith(f + "/"))
@@ -4021,7 +4664,7 @@ api.post("/uploads/receipt", async (c) => {
     return c.json({ key, folder, storage: "r2" });
   }
 
-  // D1 fallback — works without enabling R2 in Cloudflare
+  // D1 fallback â€” works without enabling R2 in Cloudflare
   try {
     await c.env.DB.prepare(
       `INSERT INTO receipt_blobs (key, content_type, data, size) VALUES (?, ?, ?, ?)`
@@ -4358,7 +5001,7 @@ api.post("/alerts/:id/void-fuel", requireRoles(ROLE_PERMS.manageAlerts), async (
 api.get("/issues", async (c) => {
   const status = c.req.query("status");
   const report = c.req.query("report");
-  /** YYYY-MM-DD — completed work finished that calendar day (local shop date string) */
+  /** YYYY-MM-DD â€” completed work finished that calendar day (local shop date string) */
   const completedOn = (c.req.query("completed_on") || "").slice(0, 10);
   const completedFrom = (c.req.query("completed_from") || "").slice(0, 10);
   const completedTo = (c.req.query("completed_to") || "").slice(0, 10);
@@ -4371,6 +5014,9 @@ api.get("/issues", async (c) => {
     LEFT JOIN users uc ON uc.id = i.tech_confirmed_by_user_id
     LEFT JOIN users cb ON cb.id = i.completed_by_user_id
     WHERE 1=1`;
+  if (c.req.query("include_pm") !== "1") {
+    sql += ` AND IFNULL(i.origin, '') <> 'pm'`;
+  }
   const binds: unknown[] = [];
   if (report === "schedule") {
     sql += " AND i.status IN ('open','scheduled','in_progress')";
@@ -4419,7 +5065,20 @@ api.get("/issues", async (c) => {
     i.created_at DESC`;
   }
   const rows = await c.env.DB.prepare(sql).bind(...binds).all();
-  const issues = rows.results || [];
+  const issues = (rows.results || []).map((row) => {
+    const r = row as Record<string, unknown>;
+    for (const key of [
+      "title",
+      "description",
+      "schedule_notes",
+      "completion_notes",
+      "mechanic_diagnosis",
+      "work_performed",
+    ]) {
+      if (typeof r[key] === "string") r[key] = toAsciiUiText(r[key] as string);
+    }
+    return r;
+  });
   const needsSchedule = issues.filter(
     (r) => String((r as { status?: string }).status || "") === "open"
   ).length;
@@ -4460,7 +5119,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     String(body.origin || "").toLowerCase() === "shop";
   const canManageShop = (ROLE_PERMS.manageIssues as string[]).includes(user.role);
 
-  // ——— Shop-originated work order (mechanic logs work done / in progress) ———
+  // â€”â€”â€” Shop-originated work order (mechanic logs work done / in progress) â€”â€”â€”
   if (isShopWork) {
     if (!canManageShop) {
       return c.json({ error: "Only shop staff can log shop work" }, 403);
@@ -4476,11 +5135,12 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     const title =
       body.title?.trim() ||
       (concerns
-        ? concerns.split(/\s*[·|]\s*/).filter(Boolean).slice(0, 3).join(" · ")
+        ? concerns.split(/\s*[\u00c2\u00b7|]\s*/).filter(Boolean).slice(0, 3).join(" · ")
         : "") ||
       catalogEntry(body.issue_category)?.label ||
       "";
-    if (!title) {
+    const titleAscii = toAsciiUiText(title);
+    if (!titleAscii) {
       return c.json(
         { error: "Enter work title or select vehicle / tech concerns" },
         400
@@ -4521,8 +5181,8 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
         body.vehicle_id,
         user.id,
         severity,
-        title,
-        body.description || null,
+        titleAscii,
+        toAsciiUiText(body.description || "") || null,
         body.photo_key || null,
         body.issue_category || null,
         status,
@@ -4545,7 +5205,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       body.record_oil_change === true ||
       body.record_oil_change === 1 ||
       diagnosisText === "Oil change" ||
-      diagnosisText.split(/\s*[·|]\s*/).includes("Oil change");
+      diagnosisText.split(/\s*[\u00c2\u00b7|]\s*/).includes("Oil change");
     if (status === "completed" && recordOil) {
       const odo =
         body.oil_odometer != null && body.oil_odometer !== ""
@@ -4588,7 +5248,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
         .run();
     }
 
-    // Unit in bay → out of service
+    // Unit in bay â†’ out of service
     if (status === "in_progress") {
       const open = await c.env.DB.prepare(
         `SELECT id FROM downtime_events WHERE vehicle_id = ? AND ended_at IS NULL LIMIT 1`
@@ -4635,7 +5295,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
           notifyIds,
           "shop_work_logged",
           `Shop work done · Unit ${unitNo} · ${title.slice(0, 80)}`,
-          `${user.display_name} logged completed shop work. Open Repairs → Done today.`,
+          `${user.display_name} logged completed shop work. Open Repairs â†’ Done today.`,
           { type: "issue", id }
         );
       }
@@ -4661,14 +5321,14 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
           status === "completed"
             ? "Shop work logged as completed."
             : status === "in_progress"
-              ? "Shop work started — unit marked out of service."
+              ? "Shop work started â€” unit marked out of service."
               : "Shop work ticket created.",
       },
       201
     );
   }
 
-  // ——— Driver / field report (existing flow) ———
+  // â€”â€”â€” Driver / field report (existing flow) â€”â€”â€”
   const cat = catalogEntry(body.issue_category);
   const title =
     body.title?.trim() ||
@@ -4715,8 +5375,8 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       emergency: isEmergency,
       duplicate: true,
       message: isEmergency
-        ? "Emergency already reported — shop still has it in the app. Do not create a new ticket."
-        : "Same request already submitted — open tickets are on the shop board.",
+        ? "Emergency already reported â€” shop still has it in the app. Do not create a new ticket."
+        : "Same request already submitted â€” open tickets are on the shop board.",
     });
   }
 
@@ -4730,8 +5390,8 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       body.vehicle_id,
       user.id,
       severity,
-      title,
-      body.description || null,
+      toAsciiUiText(title),
+      toAsciiUiText(body.description || "") || null,
       body.photo_key || null,
       body.issue_category || null,
       isEmergency ? 1 : 0
@@ -4756,7 +5416,7 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     detailLine ||
     (isEmergency
       ? "Driver reported an emergency. Open Repairs in the app to schedule."
-      : "Needs scheduling on the shop board — open Repairs in Field App.");
+      : "Needs scheduling on the shop board â€” open Repairs in Field App.");
   const kind = isEmergency ? "flat_emergency" : "repair_request";
   const nTitle = isEmergency
     ? `EMERGENCY · Unit ${unitNoEarly} · ${headline}`
@@ -4810,8 +5470,8 @@ api.post("/issues", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       emergency: isEmergency,
       notified_user_ids: techs,
       message: isEmergency
-        ? "Emergency dispatched — shop notified in the app."
-        : "Repair request submitted — shop notified.",
+        ? "Emergency dispatched â€” shop notified in the app."
+        : "Repair request submitted â€” shop notified.",
     },
     201
   );
@@ -4864,12 +5524,22 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
     "parts_used",
     "labor_hours",
   ] as const;
+  const asciiFields = new Set([
+    "title",
+    "description",
+    "schedule_notes",
+    "completion_notes",
+    "mechanic_diagnosis",
+    "work_performed",
+    "parts_used",
+  ]);
   const sets: string[] = [];
   const values: unknown[] = [];
   for (const f of fields) {
     if (body[f] !== undefined) {
       sets.push(`${f} = ?`);
-      values.push(body[f] === "" ? null : body[f]);
+      const raw = body[f] === "" ? null : body[f];
+      values.push(typeof raw === "string" && asciiFields.has(f) ? toAsciiUiText(raw) : raw);
     }
   }
   if (body.is_emergency !== undefined) {
@@ -4933,7 +5603,7 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   if (
     recordOil ||
     diagnosisText === "Oil change" ||
-    diagnosisText.split(/\s*[·|]\s*/).includes("Oil change")
+    diagnosisText.split(/\s*[\u00c2\u00b7|]\s*/).includes("Oil change")
   ) {
     const odo =
       body.oil_odometer != null && body.oil_odometer !== ""
@@ -4974,7 +5644,7 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   }
 
   // Downtime / out-of-service: only when the van is actually in the shop (in progress).
-  // Booking a future schedule must NOT mark the unit down — tech still drives until then.
+  // Booking a future schedule must NOT mark the unit down â€” tech still drives until then.
   const nextStatus = String((after as { status?: string } | null)?.status || body.status || before.status);
   if (nextStatus === "in_progress" && before.status !== "in_progress") {
     const open = await c.env.DB.prepare(
@@ -5066,7 +5736,7 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
           afterRow.title,
           nextDate ? `Shop date: ${nextDate}` : null,
           notes || null,
-          "Open the app → Repairs for details.",
+          "Open the app â†’ Repairs for details.",
         ]
           .filter(Boolean)
           .join(" · ");
@@ -5093,7 +5763,7 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
       const coreIds = await coreFleetNotifyIds(c.env.DB);
       const notifyIds = [...new Set([...fieldIds, ...coreIds])];
       if (notifyIds.length) {
-        // Personal SMS — individuals on this job, not fleet-wide role groups
+        // Personal SMS â€” individuals on this job, not fleet-wide role groups
         let smsText: string | null = null;
         if (becameScheduled) {
           smsText = shortSms(
@@ -5127,6 +5797,15 @@ api.patch("/issues/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   }
 
   await writeAudit(c.env.DB, user, "update", "vehicle_issue", id, "Updated issue", before, after);
+  try {
+    const afterStatus = String((after as { status?: string } | null)?.status || before.status);
+    const scheduledChanged = Boolean(
+      body.scheduled_date !== undefined && String(body.scheduled_date || "") !== String(before.scheduled_date || "")
+    );
+    await recordRepairBoardStage(c.env.DB, id, before.status, afterStatus, scheduledChanged, user.id);
+  } catch {
+    /* table missing before 111: ignore */
+  }
   return c.json({
     issue: after,
     field_notified: fieldNotified,
@@ -5148,7 +5827,7 @@ api.post("/issues/:id/confirm-schedule", async (c) => {
   }
   const note = (body.note || "").trim();
   if (action === "decline" && !note) {
-    return c.json({ error: "Add a short reason when you can’t make the appointment." }, 400);
+    return c.json({ error: "Add a short reason when you canâ€™t make the appointment." }, 400);
   }
 
   const issue = await c.env.DB.prepare(
@@ -5223,16 +5902,16 @@ api.post("/issues/:id/confirm-schedule", async (c) => {
       : `Tech declined shop appointment unit ${unitNo} · ${when}: ${note}`
   );
 
-  // Decline is actionable — notify fleet manager + owner only (not whole shop group)
+  // Decline is actionable â€” notify fleet manager + owner only (not whole shop group)
   if (action === "decline") {
     const shopIds = await coreFleetNotifyIds(c.env.DB);
     await notifyAndSms(c.env, c.env.DB, shopIds, {
       kind: "repair_confirm_declined",
-      title: `Tech can’t make shop date · Unit ${unitNo}`,
+      title: `Tech canâ€™t make shop date · Unit ${unitNo}`,
       body: `${user.display_name} declined ${when}: ${note} · ${issue.title}`,
       entity: { type: "issue", id },
       sms: shortSms(
-        `TA: ${user.display_name} can’t bring unit ${unitNo} on ${when}. Reason: ${note}`
+        `TA: ${user.display_name} canâ€™t bring unit ${unitNo} on ${when}. Reason: ${note}`
       ),
       excludeUserId: user.id,
       fromUserId: user.id,
@@ -5259,7 +5938,7 @@ api.post("/issues/:id/confirm-schedule", async (c) => {
   });
 });
 
-// ——— Service records (oil changes) ———
+// â€”â€”â€” Service records (oil changes) â€”â€”â€”
 api.get("/service", requireRoles([...ROLE_PERMS.manageIssues, "driver"] as Role[]), async (c) => {
   const vehicleId = c.req.query("vehicle_id");
   const type = c.req.query("type") || "oil_change";
@@ -5291,7 +5970,7 @@ api.get("/service/due", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
        s.service_date as last_service_date, s.odometer as last_service_odometer,
        s.interval_miles, s.next_due_odometer, s.next_due_date,
        CASE
-         -- Only after first oil change is logged — no due flag until tracking starts
+         -- Only after first oil change is logged â€” no due flag until tracking starts
          WHEN s.id IS NULL THEN 0
          WHEN s.next_due_odometer IS NOT NULL AND v.current_odometer IS NOT NULL
               AND v.current_odometer >= s.next_due_odometer THEN 1
@@ -5363,7 +6042,7 @@ api.post("/service", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
     "create",
     "service_record",
     id,
-    `Oil change unit ${body.vehicle_id} @ ${odo ?? "?"} mi — next ~${nextDue ?? "?"}`
+    `Oil change unit ${body.vehicle_id} @ ${odo ?? "?"} mi â€” next ~${nextDue ?? "?"}`
   );
   // Close any open auto oil-change jobs for this unit
   await c.env.DB.prepare(
@@ -5443,32 +6122,19 @@ api.patch("/service/:id", requireRoles(ROLE_PERMS.manageIssues), async (c) => {
   return c.json({ record: after });
 });
 
-// ——— In-app notifications ———
+mountFleetShop(api as never);
+mountDoneToday(api as never);
+mountTechAssist(api as never);
+registerSafetyRoutes(api);
+registerResponsibilityRoutes(api);
+registerGrowthRoutes(api);
+registerHrWriteupRoutes(api);
+registerPartsRunStockRoutes(api);
+
+// --- In-app notifications ---
 api.get("/notifications", async (c) => {
   const user = c.get("user");
-  // Light-touch: weekly checks + shop bring-in today + aging ops items
-  try {
-    await notifyWeeklyChecksDue(c.env.DB);
-  } catch {
-    /* optional */
-  }
-  try {
-    await notifyShopBringInsToday(c.env.DB, c.env);
-  } catch {
-    /* optional */
-  }
-  try {
-    await notifyOpsActionItems(c.env.DB);
-  } catch {
-    /* optional */
-  }
-  // Auto-clear inbox rows whose linked card is no longer waiting (loan/warranty/fuel/vendor)
-  try {
-    await sweepUnreadNotifications(c.env.DB, user.id);
-  } catch {
-    /* optional — never block inbox */
-  }
-  // Exclude legacy team-chat alerts (messaging UI removed)
+  // Fast path: list + unread first (never block bell on maintenance sweeps)
   const rows = await c.env.DB.prepare(
     `SELECT * FROM notifications WHERE user_id = ?
        AND kind NOT LIKE 'message%'
@@ -5482,6 +6148,39 @@ api.get("/notifications", async (c) => {
   )
     .bind(user.id)
     .first<{ c: number }>();
+
+  // Background: weekly / shop / ops / sweep / self-noise - try/catch each; never fail inbox
+  scheduleWaitUntil(
+    c,
+    (async () => {
+      try {
+        await notifyWeeklyChecksDue(c.env.DB);
+      } catch {
+        /* optional */
+      }
+      try {
+        await notifyShopBringInsToday(c.env.DB, c.env);
+      } catch {
+        /* optional */
+      }
+      try {
+        await notifyOpsActionItems(c.env.DB);
+      } catch {
+        /* optional */
+      }
+      try {
+        await sweepUnreadNotifications(c.env.DB, user.id);
+      } catch {
+        /* optional - never block inbox */
+      }
+      try {
+        await clearSelfActorNoise(c.env.DB, user);
+      } catch {
+        /* optional - never block inbox */
+      }
+    })()
+  );
+
   return c.json({ notifications: rows.results, unread: unread?.c ?? 0 });
 });
 
@@ -5513,7 +6212,7 @@ api.post("/notifications/shop-bring-in-remind", requireRoles(ROLE_PERMS.manageIs
   return c.json({ created: n });
 });
 
-/** Office TV wallboard — one payload for glance view (auto-refresh client). */
+/** Office TV wallboard â€” one payload for glance view (auto-refresh client). */
 api.get(
   "/tv-board",
   requireRoles(["admin", "office", "viewer", "mechanic", "supervisor"] as Role[]),
@@ -5621,7 +6320,7 @@ api.get(
   });
 });
 
-// ——— Company reviews board (Google highlights + team celebration) ———
+// â€”â€”â€” Company reviews board (Google highlights + team celebration) â€”â€”â€”
 const DEFAULT_GOOGLE_REVIEWS_URL = "https://share.google/p9PJud1fI4iSmPCpq";
 
 api.get("/reviews", async (c) => {
@@ -5673,7 +6372,7 @@ api.post("/reviews", requireRoles(["admin", "office", "supervisor"]), async (c) 
   if (body.rating != null && String(body.rating).trim() !== "") {
     const n = Number(body.rating);
     if (!Number.isFinite(n) || n < 1 || n > 5) {
-      return c.json({ error: "Rating must be 1–5 stars" }, 400);
+      return c.json({ error: "Rating must be 1â€“5 stars" }, 400);
     }
     rating = Math.round(n);
   }
@@ -5712,11 +6411,11 @@ api.post("/reviews", requireRoles(["admin", "office", "supervisor"]), async (c) 
         .all<{ id: number }>()
         .catch(() => ({ results: [] as { id: number }[] }));
       const ids = (all.results || []).map((r) => r.id).filter((uid) => uid !== admin.id);
-      const stars = rating ? `${"★".repeat(rating)}${"☆".repeat(5 - rating)} ` : "";
+      const stars = rating ? `${"â˜…".repeat(rating)}${"â˜†".repeat(5 - rating)} ` : "";
       const who = body.tech_mentioned?.trim()
         ? ` · shout-out: ${body.tech_mentioned.trim()}`
         : "";
-      const preview = text.length > 120 ? `${text.slice(0, 117)}…` : text;
+      const preview = text.length > 120 ? `${text.slice(0, 117)}â€¦` : text;
       await notifyUsers(
         c.env.DB,
         ids,
@@ -5763,7 +6462,7 @@ api.delete("/reviews/:id", requireRoles(["admin"]), async (c) => {
 });
 
 
-// ——— In-app messenger (threaded conversations + thumbs-up acks) ———
+// â€”â€”â€” In-app messenger (threaded conversations + thumbs-up acks) â€”â€”â€”
 
 type MsgConvRow = {
   id: number;
@@ -5776,7 +6475,7 @@ type MsgConvRow = {
 
 /**
  * Backfill pre-thread messages into conversations.
- * Keep batches tiny — large backfills timed out D1 and made the app hang on open.
+ * Keep batches tiny â€” large backfills timed out D1 and made the app hang on open.
  */
 async function backfillMessageConversations(db: D1Database, limit = 8): Promise<void> {
   try {
@@ -5798,7 +6497,7 @@ async function backfillMessageConversations(db: D1Database, limit = 8): Promise<
       }>();
     for (const m of orphan.results || []) {
       const subj =
-        m.body.length > 48 ? `${m.body.slice(0, 48).trim()}…` : m.body.trim() || "Message";
+        m.body.length > 48 ? `${m.body.slice(0, 48).trim()}â€¦` : m.body.trim() || "Message";
       const isTeam = m.to_user_id == null ? 1 : 0;
       const cr = await db
         .prepare(
@@ -5880,7 +6579,7 @@ api.get("/messages", async (c) => {
     : Math.min(100, Math.max(20, Number(c.req.query("limit") || "50")));
   const sinceId = Number(c.req.query("since_id") || "0");
   try {
-    // Never backfill on peek/poll — that was freezing the whole app on open
+    // Never backfill on peek/poll â€” that was freezing the whole app on open
     if (!peek) {
       await backfillMessageConversations(c.env.DB, 8);
     }
@@ -6112,7 +6811,7 @@ api.get("/messages/users", async (c) => {
   return c.json({ users });
 });
 
-/** In-app team chat UI removed — warranties + alerts remain. */
+/** In-app team chat UI removed â€” warranties + alerts remain. */
 api.post("/messages", async (c) => {
   return c.json(
     {
@@ -6136,10 +6835,10 @@ api.delete("/messages/conversations/:id", async (c) => {
   return c.json({ error: "Messaging has been turned off." }, 410);
 });
 
-// ——— Warranty claims ———
+// â€”â€”â€” Warranty claims â€”â€”â€”
 /**
  * Warranty log #: W + MM + YY + "-" + monthly sequence
- * e.g. W0726-001 (July 2026, 1st that month) → W0726-002 …
+ * e.g. W0726-001 (July 2026, 1st that month) â†’ W0726-002 â€¦
  * August resets: W0826-001
  */
 async function nextWarrantyLogNumber(db: D1Database): Promise<string> {
@@ -6171,7 +6870,7 @@ function warrantyDaysOpen(droppedOffAt: string, processedAt: string | null): num
   return Math.max(0, Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)));
 }
 
-/** Weekdays (Mon–Fri) from the day after `fromIso` through today (America/Chicago noon steps). */
+/** Weekdays (Monâ€“Fri) from the day after `fromIso` through today (America/Chicago noon steps). */
 function warrantyWorkingDaysSince(fromIso: string | null | undefined): number {
   if (!fromIso) return 0;
   const start = warrantyParseTs(fromIso);
@@ -6183,7 +6882,7 @@ function warrantyWorkingDaysSince(fromIso: string | null | undefined): number {
   let days = 0;
   while (d < today) {
     d.setUTCDate(d.getUTCDate() + 1);
-    const wd = d.getUTCDay(); // 0 Sun … 6 Sat — close enough for D1 UTC-stored timestamps
+    const wd = d.getUTCDay(); // 0 Sun â€¦ 6 Sat â€” close enough for D1 UTC-stored timestamps
     if (wd !== 0 && wd !== 6) days++;
   }
   return days;
@@ -6197,7 +6896,7 @@ const WARRANTY_SUBMITTED_PIPELINE = new Set([
 ]);
 
 /**
- * Per-row Hold aging flag (UI). File badge uses countWarrantyFilePile instead —
+ * Per-row Hold aging flag (UI). File badge uses countWarrantyFilePile instead â€”
  * aged claim_submitted must NOT inflate the File / Home warranty badge.
  */
 function warrantyNeedsAttention(row: {
@@ -6209,7 +6908,7 @@ function warrantyNeedsAttention(row: {
   const st = String(row.status || "");
   if (st === "dropped_off") return !row.parked;
   if (!WARRANTY_SUBMITTED_PIPELINE.has(st)) return false;
-  // Hold aging only — never counts toward File badge
+  // Hold aging only â€” never counts toward File badge
   if (st !== "claim_submitted") return false;
   const since =
     warrantyWorkingDaysSince(row.claim_submitted_at) ||
@@ -6217,7 +6916,7 @@ function warrantyNeedsAttention(row: {
   return since >= 3;
 }
 
-/** @deprecated name kept for call sites — now File pile only (dropped_off − parked). */
+/** @deprecated name kept for call sites â€” now File pile only (dropped_off âˆ’ parked). */
 async function countWarrantyNeedsAttention(db: D1Database): Promise<number> {
   return countWarrantyFilePile(db);
 }
@@ -6230,7 +6929,7 @@ function normalizeWarrantySerial(serial: string): string {
     .replace(/[\s\-_.]/g, "");
 }
 
-/** Digits-only core — catches OCR noise like 203936EN3V vs 2039363V. */
+/** Digits-only core â€” catches OCR noise like 203936EN3V vs 2039363V. */
 function warrantySerialDigits(serial: string): string {
   return normalizeWarrantySerial(serial).replace(/\D/g, "");
 }
@@ -6267,19 +6966,25 @@ async function findWarrantySerialDuplicates(
 ): Promise<WarrantySerialDup[]> {
   const norm = normalizeWarrantySerial(serial);
   if (!norm || norm.length < 4) return [];
-  const rows = await db
-    .prepare(
-      `SELECT id, log_number, part_name, model_number, serial_number, status,
+  const bind = `-${Math.max(1, withinDays)} days`;
+  const sqlBase = `SELECT id, log_number, part_name, model_number, serial_number, status,
               dropped_off_at, service_address
        FROM warranty_claims
        WHERE dropped_off_at >= datetime('now', ?)
          AND serial_number IS NOT NULL
-         AND trim(serial_number) != ''
-       ORDER BY dropped_off_at DESC
-       LIMIT 120`
-    )
-    .bind(`-${Math.max(1, withinDays)} days`)
-    .all<WarrantySerialDup>();
+         AND trim(serial_number) != ''`;
+  const order = ` ORDER BY dropped_off_at DESC LIMIT 120`;
+  let rows;
+  try {
+    rows = await db
+      .prepare(sqlBase + ` AND IFNULL(voided, 0) = 0` + order)
+      .bind(bind)
+      .all<WarrantySerialDup>();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/no such column.*voided/i.test(msg)) throw e;
+    rows = await db.prepare(sqlBase + order).bind(bind).all<WarrantySerialDup>();
+  }
   return (rows.results || []).filter((r) =>
     warrantySerialsLookSame(String(r.serial_number || ""), serial)
   );
@@ -6330,28 +7035,28 @@ api.get("/warranties", async (c) => {
     // Without q, honor open / vendor / decided tabs.
     if (!q) {
       if (status === "file" || status === "dropped" || status === "dropped_off") {
-        // File pile = unsubmitted, not parked
-        sql += ` WHERE w.status = 'dropped_off' AND IFNULL(w.parked, 0) = 0`;
+        // File pile = unsubmitted, not parked, not voided
+        sql += ` WHERE w.status = 'dropped_off' AND IFNULL(w.parked, 0) = 0 AND IFNULL(w.voided, 0) = 0`;
       } else if (status === "hold" || status === "submitted" || status === "claim_submitted") {
-        sql += ` WHERE w.status = 'claim_submitted'`;
+        sql += ` WHERE w.status = 'claim_submitted' AND IFNULL(w.voided, 0) = 0`;
       } else if (
         status === "return" ||
         status === "vendor" ||
         status === "vendor_waiting" ||
         status === "waiting_vendor"
       ) {
-        sql += ` WHERE w.status IN ('return_to_vendor','delivered')`;
+        sql += ` WHERE w.status IN ('return_to_vendor','delivered') AND IFNULL(w.voided, 0) = 0`;
       } else if (status === "parked") {
-        sql += ` WHERE IFNULL(w.parked, 0) = 1`;
+        sql += ` WHERE IFNULL(w.parked, 0) = 1 AND IFNULL(w.voided, 0) = 0`;
       } else if (status === "closed" || status === "rejected" || status === "decided") {
-        // Closed pile: done claims only (approved + rejected; legacy processed = approved)
-        sql += ` WHERE w.status IN ('approved','rejected','processed')`;
+        // Closed pile: done claims, plus voided duplicates (status is left unchanged)
+        sql += ` WHERE (w.status IN ('approved','rejected','processed') OR IFNULL(w.voided, 0) = 1)`;
       } else if (status === "open") {
-        sql += ` WHERE w.status IN ${OPEN_WARRANTY}`;
+        sql += ` WHERE w.status IN ${OPEN_WARRANTY} AND IFNULL(w.voided, 0) = 0`;
       } else if (status) {
         const mapped =
           status === "processed" ? "approved" : status === "cancelled" ? "rejected" : status;
-        sql += ` WHERE w.status = ?`;
+        sql += ` WHERE w.status = ? AND IFNULL(w.voided, 0) = 0`;
         binds.push(mapped);
       }
     } else {
@@ -6381,7 +7086,7 @@ api.get("/warranties", async (c) => {
       binds.push(like, like, like, like, like, like, like, like, like, like, like);
       if (compact && compact !== q) binds.push(`%${compact}%`);
     }
-    // Closed tab: Approved first, then Rejected. Other piles keep File→Hold→Return order.
+    // Closed tab: Approved first, then Rejected. Other piles keep Fileâ†’Holdâ†’Return order.
     if (status === "closed" || status === "rejected" || status === "decided") {
       sql += ` ORDER BY
         CASE w.status
@@ -6408,9 +7113,18 @@ api.get("/warranties", async (c) => {
         w.dropped_off_at ASC
         LIMIT 200`;
     }
-    const rows = await c.env.DB.prepare(sql)
-      .bind(...binds)
-      .all();
+    let rows;
+    try {
+      rows = await c.env.DB.prepare(sql).bind(...binds).all();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such column.*voided/i.test(msg)) throw e;
+      const fallbackSql = sql.replace(/ AND IFNULL\(w\.voided, 0\) = 0/g, "").replace(
+        / OR IFNULL\(w\.voided, 0\) = 1/g,
+        ""
+      );
+      rows = await c.env.DB.prepare(fallbackSql).bind(...binds).all();
+    }
     const isOpenW = (s: string) =>
       s === "dropped_off" ||
       s === "claim_submitted" ||
@@ -6428,21 +7142,26 @@ api.get("/warranties", async (c) => {
         ? warrantyWorkingDaysSince(submittedAt) || warrantyWorkingDaysSince(String(r.dropped_off_at))
         : 0;
       const parked = Number(r.parked || 0) ? 1 : 0;
-      const needsAttention = warrantyNeedsAttention({
-        status: st,
-        claim_submitted_at: submittedAt,
-        dropped_off_at: r.dropped_off_at ? String(r.dropped_off_at) : null,
-        parked,
-      });
-      // File aging from drop-off. Hold: quiet until 3 working days (UI only — not File badge).
-      const overdue =
-        st === "dropped_off" && !parked
+      const voided = Number(r.voided || 0) ? 1 : 0;
+      const needsAttention = voided
+        ? false
+        : warrantyNeedsAttention({
+            status: st,
+            claim_submitted_at: submittedAt,
+            dropped_off_at: r.dropped_off_at ? String(r.dropped_off_at) : null,
+            parked,
+          });
+      // File aging from drop-off. Hold: quiet until 3 working days (UI only - not File badge).
+      const overdue = voided
+        ? false
+        : st === "dropped_off" && !parked
           ? days >= 7
           : st === "claim_submitted"
             ? workingSinceSubmit >= 3
             : false;
-      const urgent =
-        st === "dropped_off" && !parked
+      const urgent = voided
+        ? false
+        : st === "dropped_off" && !parked
           ? days >= 14
           : st === "claim_submitted"
             ? workingSinceSubmit >= 5
@@ -6450,6 +7169,7 @@ api.get("/warranties", async (c) => {
       return {
         ...r,
         parked,
+        voided,
         days_open: days,
         working_days_since_submit: workingSinceSubmit,
         needs_attention: needsAttention,
@@ -6458,12 +7178,18 @@ api.get("/warranties", async (c) => {
       };
     });
     const fileCount = await countWarrantyFilePile(c.env.DB);
-    const openCount = list.filter((r: { status: string; parked?: number }) => {
+    const openCount = list.filter((r: { status: string; parked?: number; voided?: number }) => {
+      if (Number(r.voided)) return false;
       const st = String(r.status);
       if (st === "dropped_off") return !r.parked;
       return isOpenW(st);
     }).length;
     // attention_count = File pile globally (bell / Home), not aged Hold
+    try {
+      await attachHandoffCounts(c.env.DB, list as Record<string, unknown>[]);
+    } catch {
+      /* hand-off counts are optional */
+    }
     return c.json({
       warranties: list,
       open_count: openCount,
@@ -6504,7 +7230,9 @@ async function saveWarrantyPhoto(
   folder:
     | "warranty-dropoffs"
     | "warranty-nameplates"
-    | "warranty-compressor" = "warranty-dropoffs"
+    | "warranty-compressor"
+    | "inventory-other"
+    | "vendor-handoffs" = "warranty-dropoffs"
 ): Promise<string> {
   const maxBytes = env.RECEIPTS ? 10 * 1024 * 1024 : 900 * 1024;
   if (file.size > maxBytes) {
@@ -6534,50 +7262,309 @@ async function saveWarrantyDropoffPhoto(env: Env, file: File): Promise<string> {
   return saveWarrantyPhoto(env, file, "warranty-dropoffs");
 }
 
+type WarrantyDropoffPing = {
+  source: "field-app";
+  event: "warranty_dropoff_created";
+  id: number;
+  log_number: string;
+  created_at_utc: string;
+  created_at_ct: string;
+  dropped_off_by: string;
+  dropped_off_by_user_id: number | null;
+  part_name: string;
+  part_code: string | null;
+  vendor_name: string | null;
+  model_number: string | null;
+  serial_number: string | null;
+  customer_name: string | null;
+  service_address: string | null;
+  job_number: null;
+  status: string;
+  pile: "return" | "file";
+  needs_vendor_return: boolean;
+  review_path: string;
+  manual_resend: boolean;
+};
+
+type WarrantyPingSource = {
+  id?: number;
+  log_number?: string | null;
+  part_name?: string | null;
+  part_code?: string | null;
+  vendor_name?: string | null;
+  model_number?: string | null;
+  serial_number?: string | null;
+  customer_name?: string | null;
+  service_address?: string | null;
+  status?: string | null;
+  needs_vendor_return?: number | boolean | null;
+  dropped_off_by_user_id?: number | null;
+  dropped_off_at?: string | null;
+  created_at?: string | null;
+};
+
+/** Chicago wall time for the Atlas payload: YYYY-MM-DD h:mm AM/PM CT. */
+function formatWarrantyPingCt(utcRaw: string): string {
+  const raw = String(utcRaw || "").trim();
+  if (!raw) return "";
+  const iso = raw.includes("T") ? (/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : `${raw}Z`) : `${raw.replace(" ", "T")}Z`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).formatToParts(d);
+  const pick = (kind: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === kind)?.value || "";
+  return `${pick("year")}-${pick("month")}-${pick("day")} ${pick("hour")}:${pick("minute")} ${pick("dayPeriod")} CT`;
+}
+
+function warrantyDropoffPingFromRow(
+  row: WarrantyPingSource,
+  extra: { dropped_off_by: string; status?: string; pile?: "return" | "file"; manual_resend?: boolean }
+): WarrantyDropoffPing {
+  const created = String(row.dropped_off_at || row.created_at || "").trim();
+  const status = extra.status || String(row.status || "dropped_off");
+  const pile = extra.pile || (status === "return_to_vendor" ? "return" : "file");
+  const textOrNull = (value: string | null | undefined) => {
+    const t = String(value ?? "").trim();
+    return t ? t : null;
+  };
+  return {
+    source: "field-app",
+    event: "warranty_dropoff_created",
+    id: Number(row.id),
+    log_number: String(row.log_number || ""),
+    created_at_utc: created,
+    created_at_ct: formatWarrantyPingCt(created),
+    dropped_off_by: extra.dropped_off_by,
+    dropped_off_by_user_id:
+      row.dropped_off_by_user_id != null && Number(row.dropped_off_by_user_id) > 0
+        ? Number(row.dropped_off_by_user_id)
+        : null,
+    part_name: String(row.part_name || ""),
+    part_code: textOrNull(row.part_code),
+    vendor_name: textOrNull(row.vendor_name),
+    model_number: textOrNull(row.model_number),
+    serial_number: textOrNull(row.serial_number),
+    customer_name: textOrNull(row.customer_name),
+    service_address: textOrNull(row.service_address),
+    job_number: null, // no job # column on warranty_claims yet
+    status,
+    pile,
+    needs_vendor_return: Number(row.needs_vendor_return) === 1 || row.needs_vendor_return === true,
+    review_path: "/warranties?q=" + encodeURIComponent(String(row.log_number || "")),
+    manual_resend: Boolean(extra.manual_resend),
+  };
+}
+
 /**
- * Fire-and-forget Atlas ping on new warranty create only.
- * Never throws — missing secrets or network errors are ignored.
+ * One Atlas POST per new warranty drop-off. Never throws.
+ * A missing URL is a skip. A missing key still sends, with no key header.
  */
-function pingAtlasWarrantyDropoff(
+async function pingAtlasWarrantyDropoff(
   env: Env,
-  payload: {
-    log_number: string;
-    id: number;
-    part_name: string;
-    vendor_name: string | null;
-    service_address: string | null;
-    customer_name: string | null;
-    model_number: string | null;
-    serial_number: string | null;
-    status: string;
-    dropped_off_by: string;
-    pile: "return" | "file";
-  }
-): Promise<void> {
-  const url = (env.ATLAS_WARRANTY_WEBHOOK_URL || "").trim();
+  payload: WarrantyDropoffPing,
+  opts?: { manual_by?: PublicUser | null }
+): Promise<{ outcome: string; status?: number; ms: number }> {
   const auth = (env.ATLAS_WARRANTY_WEBHOOK_AUTH || "").trim();
-  if (!url || !auth) return Promise.resolve();
-  return (async () => {
+  const headerRaw = (env.ATLAS_WARRANTY_WEBHOOK_HEADER || "").trim();
+  const manual = Boolean(opts?.manual_by) || payload.manual_resend;
+
+  const record = async (
+    outcome: string,
+    summary: string,
+    extra: { status?: number; host: string; headerName: string | null; snippet: string; ms: number }
+  ): Promise<{ outcome: string; status?: number; ms: number }> => {
     try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 8_000);
-      try {
-        await fetch(url, {
-          method: "POST",
-          headers: {
-            Authorization: auth,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-          signal: ac.signal,
-        });
-      } finally {
-        clearTimeout(t);
-      }
+      await writeAudit(
+        env.DB,
+        opts?.manual_by ?? null,
+        `atlas_warranty_ping_${outcome}`,
+        "warranty",
+        payload.id,
+        summary.slice(0, 180),
+        undefined,
+        {
+          status: extra.status ?? null,
+          ms: extra.ms,
+          host: extra.host,
+          header_name: extra.headerName,
+          key_set: auth.length > 0,
+          resp_snippet: extra.snippet.slice(0, 200),
+          manual,
+        }
+      );
     } catch {
-      /* Atlas down / timeout — drop-off already saved */
+      /* the drop-off must not fail because the log row failed */
     }
-  })();
+    return extra.status != null ? { outcome, status: extra.status, ms: extra.ms } : { outcome, ms: extra.ms };
+  };
+
+  const endpoint = (env.ATLAS_WARRANTY_WEBHOOK_URL || "").trim();
+  if (!endpoint) {
+    return record("skip", "skip: ATLAS_WARRANTY_WEBHOOK_URL not set", {
+      host: "",
+      headerName: null,
+      snippet: "",
+      ms: 0,
+    });
+  }
+
+  let host = "";
+  let allowed = false;
+  try {
+    const parsed = new URL(endpoint);
+    host = parsed.host;
+    const localHttp =
+      parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+    allowed = parsed.protocol === "https:" || localHttp;
+  } catch {
+    allowed = false;
+  }
+  if (!allowed) {
+    return record("skip", "skip: url not https", {
+      host,
+      headerName: null,
+      snippet: "",
+      ms: 0,
+    });
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "User-Agent": "TA-FieldApp/warranty-ping",
+    "X-Field-App-Event": "warranty_dropoff_created",
+  };
+  let headerName: string | null = null;
+  if (auth) {
+    const name = /^[A-Za-z0-9-]{1,40}$/.test(headerRaw) ? headerRaw : "Authorization";
+    const authorizationHeader = name.toLowerCase() === "authorization";
+    headers[name] = !authorizationHeader || auth.includes(" ") ? auth : `Bearer ${auth}`;
+    headerName = name;
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5_000);
+  const started = Date.now();
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      redirect: "manual",
+      headers,
+      body: JSON.stringify(payload),
+      signal: ac.signal,
+    });
+    let snippet = "";
+    try {
+      snippet = (await res.text()).slice(0, 200);
+    } catch {
+      snippet = "";
+    }
+    const ms = Date.now() - started;
+    const outcome = res.ok ? "ok" : "fail";
+    return await record(outcome, `Atlas ping ${payload.log_number} -> ${res.status} in ${ms}ms host=${host}`, {
+      status: res.status,
+      host,
+      headerName,
+      snippet,
+      ms,
+    });
+  } catch (e) {
+    const ms = Date.now() - started;
+    const name = e && typeof e === "object" && "name" in e ? String((e as { name?: string }).name || "") : "";
+    const rawMessage = e instanceof Error ? e.message : String(e);
+    const message = rawMessage.split(endpoint).join(host || "webhook").slice(0, 160);
+    if (name === "AbortError") {
+      return await record("timeout", `Atlas ping ${payload.log_number} timeout 5000ms`, {
+        host,
+        headerName,
+        snippet: "",
+        ms,
+      });
+    }
+    return await record("error", `Atlas ping ${payload.log_number} error: ${message}`, {
+      host,
+      headerName,
+      snippet: "",
+      ms,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type FuelReceiptVerifyPayload = {
+  source: "field-app";
+  event: "fuel_receipt_uploaded";
+  fuel_id: number;
+  vehicle_id: number;
+  unit_number?: string | null;
+  employee_id: number;
+  entered_by_user_id: number;
+  fuel_date: string;
+  fuel_time: string | null;
+  gallons: number | null;
+  total_cost: number | null;
+  store_number: string | null;
+  card_last4: string | null;
+  receipt_key: string;
+  ocr_needs_review: boolean;
+  review_path: string;
+  at: string;
+};
+
+let atlasFuelWebhookSkipLogged = false;
+
+/**
+ * Non-blocking Atlas wake after fuel receipt photo save.
+ * Never throws â€” missing secrets or network errors are ignored.
+ */
+async function notifyFuelReceiptVerify(
+  env: Env,
+  payload: FuelReceiptVerifyPayload
+): Promise<void> {
+  const url = (env.ATLAS_FUEL_RECEIPT_WEBHOOK_URL || "").trim();
+  const auth = (env.ATLAS_FUEL_RECEIPT_WEBHOOK_AUTH || "").trim();
+  if (!url || !auth) {
+    if (!atlasFuelWebhookSkipLogged) {
+      atlasFuelWebhookSkipLogged = true;
+      console.log(
+        "[atlas-fuel-receipt] skip â€” ATLAS_FUEL_RECEIPT_WEBHOOK_* not set"
+      );
+    }
+    return;
+  }
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 3_000);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: auth,
+        },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      console.log(
+        `[atlas-fuel-receipt] webhook ${res.ok ? "ok" : "fail"} status=${res.status} fuel_id=${payload.fuel_id}`
+      );
+    } finally {
+      clearTimeout(t);
+    }
+  } catch (e) {
+    console.log(
+      `[atlas-fuel-receipt] webhook error fuel_id=${payload.fuel_id}: ${
+        e instanceof Error ? e.message : String(e)
+      }`
+    );
+  }
 }
 
 api.post("/warranties", async (c) => {
@@ -6727,7 +7714,7 @@ api.post("/warranties", async (c) => {
       return c.json(
         {
           error:
-            "Equipment model # is required — from the unit the part was removed from (not the failed part).",
+            "Equipment model # is required â€” from the unit the part was removed from (not the failed part).",
         },
         400
       );
@@ -6736,7 +7723,7 @@ api.post("/warranties", async (c) => {
       return c.json(
         {
           error:
-            "Equipment serial # is required — from the unit the part was removed from (not the failed part).",
+            "Equipment serial # is required â€” from the unit the part was removed from (not the failed part).",
         },
         400
       );
@@ -6757,7 +7744,7 @@ api.post("/warranties", async (c) => {
         return c.json(
           {
             error:
-              "Compressors must have seals intact — vendors reject leaking / unsealed compressors. Confirm seals are sealed before drop-off.",
+              "Compressors must have seals intact â€” vendors reject leaking / unsealed compressors. Confirm seals are sealed before drop-off.",
           },
           400
         );
@@ -6782,7 +7769,7 @@ api.post("/warranties", async (c) => {
       }
     }
 
-    // Same equipment serial within 30 days → require explicit confirm (stops accidental doubles)
+    // Same equipment serial within 30 days â†’ require explicit confirm (stops accidental doubles)
     if (!confirmDuplicate) {
       try {
         const dups = await findWarrantySerialDuplicates(c.env.DB, serialNumber, 30);
@@ -6927,7 +7914,7 @@ api.post("/warranties", async (c) => {
     }
     const id = r.meta.last_row_id;
 
-    // Johnstone / Solar Supply → Return pile (never File)
+    // Johnstone / Solar Supply â†’ Return pile (never File)
     let landedReturn = false;
     if (vendorDefaultsToReturn(vendorName)) {
       try {
@@ -6965,7 +7952,9 @@ api.post("/warranties", async (c) => {
     // Inbox: all warehouse + Chris Marroquin (Operations Manager)
     const whIds = await usersByRoles(c.env.DB, ["warehouse"]);
     const chrisIds = await chrisMarroquinUserIds(c.env.DB);
-    const targets = [...new Set([...whIds, ...chrisIds])];
+    const targets = [...new Set([...whIds, ...chrisIds])].filter(
+      (id) => id !== user.id
+    ); // self-noise off: don't inbox the actor for their own drop-off
     const pileNote = landedReturn
       ? isSolarSupplyVendor(vendorName)
         ? " · RETURN pile (Solar Supply)"
@@ -6983,7 +7972,7 @@ api.post("/warranties", async (c) => {
         " · photo attached",
       { type: "warranty", id }
     );
-    // Best-effort SMS to Chris's cell only — Inbox is source of truth if A2P fails
+    // Best-effort SMS to Chris's cell only â€” Inbox is source of truth if A2P fails
     if (smsConfigured(c.env)) {
       try {
         await sendSms(
@@ -6992,7 +7981,7 @@ api.post("/warranties", async (c) => {
           shortSms(`TA warranty ${logNumber}: ${partName} by ${user.display_name}${pileNote}`)
         );
       } catch {
-        /* A2P / Twilio failure — Inbox only */
+        /* A2P / Twilio failure â€” Inbox only */
       }
     }
     await writeAudit(
@@ -7004,29 +7993,38 @@ api.post("/warranties", async (c) => {
       `Warranty ${logNumber} dropped off (model ${modelNumber} S/N ${serialNumber})`
     );
     const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first();
-    // Atlas ping — new create only; never block or fail the drop-off
+    // Atlas ping - new create only; never block or fail the drop-off
     const atlasStatus =
       landedReturn
         ? "return_to_vendor"
         : String((row as { status?: string } | null)?.status || "dropped_off");
+    const saved = (row as WarrantyPingSource | null) ?? {
+      id,
+      log_number: logNumber,
+      part_name: partName,
+      part_code: partCode,
+      vendor_name: vendorName,
+      model_number: modelNumber,
+      serial_number: serialNumber,
+      customer_name: customerName,
+      service_address: serviceAddress,
+      dropped_off_by_user_id: user.id,
+      needs_vendor_return: needsVendorReturn ? 1 : 0,
+      status: atlasStatus,
+    };
     try {
       c.executionCtx.waitUntil(
-        pingAtlasWarrantyDropoff(c.env, {
-          log_number: logNumber,
-          id,
-          part_name: partName,
-          vendor_name: vendorName,
-          service_address: serviceAddress,
-          customer_name: customerName,
-          model_number: modelNumber,
-          serial_number: serialNumber,
-          status: atlasStatus,
-          dropped_off_by: user.display_name,
-          pile: landedReturn ? "return" : "file",
-        })
+        pingAtlasWarrantyDropoff(
+          c.env,
+          warrantyDropoffPingFromRow(saved, {
+            dropped_off_by: user.display_name,
+            status: atlasStatus,
+            pile: landedReturn ? "return" : "file",
+          })
+        )
       );
     } catch {
-      /* waitUntil unavailable in some test contexts — ignore */
+      /* waitUntil unavailable in some test contexts - ignore */
     }
     return c.json({
       ok: true,
@@ -7038,6 +8036,48 @@ api.post("/warranties", async (c) => {
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Create failed" }, 500);
   }
+});
+
+api.post("/admin/warranties/:id/atlas-ping", async (c) => {
+  const me = c.get("user");
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id) || id <= 0) return c.json({ error: "Not found" }, 404);
+  const row = await c.env.DB.prepare(
+    `SELECT w.id, w.log_number, w.status, w.part_code, w.part_name, w.model_number, w.serial_number,
+            w.service_address, w.customer_name, w.vendor_name, w.needs_vendor_return,
+            w.dropped_off_by_user_id, w.dropped_off_at, w.created_at,
+            u.display_name AS dropped_off_by_name
+     FROM warranty_claims w
+     LEFT JOIN users u ON u.id = w.dropped_off_by_user_id
+     WHERE w.id = ?`
+  ).bind(id).first<WarrantyPingSource & { dropped_off_by_name?: string | null }>();
+  if (!row) return c.json({ error: "Not found" }, 404);
+  const recent = await c.env.DB.prepare(
+    `SELECT id FROM audit_logs
+     WHERE entity_type = 'warranty' AND entity_id = ?
+       AND action LIKE 'atlas_warranty_ping_%'
+       AND created_at > datetime('now', '-5 minutes')
+     LIMIT 1`
+  ).bind(String(id)).first<{ id: number }>();
+  if (recent) return c.json({ ok: false, reason: "recent_attempt" }, 429);
+  const status = String(row.status || "dropped_off");
+  const result = await pingAtlasWarrantyDropoff(
+    c.env,
+    warrantyDropoffPingFromRow(row, {
+      dropped_off_by: String(row.dropped_off_by_name || ""),
+      status,
+      pile: status === "return_to_vendor" ? "return" : "file",
+      manual_resend: true,
+    }),
+    { manual_by: me }
+  );
+  return c.json({
+    ok: result.outcome === "ok",
+    outcome: result.outcome,
+    status: result.status ?? null,
+    ms: result.ms,
+  });
 });
 
 api.patch("/warranties/:id", async (c) => {
@@ -7058,8 +8098,12 @@ api.patch("/warranties/:id", async (c) => {
     /** Park / Unpark File pile (required why-note when parking). */
     parked?: boolean;
     parked_reason?: string | null;
-    /** Solar Supply only: return received → Approved $0, invoice deleted. */
+    /** Retire a duplicate. Keeps the row and the status. Does not text anyone. */
+    voided?: boolean;
+    void_reason?: string | null;
+    /** Solar Supply only: return received -> Approved $0, invoice deleted. */
     solar_invoice_deleted?: boolean;
+    handoff_override_reason?: string | null;
   }>();
   const before = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`)
     .bind(id)
@@ -7072,6 +8116,7 @@ api.patch("/warranties/:id", async (c) => {
       part_name: string;
       vendor_name: string | null;
       parked?: number | null;
+      voided?: number | null;
     }>();
   if (!before) return c.json({ error: "Not found" }, 404);
 
@@ -7085,10 +8130,59 @@ api.patch("/warranties/:id", async (c) => {
     canProcess ||
     (before.dropped_off_by_user_id != null && before.dropped_off_by_user_id === user.id);
 
+  // Void returns before status, notes-append, and SMS. Status stays as it was.
+  if (body.voided === true) {
+    if (!canProcess) return c.json({ error: "Not allowed to void this claim" }, 403);
+    const why = String(body.void_reason || "").trim();
+    if (why.length < 3) {
+      return c.json({ error: "Void needs a short reason (at least 3 characters)." }, 400);
+    }
+    if (Number(before.voided || 0) === 1) {
+      return c.json({ error: "Already voided." }, 400);
+    }
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const who = (user.display_name || "Office").trim();
+    const block = `[${stamp} - ${who}]\nVoided: ${why}`;
+    const prior = (before.notes || "").trim();
+    const nextNotes = prior ? `${prior}\n\n${block}` : block;
+    try {
+      await c.env.DB.prepare(
+        `UPDATE warranty_claims
+         SET voided = 1,
+             void_reason = ?,
+             voided_at = datetime('now'),
+             voided_by_user_id = ?,
+             notes = ?,
+             updated_at = datetime('now')
+         WHERE id = ?`
+      )
+        .bind(why, user.id, nextNotes, id)
+        .run();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such column.*voided/i.test(msg)) {
+        return c.json({ error: "Run migration 118_warranty_void.sql on D1." }, 400);
+      }
+      throw e;
+    }
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "warranty",
+      id,
+      `Warranty ${before.log_number} voided: ${why.slice(0, 180)}`
+    );
+    const voidedRow = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`)
+      .bind(id)
+      .first();
+    return c.json({ ok: true, warranty: voidedRow });
+  }
+
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
 
-  // Status updates for the team: append keeps history (e.g. "Working with Lennox…")
+  // Status updates for the team: append keeps history (e.g. "Working with Lennoxâ€¦")
   if (body.append_note !== undefined) {
     if (!canNote) return c.json({ error: "Not allowed to add notes on this claim" }, 403);
     const text = body.append_note.trim();
@@ -7117,7 +8211,7 @@ api.patch("/warranties/:id", async (c) => {
     sets.push("needs_vendor_return = ?");
     vals.push(body.needs_vendor_return ? 1 : 0);
   }
-  // Vendor return / credit details (optional columns — ignore if migration not applied)
+  // Vendor return / credit details (optional columns â€” ignore if migration not applied)
   if (body.rma_number !== undefined && canProcess) {
     sets.push("rma_number = ?");
     vals.push(body.rma_number?.toString().trim() || null);
@@ -7137,13 +8231,13 @@ api.patch("/warranties/:id", async (c) => {
     vals.push(n);
   }
 
-  // Park / Unpark — flag only; must not badge as File
+  // Park / Unpark â€” flag only; must not badge as File
   if (body.parked !== undefined && canProcess) {
     if (body.parked) {
       const why = (body.parked_reason || body.append_note || "").toString().trim();
       if (why.length < 3) {
         return c.json(
-          { error: "Park requires a why-note (e.g. new purchase — do not file)." },
+          { error: "Park requires a why-note (e.g. new purchase â€” do not file)." },
           400
         );
       }
@@ -7170,7 +8264,7 @@ api.patch("/warranties/:id", async (c) => {
     }
   }
 
-  // Solar Supply: part received → invoice deleted (Approved $0). Never scrap. Not for Johnstone.
+  // Solar Supply: part received â†’ invoice deleted (Approved $0). Never scrap. Not for Johnstone.
   if (body.solar_invoice_deleted && canProcess) {
     const vendor = before.vendor_name;
     if (!isSolarSupplyVendor(vendor)) {
@@ -7245,7 +8339,7 @@ api.patch("/warranties/:id", async (c) => {
     if (next === "claim_submitted" || next === "delivered") {
       sets.push("needs_vendor_return = 0");
     }
-    // Closing outcomes — set processed_at so it leaves open / aging lists
+    // Closing outcomes â€” set processed_at so it leaves open / aging lists
     if (next === "approved" || next === "rejected" || next === "not_warranty") {
       sets.push("processed_at = datetime('now')");
       sets.push("processed_by_user_id = ?");
@@ -7257,6 +8351,39 @@ api.patch("/warranties/:id", async (c) => {
     sets.push("claim_submitted_at = COALESCE(claim_submitted_at, datetime('now'))");
     sets.push("claim_submitted_by_user_id = COALESCE(claim_submitted_by_user_id, ?)");
     vals.push(user.id);
+  }
+
+  // Vendor hand-off proof gate (migration 110). Fail-open if the table is missing.
+  {
+    const leavingReturn =
+      before.status === "return_to_vendor" &&
+      (newStatus === "delivered" || newStatus === "approved");
+    if (leavingReturn) {
+      if (await handoffsReady(c.env.DB)) {
+        const required = await proofRequiredWarranty(c.env.DB);
+        if (required && !(await warrantyHasHandoff(c.env.DB, id))) {
+          const why = String(body.handoff_override_reason || "").trim();
+          if (user.role === "admin" && why.length >= 10) {
+            await writeAudit(
+              c.env.DB,
+              user,
+              "update",
+              "warranty",
+              id,
+              `handoff proof override ${before.log_number} -> ${newStatus}: ${why.slice(0, 200)}`
+            );
+          } else {
+            return c.json(
+              {
+                error: "Proof of hand-off required. Have the vendor rep sign on the card first.",
+                code: "handoff_required",
+              },
+              409
+            );
+          }
+        }
+      }
+    }
   }
 
   if (sets.length <= 1) return c.json({ error: "Nothing to update" }, 400);
@@ -7274,7 +8401,7 @@ api.patch("/warranties/:id", async (c) => {
           !/rma_number|credit_amount|tracking_number|shipped_by_user_id|claim_submitted_by_user_id/.test(s)
       );
       const safeVals = vals.slice(0, -1);
-      // rebuild vals without vendor fields is hard — simpler fall back message
+      // rebuild vals without vendor fields is hard â€” simpler fall back message
       return c.json(
         {
           error:
@@ -7286,29 +8413,35 @@ api.patch("/warranties/:id", async (c) => {
     throw e;
   }
 
-  // Claim submitted → Hold pile: Inbox Chris (waiting credit — do not scrap)
-  if (newStatus === "claim_submitted" && before.status !== "claim_submitted") {
-    const chrisIds = await chrisMarroquinUserIds(c.env.DB);
+  // Claim submitted â†’ Hold pile: Inbox Chris (waiting credit â€” do not scrap)
+  if (
+    newStatus === "claim_submitted" &&
+    before.status !== "claim_submitted" &&
+    Number(before.voided || 0) !== 1
+  ) {
+    const chrisIds = (await chrisMarroquinUserIds(c.env.DB)).filter(
+      (id) => id !== user.id
+    ); // self-noise off
     if (chrisIds.length) {
       await notifyUsers(
         c.env.DB,
         chrisIds,
         "warranty_claim_submitted",
         `Warranty ${before.log_number} · claim submitted (Hold)`,
-        `${before.part_name} · Waiting credit — do not scrap · by ${user.display_name}`,
+        `${before.part_name} · Waiting credit â€” do not scrap · by ${user.display_name}`,
         { type: "warranty", id }
       );
     }
   }
 
-  // Notify the tech who dropped it off — in-app + personal SMS (not all employees)
+  // Notify the tech who dropped it off â€” in-app + personal SMS (not all employees)
   if (
     before.dropped_off_by_user_id &&
     before.dropped_off_by_user_id !== user.id
   ) {
     const statusChanged = newStatus !== before.status;
     const noteAppended = Boolean(body.append_note?.trim());
-    if (statusChanged || noteAppended) {
+    if ((statusChanged || noteAppended) && Number(before.voided || 0) !== 1) {
       const statusLabel: Record<string, string> = {
         dropped_off: "dropped off",
         claim_submitted: "claim submitted",
@@ -7360,12 +8493,204 @@ api.patch("/warranties/:id", async (c) => {
     }
   }
 
-  await writeAudit(c.env.DB, user, "update", "warranty", id, `Warranty ${before.log_number} → ${newStatus}`);
-  const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first();
-  return c.json({ ok: true, warranty: row });
+  const auditStatus: Record<string, string> = {
+    dropped_off: "dropped off",
+    claim_submitted: "claim submitted",
+    return_to_vendor: "return to vendor",
+    delivered: "delivered",
+    approved: "approved",
+    rejected: "rejected",
+    not_warranty: "not a warranty",
+  };
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "warranty",
+    id,
+    `Warranty ${before.log_number} - ${auditStatus[newStatus] || newStatus}`
+  );
+  const row = await c.env.DB.prepare(`SELECT * FROM warranty_claims WHERE id = ?`).bind(id).first<{
+    id: number;
+    log_number: string;
+    status: string;
+    part_name: string | null;
+    service_address: string | null;
+    customer_name: string | null;
+    vendor_name: string | null;
+    rma_number: string | null;
+    needs_vendor_return: number | null;
+  }>();
+
+  // Warehouse stage SMS → Chris (Hold / Dispose / Return). Deduped; never throws.
+  let warehouse_sms: { sent: boolean; stage: string | null; reason?: string } | null = null;
+  if (row && Number(before.voided || 0) !== 1) {
+    try {
+      const { maybeSendWarrantyWarehouseSms } = await import("./warrantyWarehouseSms");
+      warehouse_sms = await maybeSendWarrantyWarehouseSms(c.env, c.env.DB, row, {
+        fromUserId: user.id,
+      });
+    } catch {
+      warehouse_sms = { sent: false, stage: null, reason: "sms_hook_error" };
+    }
+  }
+
+  return c.json({ ok: true, warranty: row, warehouse_sms });
 });
 
-// ——— Employee handbook (upload + acknowledge) ———
+api.get("/handoffs/config", async (c) => {
+  const settings = await handoffSettings(c.env.DB);
+  return c.json(settings);
+});
+
+api.get("/handoffs/settings", requireRoles(["admin"]), async (c) => {
+  return c.json(await handoffSettings(c.env.DB));
+});
+
+api.put("/handoffs/settings", requireRoles(["admin"]), async (c) => {
+  const body = await c.req.json<{ proof_required_warranty?: boolean; proof_required_arrival_return?: boolean }>();
+  return c.json(await saveHandoffSettings(c.env.DB, c.get("user"), body));
+});
+
+api.get("/handoffs", requireRoles(ROLE_PERMS.viewVendorHandoffs), async (c) => {
+  if (!(await handoffsReady(c.env.DB))) {
+    return c.json({ error: "Run migration 110_vendor_handoffs.sql (after Chris says Y)." }, 503);
+  }
+  const sourceType = c.req.query("source_type") || "";
+  const sourceId = Number(c.req.query("source_id"));
+  if (!sourceType || !sourceId) return c.json({ error: "source_type and source_id are required" }, 400);
+  const rows = await listHandoffs(c.env.DB, sourceType, sourceId);
+  return c.json({ handoffs: rows.map(publicHandoff) });
+});
+
+api.post("/handoffs", requireRoles(ROLE_PERMS.recordVendorHandoff), async (c) => {
+  if (!(await handoffsReady(c.env.DB))) {
+    return c.json({ error: "Run migration 110_vendor_handoffs.sql (after Chris says Y)." }, 503);
+  }
+  const form = await c.req.formData();
+  const result = await createHandoff({
+    db: c.env.DB,
+    user: c.get("user"),
+    form,
+    userAgent: c.req.header("user-agent") || "",
+    savePhoto: (file, folder) => saveWarrantyPhoto(c.env, file, folder),
+  });
+  return c.json(result.body, result.status as 200);
+});
+
+api.get("/handoffs/:id/receipt", requireRoles(ROLE_PERMS.viewVendorHandoffs), async (c) => {
+  if (!(await handoffsReady(c.env.DB))) {
+    return c.json({ error: "Run migration 110_vendor_handoffs.sql (after Chris says Y)." }, 503);
+  }
+  const id = Number(c.req.param("id"));
+  const row = await c.env.DB.prepare(
+    `SELECT h.*,
+      (SELECT id FROM vendor_handoffs x WHERE x.supersedes_id = h.id ORDER BY x.id DESC LIMIT 1) AS superseded_by_id
+     FROM vendor_handoffs h WHERE h.id = ?`
+  ).bind(id).first<Parameters<typeof renderHandoffReceiptHtml>[0]>();
+  if (!row) return c.json({ error: "Not found" }, 404);
+  return c.html(renderHandoffReceiptHtml(row, { autoprint: c.req.query("print") === "1" }));
+});
+
+// Employee handbook (upload + acknowledge)
+/** Proposal follow-up queue - READY drafts only; NEVER auto-email (Chris Y required). */
+api.get(
+  "/proposals/followups",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    const {
+      ensureProposalFollowupTables,
+      promoteDueProposalFollowups,
+    } = await import("./proposalFollowups");
+    await ensureProposalFollowupTables(c.env.DB);
+    await promoteDueProposalFollowups(c.env.DB);
+    const status = (c.req.query("status") || "ready").trim().toLowerCase();
+    let sql = `SELECT * FROM proposal_followups WHERE parent_id IS NOT NULL`;
+    if (status === "ready") sql += ` AND status = 'ready'`;
+    else if (status === "scheduled") sql += ` AND status = 'scheduled'`;
+    else if (status === "all") sql += ` AND status IN ('ready','scheduled','sent','dismissed')`;
+    else sql += ` AND status = 'ready'`;
+    sql += ` ORDER BY followup_due_at ASC, id ASC LIMIT 80`;
+    const rows = await c.env.DB.prepare(sql).all();
+    return c.json({ items: rows.results || [] });
+  }
+);
+
+api.post(
+  "/proposals/sent",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    const user = c.get("user");
+    const body = await c.req.json<{
+      customer_name?: string | null;
+      job_address?: string | null;
+      title?: string | null;
+      notes?: string | null;
+      sent_at?: string | null;
+    }>();
+    const { stampProposalSent } = await import("./proposalFollowups");
+    const result = await stampProposalSent(c.env.DB, {
+      customer_name: body.customer_name,
+      job_address: body.job_address,
+      title: body.title,
+      notes: body.notes,
+      sent_at: body.sent_at,
+      created_by_user_id: user.id,
+    });
+    await writeAudit(
+      c.env.DB,
+      user,
+      "create",
+      "proposal_followup",
+      result.parent_id,
+      `Proposal sent stamped - follow-ups #${result.followups.join(",")}`
+    );
+    return c.json({ ok: true, ...result }, 201);
+  }
+);
+
+api.post(
+  "/proposals/followups/:id/ready-action",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    const user = c.get("user");
+    const id = Number(c.req.param("id"));
+    const body = await c.req.json<{ action?: "mark_sent" | "dismiss"; draft_body?: string }>();
+    const action = body.action;
+    if (action !== "mark_sent" && action !== "dismiss") {
+      return c.json({ error: "action must be mark_sent or dismiss" }, 400);
+    }
+    const { ensureProposalFollowupTables } = await import("./proposalFollowups");
+    await ensureProposalFollowupTables(c.env.DB);
+    const before = await c.env.DB.prepare(`SELECT * FROM proposal_followups WHERE id = ?`)
+      .bind(id)
+      .first<{ id: number; status: string; draft_body: string | null }>();
+    if (!before) return c.json({ error: "Not found" }, 404);
+    if (before.status !== "ready" && before.status !== "scheduled") {
+      return c.json({ error: "Only ready/scheduled follow-ups can be updated" }, 400);
+    }
+    const nextStatus = action === "mark_sent" ? "sent" : "dismissed";
+    const draft =
+      body.draft_body != null ? String(body.draft_body).trim() || null : before.draft_body;
+    await c.env.DB.prepare(
+      `UPDATE proposal_followups
+       SET status = ?, draft_body = COALESCE(?, draft_body), updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(nextStatus, draft, id)
+      .run();
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "proposal_followup",
+      id,
+      `${nextStatus} (manual - no auto email)`
+    );
+    return c.json({ ok: true, id, status: nextStatus });
+  }
+);
+
 api.get("/handbook", async (c) => {
   const user = c.get("user");
   try {
@@ -7531,7 +8856,7 @@ api.post("/handbook", requireRoles(["admin", "office", "supervisor"]), async (c)
       (all.results || []).map((u) => u.id).filter((id) => id !== user.id),
       "handbook_new",
       "New employee handbook",
-      `${title}${version ? ` (${version})` : ""} — please read and acknowledge in the app.`,
+      `${title}${version ? ` (${version})` : ""} â€” please read and acknowledge in the app.`,
       { type: "handbook", id }
     );
     await writeAudit(c.env.DB, user, "create", "handbook", id, `Uploaded handbook ${title}`);
@@ -7563,7 +8888,7 @@ api.post("/handbook/acknowledge", async (c) => {
     }
     if (!bookId) return c.json({ error: "No handbook to acknowledge" }, 400);
 
-    // Already acknowledged — leave first stamp (no re-ack / no self-clear)
+    // Already acknowledged â€” leave first stamp (no re-ack / no self-clear)
     const existing = await c.env.DB.prepare(
       `SELECT acknowledged_at, ack_name FROM handbook_acknowledgments
        WHERE handbook_id = ? AND user_id = ?`
@@ -7597,7 +8922,7 @@ api.post("/handbook/acknowledge", async (c) => {
       "update",
       "handbook",
       bookId,
-      `Acknowledged handbook as “${name}”`
+      `Acknowledged handbook as â€œ${name}â€`
     );
     return c.json({ ok: true, already: false });
   } catch (e) {
@@ -7605,7 +8930,7 @@ api.post("/handbook/acknowledge", async (c) => {
   }
 });
 
-// ——— New hire onboarding blanks (official W-4 / I-9, admin-replaceable) ———
+// â€”â€”â€” New hire onboarding blanks (official W-4 / I-9, admin-replaceable) â€”â€”â€”
 const ONBOARDING_DEFAULTS: Record<
   "w4" | "i9",
   { version_label: string; static_path: string }
@@ -7795,7 +9120,7 @@ api.delete(
   }
 );
 
-// ——— SMS (Twilio) ———
+// â€”â€”â€” SMS (Twilio) â€”â€”â€”
 api.get("/sms/status", async (c) => {
   const me = c.get("user");
   const shop = await getSetting(c.env.DB, "shop_sms_phone", "");
@@ -7818,7 +9143,7 @@ api.get("/sms/status", async (c) => {
   });
 });
 
-/** Shop line for driver texts / emergency SMS — admin, office, or mechanic can update */
+/** Shop line for driver texts / emergency SMS â€” admin, office, or mechanic can update */
 api.put("/sms/shop-phone", requireRoles(["admin", "office", "mechanic", "supervisor"] as Role[]), async (c) => {
   const body = await c.req.json<{ phone?: string }>();
   const phone = (body.phone || "").trim();
@@ -7988,7 +9313,7 @@ api.get("/sms/contacts", async (c) => {
   });
 });
 
-/** Manual “Send a text” from Settings — admin only. Automated alerts still use sendSms(). */
+/** Manual â€œSend a textâ€ from Settings â€” admin only. Automated alerts still use sendSms(). */
 api.post("/sms/send", async (c) => {
   const me = c.get("user");
   if (me.role !== "admin") {
@@ -8163,7 +9488,7 @@ api.post(
   }
 );
 
-/** Admin: run evening assignment poll once (snapshot diff → SMS if after 4pm CT). */
+/** Admin: run evening assignment poll once (snapshot diff â†’ SMS if after 4pm CT). */
 api.post(
   "/sms/assignment-poll",
   requireRoles(["admin"] as Role[]),
@@ -8175,7 +9500,7 @@ api.post(
 
 /**
  * Admin: verify Messaging Service sender pool + A2P campaign link using Worker Twilio secrets.
- * Does not expose auth tokens. Used to confirm *6925 is on MG… and campaign CM… is linked.
+ * Does not expose auth tokens. Used to confirm *6925 is on MGâ€¦ and campaign CMâ€¦ is linked.
  */
 api.get("/sms/sender-check", requireRoles(["admin"] as Role[]), async (c) => {
   const accountSid = (c.env.TWILIO_ACCOUNT_SID || "").trim();
@@ -8192,7 +9517,7 @@ api.get("/sms/sender-check", requireRoles(["admin"] as Role[]), async (c) => {
   if (!mg) {
     return c.json({
       ok: false,
-      error: "TWILIO_MESSAGING_SERVICE_SID is empty — sends would use From fallback",
+      error: "TWILIO_MESSAGING_SERVICE_SID is empty â€” sends would use From fallback",
       from_fallback_last4: fromFallback.replace(/\D/g, "").slice(-4) || null,
     }, 503);
   }
@@ -8268,7 +9593,7 @@ api.get("/sms/sender-check", requireRoles(["admin"] as Role[]), async (c) => {
   });
 });
 
-/** Recent SMS attempts — admin / office / mechanic for troubleshooting */
+/** Recent SMS attempts â€” admin / office / mechanic for troubleshooting */
 api.get("/sms/log", requireRoles(["admin", "office", "mechanic", "supervisor"] as Role[]), async (c) => {
   const limit = Math.min(100, Math.max(10, Number(c.req.query("limit") || "40")));
   const refresh = c.req.query("refresh") === "1" || c.req.query("refresh") === "true";
@@ -8294,7 +9619,7 @@ api.get("/sms/log", requireRoles(["admin", "office", "mechanic", "supervisor"] a
       }>();
     let log = rows.results || [];
 
-    // Optionally ask Twilio for final delivery on recent SIDs (queued/sent ≠ on the phone)
+    // Optionally ask Twilio for final delivery on recent SIDs (queued/sent â‰  on the phone)
     if (refresh && smsConfigured(c.env)) {
       const toCheck = log
         .filter(
@@ -8335,7 +9660,7 @@ api.get("/sms/log", requireRoles(["admin", "office", "mechanic", "supervisor"] a
     })();
     const messagingService = (c.env.TWILIO_MESSAGING_SERVICE_SID || "").trim();
     const messagingMasked = messagingService
-      ? `${messagingService.slice(0, 4)}…${messagingService.slice(-4)}`
+      ? `${messagingService.slice(0, 4)}â€¦${messagingService.slice(-4)}`
       : null;
 
     return c.json({
@@ -8350,7 +9675,7 @@ api.get("/sms/log", requireRoles(["admin", "office", "mechanic", "supervisor"] a
   }
 });
 
-/** Refresh one SMS row’s delivery status from Twilio by log id or message SID */
+/** Refresh one SMS rowâ€™s delivery status from Twilio by log id or message SID */
 api.post("/sms/refresh-status", requireRoles(["admin", "office", "mechanic", "supervisor"] as Role[]), async (c) => {
   const body = await c.req.json<{ id?: number; sid?: string }>().catch(() => ({} as { id?: number; sid?: string }));
   let sid = (body.sid || "").trim();
@@ -8472,7 +9797,9 @@ api.post("/inspections", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
     const fails = Object.entries(body.checklist || {})
       .filter(([, v]) => v === "fail" || v === "attention")
       .map(([k]) => k);
-    const title = `Weekly check issue — ${fails.slice(0, 3).join(", ") || body.notes?.slice(0, 40) || "see notes"}`;
+    const title = toAsciiUiText(
+      `Weekly check - ${fails.slice(0, 3).join(", ") || body.notes?.slice(0, 40) || "see notes"}`
+    );
     const issue = await c.env.DB.prepare(
       `INSERT INTO vehicle_issues (vehicle_id, reported_by_user_id, severity, title, description, status)
        VALUES (?, ?, 'high', ?, ?, 'open')`
@@ -8480,28 +9807,30 @@ api.post("/inspections", requireRoles(ROLE_PERMS.reportIssues), async (c) => {
       .bind(
         body.vehicle_id,
         user.id,
-        title,
-        body.notes || JSON.stringify(body.checklist || {})
+        toAsciiUiText(title),
+        toAsciiUiText(body.notes || JSON.stringify(body.checklist || {}))
       )
       .run();
     createdIssueId = issue.meta.last_row_id as number;
   } else if (shouldOpenIssue && body.overall_status === "pass_with_notes") {
-    // Needs-repair / attention — always open a shop ticket (notes preferred)
+    // Needs-repair / attention â€” always open a shop ticket (notes preferred)
     const note = (body.notes || "").trim();
     const badItems = Object.entries(body.checklist || {})
       .filter(([, v]) => v === "fail" || v === "attention")
       .map(([k]) => k.replace(/_/g, " "));
     const desc =
       note ||
-      (badItems.length ? `Items needing attention: ${badItems.join(", ")}` : "Weekly check — needs repair");
-    const title = note
-      ? `Weekly check — ${note.slice(0, 48)}${note.length > 48 ? "…" : ""}`
-      : `Weekly check — needs repair${badItems.length ? ` (${badItems.slice(0, 2).join(", ")})` : ""}`;
+      (badItems.length ? `Items needing attention: ${badItems.join(", ")}` : "Weekly check - needs repair");
+    const title = toAsciiUiText(
+      note
+        ? `Weekly check - ${note.slice(0, 48)}${note.length > 48 ? "..." : ""}`
+        : `Weekly check - needs repair${badItems.length ? ` (${badItems.slice(0, 2).join(", ")})` : ""}`
+    );
     const issue = await c.env.DB.prepare(
       `INSERT INTO vehicle_issues (vehicle_id, reported_by_user_id, severity, title, description, status)
        VALUES (?, ?, 'medium', ?, ?, 'open')`
     )
-      .bind(body.vehicle_id, user.id, title, desc)
+      .bind(body.vehicle_id, user.id, toAsciiUiText(title), toAsciiUiText(desc))
       .run();
     createdIssueId = issue.meta.last_row_id as number;
   }
@@ -8574,7 +9903,7 @@ api.get("/users", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   try {
     const rows = await c.env.DB.prepare(
       `SELECT u.id, u.email, u.username, u.display_name, u.role, u.employee_id, u.phone,
-              u.st_technician_id,
+              u.st_technician_id, IFNULL(u.is_warehouse, 0) AS is_warehouse,
               u.must_change_password, u.auth_provider, u.active, u.created_at,
               u.manager_user_id, m.display_name as manager_name,
               CASE WHEN u.password_hash IS NOT NULL AND TRIM(u.password_hash) != '' THEN 1 ELSE 0 END as has_password
@@ -8601,8 +9930,11 @@ api.get("/users", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
       const id = Number(u.id);
       const exp = inviteByUser.get(id) || null;
       const hasPw = Number(u.has_password) === 1;
+      const isWh = Number(u.is_warehouse) === 1 || u.role === "warehouse";
       return {
         ...u,
+        role: isWh ? "warehouse" : u.role,
+        is_warehouse: isWh ? 1 : 0,
         has_password: hasPw ? 1 : 0,
         invite_pending: exp || (!hasPw && Number(u.must_change_password) === 1) ? 1 : 0,
         invite_expires_at: exp,
@@ -8803,7 +10135,7 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
         if (!val) return c.json({ error: "Username cannot be empty" }, 400);
         if (!/^[a-z0-9._-]{2,40}$/.test(val)) {
           return c.json(
-            { error: "Username: 2–40 chars, letters/numbers . _ - only" },
+            { error: "Username: 2â€“40 chars, letters/numbers . _ - only" },
             400
           );
         }
@@ -8879,6 +10211,24 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
   if (body.password || body.active === false || body.active === 0) {
     await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
   }
+  const wasActive = Number((before as { active?: number }).active) !== 0;
+  const willBeActive = body.active === undefined ? wasActive : Boolean(body.active);
+  if (wasActive && !willBeActive) {
+    try {
+      await releasePersonalGearForUser(c.env.DB, id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such table|no such column/i.test(msg)) throw e;
+    }
+  }
+  if (!wasActive && willBeActive) {
+    try {
+      await restorePersonalTools(c.env.DB, id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/no such table|no such column/i.test(msg)) throw e;
+    }
+  }
   const after = await c.env.DB.prepare(
     `SELECT id, email, username, display_name, role, employee_id, phone,
             must_change_password, auth_provider, active, created_at FROM users WHERE id = ?`
@@ -8894,7 +10244,7 @@ api.patch("/users/:id", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
     body.password
       ? "Password reset by admin"
       : newUsername
-        ? `Updated user (username → @${newUsername})`
+        ? `Updated user (username â†’ @${newUsername})`
         : "Updated user",
     before,
     after
@@ -8925,7 +10275,7 @@ api.post("/users/:id/invite", requireRoles(ROLE_PERMS.manageUsers), async (c) =>
   const vals: unknown[] = [];
   if (wantUser && wantUser !== username) {
     if (!/^[a-z0-9._-]{2,40}$/.test(wantUser)) {
-      return c.json({ error: "Username: 2–40 chars, letters/numbers . _ - only" }, 400);
+      return c.json({ error: "Username: 2â€“40 chars, letters/numbers . _ - only" }, 400);
     }
     const clash = await c.env.DB.prepare(
       `SELECT id FROM users WHERE lower(username) = ? AND id != ?`
@@ -9061,8 +10411,8 @@ api.post("/users/:id/reset-password", requireRoles(ROLE_PERMS.manageUsers), asyn
   return c.json({ ok: true, temporary_password: password });
 });
 
-// Warehouse cameras — in-app snapshots via NVR ISAPI (no user login to NVR)
-// Office / warehouse / admin only — not field drivers
+// Warehouse cameras â€” in-app snapshots via NVR ISAPI (no user login to NVR)
+// Office / warehouse / admin only â€” not field drivers
 function canViewWarehouseCameras(u: { role: string; is_warehouse?: boolean }): boolean {
   if (u.is_warehouse) return true;
   return (
@@ -9085,7 +10435,7 @@ api.get("/warehouse-cameras/config", async (c) => {
     configured: nvr.configured,
     nvr_base_url: nvr.baseUrl || "",
     nvr_user: nvr.user,
-    /** Password never returned — only whether set */
+    /** Password never returned â€” only whether set */
     nvr_pass_set: Boolean(nvr.pass),
     /** Legacy NVR-only list (kept for older clients) */
     channels: nvr.channels,
@@ -9154,7 +10504,158 @@ api.put(
   }
 );
 
-/** JPEG snapshot — key is nvr channel id or wyze:id / bare wyze id */
+/**
+ * Absolute LIVE MJPEG URL for NVR or Wyze (shop tunnel).
+ * Worker does NOT stream the endless body â€” client hits the tunnel URL directly.
+ */
+api.get("/warehouse-cameras/live-url/:cameraKey", async (c) => {
+  const me = c.get("user");
+  if (!canViewWarehouseCameras(me)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const rawKey = decodeURIComponent(c.req.param("cameraKey") || "");
+  const {
+    resolveNvrConfig,
+    parseCameraKey,
+    fetchWyzeLiveUrl,
+    fetchNvrLiveUrl,
+  } = await import("./nvrProxy");
+  const parsed = parseCameraKey(rawKey);
+  if (!parsed) {
+    return c.json({ error: "Invalid camera key" }, 400);
+  }
+  if (parsed.source !== "wyze" && parsed.source !== "nvr") {
+    return c.json({ error: "Live stream is only available for NVR and Wyze cameras" }, 400);
+  }
+  const cfg = await resolveNvrConfig(c.env, c.env.DB);
+  if (!cfg.configured || !cfg.baseUrl) {
+    return c.json(
+      {
+        error:
+          "Cameras not configured yet. Contact admin to set up the NVR tunnel.",
+      },
+      503
+    );
+  }
+  if (/192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl)) {
+    return c.json(
+      {
+        error:
+          "NVR is only on shop Wiâ€‘Fi. Cloud cannot reach it â€” the always-on tunnel on the shop PC must be running.",
+      },
+      503
+    );
+  }
+  if (parsed.source === "nvr") {
+    const ch = Number(parsed.id);
+    if (!Number.isFinite(ch) || ch < 1 || ch > 64) {
+      return c.json({ error: "Invalid NVR channel" }, 400);
+    }
+    const url = fetchNvrLiveUrl(cfg.baseUrl, ch);
+    // Quick probe â€” old shop proxy 404s /fieldapp/nvr/live (falls through to NVR HTML)
+    const probe = await probeLiveEndpoint(url);
+    if (!probe.ok) {
+      return c.json({ error: probe.error, url }, probe.status || 502);
+    }
+    return c.json({ ok: true, url, channel: ch, key: `nvr:${ch}`, source: "nvr" });
+  }
+  const url = fetchWyzeLiveUrl(cfg.baseUrl, parsed.id);
+  const probe = await probeLiveEndpoint(url);
+  if (!probe.ok) {
+    return c.json({ error: probe.error, url }, probe.status || 502);
+  }
+  return c.json({
+    ok: true,
+    url,
+    cam: parsed.id,
+    key: `wyze:${parsed.id}`,
+    source: "wyze",
+  });
+});
+
+/** Peek live MJPEG â€” confirm shop proxy route exists before handing URL to the browser. */
+async function probeLiveEndpoint(
+  url: string
+): Promise<{ ok: true } | { ok: false; error: string; status?: number }> {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 8_000);
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "multipart/x-mixed-replace,image/jpeg,*/*",
+        "User-Agent": "FieldApp-LiveProbe/1.0",
+      },
+      signal: ac.signal,
+      redirect: "follow",
+    });
+    clearTimeout(t);
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (res.ok && (ct.includes("multipart") || ct.includes("image/jpeg"))) {
+      // Abort body â€” we only needed headers / first status
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      return { ok: true };
+    }
+    const text = await res.text().catch(() => "");
+    const head = text.replace(/\s+/g, " ").slice(0, 220);
+    if (
+      res.status === 404 ||
+      /Document Error|Access Error 404|Can't open URL/i.test(head)
+    ) {
+      return {
+        ok: false,
+        status: 503,
+        error:
+          "Shop camera proxy is outdated (live route missing). Run FIX-CAMERAS-NOW.bat (Admin) on the shop PC, then hard-refresh.",
+      };
+    }
+    if (res.status === 503 && /live busy/i.test(head)) {
+      return { ok: false, status: 503, error: "Live busy - close other live cameras and retry" };
+    }
+    if (res.status === 530 || /Tunnel error|Error 1033/i.test(head)) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Camera link is down (tunnel offline on shop PC).",
+      };
+    }
+    let msg = head;
+    try {
+      const j = JSON.parse(text) as { error?: string };
+      if (j.error) msg = j.error;
+    } catch {
+      /* keep */
+    }
+    return {
+      ok: false,
+      status: res.status >= 400 ? res.status : 502,
+      error: msg || `Live probe failed (${res.status})`,
+    };
+  } catch (e) {
+    const m = e instanceof Error ? e.message : "Live probe failed";
+    if (/abort|timeout|timed out/i.test(m)) {
+      return {
+        ok: false,
+        status: 504,
+        error: "Camera took too long to respond. Try again in a moment.",
+      };
+    }
+    if (/530|1033|tunnel/i.test(m)) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Camera link is down (tunnel offline on shop PC).",
+      };
+    }
+    return { ok: false, status: 502, error: m };
+  }
+}
+
+/** JPEG snapshot â€” key is nvr channel id or wyze:id / bare wyze id */
 api.get("/warehouse-cameras/snapshot/:cameraKey", async (c) => {
   const me = c.get("user");
   if (!canViewWarehouseCameras(me)) {
@@ -9185,7 +10686,7 @@ api.get("/warehouse-cameras/snapshot/:cameraKey", async (c) => {
     return c.json(
       {
         error:
-          "NVR is only on shop Wi‑Fi (192.168…). Cloud cannot reach it — the always-on tunnel on the shop PC must be running.",
+          "NVR is only on shop Wiâ€‘Fi (192.168â€¦). Cloud cannot reach it â€” the always-on tunnel on the shop PC must be running.",
       },
       503
     );
@@ -9228,7 +10729,7 @@ api.get("/warehouse-cameras/snapshot/:cameraKey", async (c) => {
   }
 });
 
-/** Search recorded segments for a channel + time range (ISO UTC) — legacy direct ISAPI */
+/** Search recorded segments for a channel + time range (ISO UTC) â€” legacy direct ISAPI */
 api.get("/warehouse-cameras/search", async (c) => {
   const me = c.get("user");
   if (!canViewWarehouseCameras(me)) {
@@ -9279,7 +10780,7 @@ api.get("/warehouse-cameras/search", async (c) => {
 });
 
 /**
- * Motion clips near a time — for emergency clip picker UI.
+ * Motion clips near a time â€” for emergency clip picker UI.
  * Uses shop media proxy (same search as playback), so list times match what plays.
  * Query: key=nvr:1|wyze:id (or channel / cam), around=ISO, padMin=60 (max 360)
  */
@@ -9437,7 +10938,7 @@ api.get("/warehouse-cameras/clip", async (c) => {
   }
 });
 
-/** Admin diagnostic — why live wall is blank */
+/** Admin diagnostic â€” why live wall is blank */
 api.get("/warehouse-cameras/diagnose", async (c) => {
   const me = c.get("user");
   if (!canViewWarehouseCameras(me)) {
@@ -9450,7 +10951,7 @@ api.get("/warehouse-cameras/diagnose", async (c) => {
   steps.push({
     ok: Boolean(cfg.baseUrl),
     label: "NVR URL saved",
-    detail: cfg.baseUrl || "Missing — open Setup and save a URL",
+    detail: cfg.baseUrl || "Missing â€” open Setup and save a URL",
   });
   steps.push({
     ok: Boolean(cfg.user),
@@ -9460,7 +10961,7 @@ api.get("/warehouse-cameras/diagnose", async (c) => {
   steps.push({
     ok: Boolean(cfg.pass),
     label: "NVR password saved",
-    detail: cfg.pass ? "Set" : "Missing — enter password in Setup",
+    detail: cfg.pass ? "Set" : "Missing â€” enter password in Setup",
   });
 
   const isLan = /192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost/i.test(cfg.baseUrl);
@@ -9468,9 +10969,9 @@ api.get("/warehouse-cameras/diagnose", async (c) => {
     ok: !isLan && Boolean(cfg.baseUrl),
     label: "URL reachable from cloud (not only shop LAN)",
     detail: isLan
-      ? `${cfg.baseUrl} is private. Use router port forwarding to the NVR (always on — no PC), then set URL to https://YOUR.PUBLIC.IP:PORT (e.g. :8443).`
+      ? `${cfg.baseUrl} is private. Use router port forwarding to the NVR (always on â€” no PC), then set URL to https://YOUR.PUBLIC.IP:PORT (e.g. :8443).`
       : cfg.baseUrl
-        ? "Looks public — will try a test snapshot"
+        ? "Looks public â€” will try a test snapshot"
         : "No URL",
   });
 
@@ -9514,7 +11015,7 @@ api.get("/warehouse-cameras/diagnose", async (c) => {
     steps.push({
       ok: false,
       label: "Test snapshot camera 1",
-      detail: "Skipped — fix public URL first",
+      detail: "Skipped â€” fix public URL first",
     });
   }
 
@@ -9529,21 +11030,46 @@ api.get("/warehouse-cameras/diagnose", async (c) => {
 });
 
 // Settings
+const SENSITIVE_SETTING_RE = /(secret|token|pass|password|api_key|apikey|auth)/i;
+
 api.get("/settings", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   const rows = await c.env.DB.prepare("SELECT key, value FROM settings").all();
   const map: Record<string, string> = {};
+  const redacted: string[] = [];
   for (const r of rows.results as { key: string; value: string }[]) {
+    if (SENSITIVE_SETTING_RE.test(r.key)) {
+      redacted.push(r.key);
+      continue;
+    }
     map[r.key] = r.value;
   }
-  return c.json({ settings: map });
+  return c.json({ settings: map, redacted_keys: redacted });
 });
 
 api.put("/settings", requireRoles(ROLE_PERMS.manageSettings), async (c) => {
   const body = await c.req.json<Record<string, string>>();
+  const written: string[] = [];
+  const sensitiveNames: string[] = [];
   for (const [k, v] of Object.entries(body)) {
-    await setSetting(c.env.DB, k, String(v));
+    if (k === "st_token_cache") continue;
+    const value = String(v);
+    if (SENSITIVE_SETTING_RE.test(k)) {
+      if (!value.trim() || value.trim() === "***") continue;
+      sensitiveNames.push(k);
+    }
+    await setSetting(c.env.DB, k, value);
+    written.push(k);
   }
-  await writeAudit(c.env.DB, c.get("user"), "update", "settings", null, "Updated settings", null, body);
+  await writeAudit(
+    c.env.DB,
+    c.get("user"),
+    "update",
+    "settings",
+    null,
+    "Updated settings",
+    null,
+    { keys: written, sensitive_keys: sensitiveNames }
+  );
   return c.json({ ok: true });
 });
 
@@ -9551,11 +11077,15 @@ api.put("/settings", requireRoles(ROLE_PERMS.manageSettings), async (c) => {
 api.get("/audit", requireRoles(ROLE_PERMS.viewAudit), async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200`
-  ).all();
-  return c.json({ logs: rows.results });
+  ).all<Record<string, unknown>>();
+  const logs = (rows.results || []).map((row) => ({
+    ...row,
+    summary: repairUtf8Mojibake(typeof row.summary === "string" ? row.summary : ""),
+  }));
+  return c.json({ logs });
 });
 
-// ——— Inventory (admin/office beta — not shown to drivers until ready) ———
+// â€”â€”â€” Inventory (admin/office beta â€” not shown to drivers until ready) â€”â€”â€”
 
 api.get("/inventory/locations", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
   try {
@@ -9596,7 +11126,7 @@ api.get("/inventory/locations", requireRoles(ROLE_PERMS.viewInventory), async (c
   }
 });
 
-/** Create a named warehouse section (shelf, overhead, attic rack…). */
+/** Create a named warehouse section (shelf, overhead, attic rackâ€¦). */
 api.post("/inventory/locations", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
   const body = await c.req.json<{
     name?: string;
@@ -9780,13 +11310,691 @@ function appendPartTokenFilters(
   return sql;
 }
 
+// --- Azali Homes new-house setup (RNC). ST writes only when the flag is on. ---
+api.get("/new-construction/access", async (c) => {
+  const user = c.get("user");
+  const { canUseAzaliRnc, loadAzaliSettings } = await import("./azaliRnc");
+  if (!canUseAzaliRnc(user)) return c.json({ allowed: false }, 403);
+  const settings = await loadAzaliSettings(c.env.DB);
+  const { millerNcBookEnabled } = await import("./millerBookJob");
+  const nc_book_enabled = await millerNcBookEnabled(c.env.DB);
+  return c.json({ allowed: true, ...settings, nc_book_enabled });
+});
+
+api.post("/new-construction/ids/read", requireRoles(["admin"] as Role[]), async (c) => {
+  const { readRncIds } = await import("./azaliRnc");
+  return c.json(await readRncIds(c.env, c.env.DB));
+});
+
+api.put("/new-construction/settings", requireRoles(["admin"] as Role[]), async (c) => {
+  const body = await c.req.json<{
+    customer_id?: string;
+    project_type_id?: string;
+    status_id?: string;
+    business_unit_id?: string;
+    project_manager_id?: string;
+    tag_id?: string;
+    payroll_id?: string;
+    groups?: string[];
+    single_template?: string;
+    two_template?: string;
+  }>();
+  const { setSetting, getSetting } = await import("./audit");
+  const keys = await import("../src/lib/azaliRnc");
+  await setSetting(c.env.DB, keys.CUSTOMER_ID_KEY, String(body.customer_id || keys.DEFAULT_CUSTOMER_ID).trim());
+  await setSetting(c.env.DB, keys.PROJECT_TYPE_KEY, String(body.project_type_id || "").trim());
+  await setSetting(c.env.DB, keys.PROJECT_STATUS_KEY, String(body.status_id || "").trim());
+  await setSetting(c.env.DB, keys.BUSINESS_UNIT_KEY, String(body.business_unit_id || "").trim());
+  await setSetting(c.env.DB, keys.PROJECT_MANAGER_KEY, String(body.project_manager_id || "").trim());
+  await setSetting(c.env.DB, keys.TAG_KEY, String(body.tag_id || "").trim());
+  await setSetting(c.env.DB, keys.PAYROLL_KEY, String(body.payroll_id || "").trim());
+  if (typeof body.single_template === "string") {
+    await setSetting(c.env.DB, keys.TEMPLATE_SINGLE_KEY, body.single_template);
+  }
+  if (typeof body.two_template === "string") {
+    await setSetting(c.env.DB, keys.TEMPLATE_TWO_KEY, body.two_template);
+  }
+  if (Array.isArray(body.groups)) {
+    let prev: string[] = [];
+    try {
+      const raw = JSON.parse(await getSetting(c.env.DB, keys.GROUPS_KEY, "[]"));
+      if (Array.isArray(raw)) prev = raw.map((x) => String(x));
+    } catch {
+      prev = [];
+    }
+    const merged = Array.from(
+      new Set([...prev, ...body.groups].map((s) => String(s).trim()).filter(Boolean))
+    );
+    await setSetting(c.env.DB, keys.GROUPS_KEY, JSON.stringify(merged));
+  }
+  return c.json({ ok: true });
+});
+
+api.put("/new-construction/flag", requireRoles(["admin"] as Role[]), async (c) => {
+  const body = await c.req.json<{ enabled?: boolean }>();
+  const { setSetting } = await import("./audit");
+  const { FLAG_KEY } = await import("../src/lib/azaliRnc");
+  await setSetting(c.env.DB, FLAG_KEY, body.enabled ? "true" : "false");
+  return c.json({ ok: true, enabled: Boolean(body.enabled) });
+});
+
+api.post("/new-construction/estimate-check", async (c) => {
+  const user = c.get("user");
+  const { canUseAzaliRnc, checkEstimate, notifyNotApproved } = await import("./azaliRnc");
+  if (!canUseAzaliRnc(user)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{ estimate_no?: string }>();
+  const estimateNo = String(body.estimate_no || "").trim();
+  if (!estimateNo) return c.json({ error: "Estimate number is empty" }, 400);
+  const result = await checkEstimate(c.env, c.env.DB, estimateNo);
+  if (result.found && !result.approved) {
+    try {
+      await notifyNotApproved(c.env.DB, user, estimateNo, result.status);
+    } catch {
+      /* in-app only */
+    }
+  }
+  return c.json(result);
+});
+
+api.post("/new-construction/create", async (c) => {
+  const user = c.get("user");
+  const { canUseAzaliRnc, createAzaliInSt, azaliCreateEnabled } = await import("./azaliRnc");
+  if (!canUseAzaliRnc(user)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{
+    street?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    group?: string;
+    stories?: "single" | "two";
+    tons1?: string;
+    loc1?: string;
+    tons2?: string;
+    loc2?: string;
+    fans?: number;
+    brand?: string;
+    contract?: string;
+    notes?: string;
+    project_name?: string;
+    description?: string;
+    start_date?: string;
+    target_date?: string;
+    estimate_no?: string;
+    confirm?: boolean;
+  }>();
+  if (!(await azaliCreateEnabled(c.env.DB))) {
+    return c.json({ error: "ServiceTitan create is off. Copy the name and description." }, 403);
+  }
+  const result = await createAzaliInSt(c.env, c.env.DB, user, {
+    street: String(body.street || ""),
+    city: String(body.city || ""),
+    state: String(body.state || "TX"),
+    zip: String(body.zip || ""),
+    group: String(body.group || ""),
+    stories: body.stories === "two" ? "two" : "single",
+    tons1: String(body.tons1 || ""),
+    loc1: String(body.loc1 || ""),
+    tons2: String(body.tons2 || ""),
+    loc2: String(body.loc2 || ""),
+    fans: Number(body.fans),
+    brand: String(body.brand || ""),
+    contract: String(body.contract || ""),
+    notes: String(body.notes || ""),
+    project_name: String(body.project_name || ""),
+    description: String(body.description || ""),
+    start_date: String(body.start_date || ""),
+    target_date: String(body.target_date || ""),
+    estimate_no: String(body.estimate_no || ""),
+    confirm: body.confirm === true,
+  });
+  const status = Number(result.status) || (result.ok ? 200 : 400);
+  return c.json(result, status as 200);
+});
+
+// --- Repair part finder (serial) TEST stub - PART_FINDER_V1 ---
+api.get("/part-finder/access", async (c) => {
+  const user = c.get("user");
+  const {
+    canUsePartFinder,
+    partFinderV1Enabled,
+    PART_FINDER_VENDORS,
+    ensurePartFinderTables,
+  } = await import("./partFinder");
+  await ensurePartFinderTables(c.env.DB);
+  const flag = await partFinderV1Enabled(c.env.DB);
+  const allowed = await canUsePartFinder(c.env.DB, user);
+  return c.json({
+    allowed,
+    flag_enabled: flag,
+    label: "Repair part (serial)",
+    stub_mode: true,
+    vendors: Object.values(PART_FINDER_VENDORS).map((v) => ({
+      brand: v.brand,
+      label: v.label,
+      finderUrl: v.finderUrl,
+    })),
+  });
+});
+
+api.put("/part-finder/flag", requireRoles(["admin"] as Role[]), async (c) => {
+  const body = await c.req.json<{ enabled?: boolean }>();
+  const { setPartFinderV1Enabled } = await import("./partFinder");
+  await setPartFinderV1Enabled(c.env.DB, Boolean(body.enabled));
+  return c.json({ ok: true, enabled: Boolean(body.enabled) });
+});
+
+api.post("/part-finder/lookup", async (c) => {
+  const user = c.get("user");
+  const { canUsePartFinder, ensurePartFinderTables, parseBrand, parseFailedComponents, stubLookup } =
+    await import("./partFinder");
+  await ensurePartFinderTables(c.env.DB);
+  if (!(await canUsePartFinder(c.env.DB, user))) {
+    return c.json({ error: "Repair part finder is not enabled for your role" }, 403);
+  }
+  const body = await c.req.json<{
+    serial?: string;
+    brand?: string;
+    failed_components?: unknown;
+    need_text?: string | null;
+    failed_other_text?: string | null;
+  }>();
+  const serial = String(body.serial || "").trim();
+  if (!serial) return c.json({ error: "Serial is required" }, 400);
+  const brand = parseBrand(body.brand);
+  if (!brand) return c.json({ error: "Brand required: lennox | daikin | carrier | other" }, 400);
+  const need = String(body.need_text || body.failed_other_text || "").trim();
+  const failed = parseFailedComponents(body.failed_components);
+  if (brand !== "other" && !failed && need.length < 3) {
+    return c.json({ error: "Say what you need or tap what failed" }, 400);
+  }
+  return c.json(stubLookup({ serial, brand, failed: failed || [], needText: need }));
+});
+
+api.post("/part-finder/order-request", async (c) => {
+  const user = c.get("user");
+  const { canUsePartFinder, parseBrand, parseFailedComponents, createPartFinderOrderRequest } =
+    await import("./partFinder");
+  if (!(await canUsePartFinder(c.env.DB, user))) {
+    return c.json({ error: "Repair part finder is not enabled for your role" }, 403);
+  }
+  const body = await c.req.json<{
+    serial?: string;
+    brand?: string;
+    failed_components?: unknown;
+    need_text?: string | null;
+    failed_other_text?: string | null;
+    job_id?: string | null;
+    job_number?: string | null;
+    job_address?: string;
+    fulfillment_preference?: string | null;
+    lines?: unknown;
+    note?: string | null;
+    needs_install?: boolean | null;
+    no_cool?: boolean | null;
+  }>();
+  const brand = parseBrand(body.brand);
+  if (!brand) return c.json({ error: "Brand required" }, 400);
+  const need = String(body.need_text || body.failed_other_text || body.note || "").trim();
+  const failed = parseFailedComponents(body.failed_components);
+  if (brand !== "other" && !failed && need.length < 3 && !(Array.isArray(body.lines) && body.lines.length)) {
+    return c.json({ error: "Say what you need or tap what failed" }, 400);
+  }
+  if (!Array.isArray(body.lines)) {
+    return c.json({ error: "Select at least one part line" }, 400);
+  }
+  try {
+    const result = await createPartFinderOrderRequest(c.env.DB, user, {
+      serial: String(body.serial || ""),
+      brand,
+      failed_components: failed || ["other"],
+      failed_other_text: need || null,
+      job_id: body.job_id,
+      job_number: body.job_number,
+      job_address: String(body.job_address || ""),
+      fulfillment_preference: body.fulfillment_preference,
+      lines: body.lines as import("./partFinder").OrderLineIn[],
+      note: need || body.note || null,
+      needs_install: body.needs_install === true,
+      no_cool: body.no_cool === true,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ error: msg.slice(0, 200) }, 400);
+  }
+});
+
+api.get("/part-finder/requests", async (c) => {
+  const user = c.get("user");
+  const { canUsePartFinder, ensurePartFinderTables } = await import("./partFinder");
+  await ensurePartFinderTables(c.env.DB);
+  if (!(await canUsePartFinder(c.env.DB, user))) {
+    return c.json({ error: "Repair part finder is not enabled for your role" }, 403);
+  }
+  const isOffice =
+    user.role === "admin" ||
+    user.role === "warehouse" ||
+    user.role === "office" ||
+    user.role === "supervisor";
+  let rows: Record<string, unknown>[] = [];
+  try {
+    if (isOffice) {
+      const got = await c.env.DB.prepare(
+        `SELECT r.*, u.display_name as requested_by_name
+         FROM part_finder_requests r
+         JOIN users u ON u.id = r.user_id
+         WHERE r.status IN ('queued','in_review','ordered_manual')
+         ORDER BY r.created_at DESC LIMIT 50`
+      ).all();
+      rows = (got.results || []) as Record<string, unknown>[];
+    } else {
+      const got = await c.env.DB.prepare(
+        `SELECT r.*, u.display_name as requested_by_name
+         FROM part_finder_requests r
+         JOIN users u ON u.id = r.user_id
+         WHERE r.user_id = ?
+         ORDER BY r.created_at DESC LIMIT 30`
+      )
+        .bind(user.id)
+        .all();
+      rows = (got.results || []) as Record<string, unknown>[];
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ error: msg.slice(0, 120), requests: [] }, 500);
+  }
+  const out = [];
+  for (const r of rows) {
+    const lines = await c.env.DB.prepare(
+      `SELECT * FROM part_finder_request_lines WHERE request_id = ? ORDER BY id`
+    )
+      .bind(r.id)
+      .all();
+    out.push({ ...r, lines: lines.results || [] });
+  }
+  return c.json({ requests: out, stub_mode: true });
+});
+
+api.post("/part-finder/requests/:id/picked-up", async (c) => {
+  const user = c.get("user");
+  const { canUsePartFinder, markPartFinderPickedUp } = await import("./partFinder");
+  if (!(await canUsePartFinder(c.env.DB, user))) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const id = Number(c.req.param("id"));
+  try {
+    const result = await markPartFinderPickedUp(c.env.DB, user, id);
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const status = msg === "Not found" ? 404 : msg.startsWith("Not allowed") ? 403 : 400;
+    return c.json({ error: msg.slice(0, 200) }, status);
+  }
+});
+
+api.post("/part-finder/requests/:id/scheduled", async (c) => {
+  const user = c.get("user");
+  const { canUsePartFinder, markPartFinderScheduled } = await import("./partFinder");
+  if (!(await canUsePartFinder(c.env.DB, user))) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const id = Number(c.req.param("id"));
+  try {
+    const result = await markPartFinderScheduled(c.env.DB, user, id);
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const status = msg === "Not found" ? 404 : 400;
+    return c.json({ error: msg.slice(0, 200) }, status);
+  }
+});
+
+api.get("/inventory/stock-check/access", async (c) => {
+  const user = c.get("user");
+  const { canUseStockCheck, stockCheckTechsEnabled, stockCheckPreviewLabel } = await import(
+    "./stockCheck"
+  );
+  const techsEnabled = await stockCheckTechsEnabled(c.env.DB);
+  const allowed = await canUseStockCheck(c.env.DB, user);
+  return c.json({
+    allowed,
+    techs_enabled: techsEnabled,
+    label: stockCheckPreviewLabel(techsEnabled),
+    preview: user.role === "admin" && !techsEnabled,
+  });
+});
+
+api.put("/inventory/stock-check/techs", requireRoles(["admin"] as Role[]), async (c) => {
+  const body = await c.req.json<{ enabled?: boolean }>();
+  const { setStockCheckTechsEnabled } = await import("./stockCheck");
+  await setStockCheckTechsEnabled(c.env.DB, Boolean(body.enabled));
+  return c.json({ ok: true, techs_enabled: Boolean(body.enabled) });
+});
+
+api.get("/inventory/stock-check", async (c) => {
+  const user = c.get("user");
+  const { canUseStockCheck } = await import("./stockCheck");
+  if (!(await canUseStockCheck(c.env.DB, user))) {
+    return c.json({ error: "Part in stock is not enabled for your role" }, 403);
+  }
+  const q = (c.req.query("q") || "").trim();
+  if (q.length < 2) return c.json({ parts: [], q });
+  const tokens = partSearchTokens(q);
+  const limit = 25;
+  let sql = `SELECT p.id, p.code, p.name,
+      (SELECT COUNT(*) FROM stock_balances b WHERE b.part_id = p.id) AS balance_rows,
+      (SELECT SUM(b.qty) FROM stock_balances b WHERE b.part_id = p.id) AS qty_sum
+     FROM parts p
+     WHERE p.active = 1`;
+  const binds: unknown[] = [];
+  if (tokens.length) {
+    sql = appendPartTokenFilters(sql, binds, tokens, {
+      code: "lower(p.code)",
+      name: "lower(p.name)",
+      category: "lower(IFNULL(p.category,''))",
+      vendor: "lower(IFNULL(p.primary_vendor,''))",
+    });
+  }
+  const t0 = tokens[0] || q.toLowerCase();
+  sql += ` ORDER BY
+      CASE
+        WHEN lower(p.code) LIKE ? THEN 0
+        WHEN lower(p.name) LIKE ? THEN 1
+        ELSE 2
+      END, p.name
+      LIMIT ?`;
+  binds.push(`${t0}%`, `${t0}%`, limit);
+  let rows: Array<{
+    id: number;
+    code: string | null;
+    name: string | null;
+    balance_rows: number | null;
+    qty_sum: number | null;
+  }> = [];
+  try {
+    const got = await c.env.DB.prepare(sql).bind(...binds).all<{
+      id: number;
+      code: string | null;
+      name: string | null;
+      balance_rows: number | null;
+      qty_sum: number | null;
+    }>();
+    rows = got.results || [];
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ error: `Could not search parts: ${msg.slice(0, 120)}` }, 500);
+  }
+  const ids = rows.map((r) => r.id);
+  const locationsByPart = new Map<number, Array<{ name: string; qty: number }>>();
+  if (ids.length) {
+    try {
+      const ph = ids.map(() => "?").join(",");
+      const locs = await c.env.DB.prepare(
+        `SELECT b.part_id, l.name, b.qty
+         FROM stock_balances b
+         JOIN stock_locations l ON l.id = b.location_id
+         WHERE b.part_id IN (${ph})
+         ORDER BY l.name`
+      )
+        .bind(...ids)
+        .all<{ part_id: number; name: string; qty: number }>();
+      for (const loc of locs.results || []) {
+        const arr = locationsByPart.get(loc.part_id) || [];
+        arr.push({ name: loc.name, qty: Number(loc.qty) || 0 });
+        locationsByPart.set(loc.part_id, arr);
+      }
+    } catch {
+      /* locations optional */
+    }
+  }
+  const parts = rows.map((r) => {
+    const tracked = Number(r.balance_rows || 0) > 0;
+    const qty = tracked ? Number(r.qty_sum || 0) : null;
+    return {
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      qty_on_hand: qty,
+      qty_tracked: tracked,
+      locations: locationsByPart.get(r.id) || [],
+    };
+  });
+  return c.json({ q, parts });
+});
+
+function liveCountRole(role: string): boolean {
+  return role === "admin" || role === "warehouse";
+}
+
+function partsUsedRole(role: string): boolean {
+  return role === "admin" || role === "driver";
+}
+
+api.get("/inventory/live/locations", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await listLiveLocations(c.env.DB);
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/parts", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role) && !partsUsedRole(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const out = await searchLiveParts(c.env.DB, c.req.query("q") || "");
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/my-truck", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await myTrucks(c.env.DB, user);
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/count-lines", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await listCountLines(c.env.DB, Number(c.req.query("location_id") || 0));
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/count", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{
+    location_id?: number;
+    part_id?: number;
+    qty?: unknown;
+    section_id?: number | null;
+    move_home?: boolean;
+  }>();
+  const out = await saveCountLine(
+    c.env.DB,
+    user,
+    Number(body.location_id),
+    Number(body.part_id),
+    body.qty,
+    { sectionId: body.section_id, moveHome: body.move_home }
+  );
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/count/save", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{ location_id?: number }>();
+  const out = await markLocationLive(c.env.DB, user, Number(body.location_id));
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/used", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const ctype = c.req.header("content-type") || "";
+  try {
+    if (ctype.includes("multipart/form-data")) {
+      const form = await c.req.formData();
+      const file = form.get("file");
+      let photoKey: string | null = null;
+      if (file instanceof File && file.size > 0) {
+        photoKey = await saveWarrantyPhoto(c.env, file, "inventory-other");
+      }
+      const out = await postPartsUsed(c.env.DB, user, {
+        part_id: Number(form.get("part_id")) || null,
+        other_text: String(form.get("other_text") || ""),
+        qty: form.get("qty"),
+        job_ref: String(form.get("job_ref") || ""),
+        st_appointment_id: String(form.get("st_appointment_id") || ""),
+        vehicle_id: Number(form.get("vehicle_id")) || null,
+        photo_key: photoKey,
+        client_token: String(form.get("client_token") || ""),
+      });
+      return c.json(out.body, out.status as 200);
+    }
+    const body = await c.req.json<{
+      part_id?: number | null;
+      other_text?: string | null;
+      qty?: unknown;
+      job_ref?: string | null;
+      st_appointment_id?: string | null;
+      vehicle_id?: number | null;
+      photo_key?: string | null;
+      client_token?: string | null;
+    }>();
+    const out = await postPartsUsed(c.env.DB, user, body);
+    return c.json(out.body, out.status as 200);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not save parts used.";
+    return c.json({ error: msg }, 400);
+  }
+});
+
+api.get("/inventory/live/used", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role) && !liveCountRole(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const out = await listPartsUsed(c.env.DB, user, c.req.query("job_ref") || "");
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/used/:id/edit", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role) && !liveCountRole(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const body = await c.req.json<{ qty?: unknown }>();
+  const out = await editPartsUsed(c.env.DB, user, Number(c.req.param("id")), body.qty);
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/used/:id/void", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role) && !liveCountRole(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const out = await voidPartsUsed(c.env.DB, user, Number(c.req.param("id")));
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/needs-match", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await listNeedsMatch(c.env.DB);
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/used/:id/match", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{ part_id?: number }>();
+  const out = await matchPartsUsed(c.env.DB, user, Number(c.req.param("id")), Number(body.part_id));
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/restocks", async (c) => {
+  const user = c.get("user");
+  const mine = c.req.query("mine") === "1";
+  if (!mine && !liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  if (mine && !partsUsedRole(user.role) && !liveCountRole(user.role)) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const out = await listRestocks(c.env.DB, user, mine);
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/restocks/:id/pull", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{ line_id?: number; pulled?: boolean }>();
+  const out = await pullRestockLine(
+    c.env.DB,
+    user,
+    Number(c.req.param("id")),
+    Number(body.line_id),
+    Boolean(body.pulled)
+  );
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/restocks/:id/short", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{ line_id?: number; short_qty?: unknown }>();
+  const out = await shortRestockLine(
+    c.env.DB,
+    user,
+    Number(c.req.param("id")),
+    Number(body.line_id),
+    body.short_qty
+  );
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/restocks/:id/fill", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await fillRestock(c.env.DB, user, Number(c.req.param("id")));
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/restocks/:id/confirm", async (c) => {
+  const user = c.get("user");
+  if (!partsUsedRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await confirmRestock(c.env.DB, user, Number(c.req.param("id")));
+  return c.json(out.body, out.status as 200);
+});
+
+api.post("/inventory/live/adjust", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{
+    location_id?: number;
+    part_id?: number;
+    qty?: unknown;
+    reason?: string;
+    note?: string;
+  }>();
+  const out = await adjustLiveQty(c.env.DB, user, body);
+  return c.json(out.body, out.status as 200);
+});
+
+api.get("/inventory/live/report", async (c) => {
+  const user = c.get("user");
+  if (!liveCountRole(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const out = await liveReport(c.env.DB);
+  return c.json(out.body, out.status as 200);
+});
+
 api.get("/inventory/parts", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
   try {
-    // Do NOT call ensureStockLocations here — it was slowing every search.
+    // Do NOT call ensureStockLocations here â€” it was slowing every search.
     // Locations are ensured on /inventory/locations only.
     const q = (c.req.query("q") || "").trim();
     const tokens = partSearchTokens(q);
-    // Slim list — skip huge description_text so responses stay JSON and fast
+    // Slim list â€” skip huge description_text so responses stay JSON and fast
     const limit = Math.min(5000, Math.max(10, Number(c.req.query("limit") || "50")));
     // Correlated total_qty only evaluates for the LIMIT rows (faster than full balances GROUP BY)
     let sql = `SELECT p.id, p.external_st_id, p.code, p.name, p.category, p.cost, p.price,
@@ -9884,7 +12092,7 @@ api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInvent
          ORDER BY lower(trim(p.name)), lower(trim(p.code))`
       ).all();
     } catch {
-      // Migration 042 not applied — still list parts for printing
+      // Migration 042 not applied â€” still list parts for printing
       rows = await c.env.DB.prepare(
         `SELECT p.id, p.code, p.name, p.primary_vendor, NULL as linked_barcodes
          FROM parts p
@@ -9892,7 +12100,7 @@ api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInvent
          ORDER BY lower(trim(p.name)), lower(trim(p.code))`
       ).all();
     }
-    // Natural sort so "1/4…", "3/8…", "3/4 SOFT COPPER" order correctly for warehouse
+    // Natural sort so "1/4â€¦", "3/8â€¦", "3/4 SOFT COPPER" order correctly for warehouse
     const parts = (rows.results || [])
       .map((r) => ({
         id: r.id,
@@ -9901,7 +12109,7 @@ api.get("/inventory/parts/barcode-directory", requireRoles(ROLE_PERMS.viewInvent
         primary_vendor: r.primary_vendor,
         barcodes: r.linked_barcodes
           ? String(r.linked_barcodes)
-              .split(/\s*·\s*/)
+              .split(/\s*(?:\u00c2\u00b7|\u00b7)\s*/)
               .map((s) => s.trim())
               .filter(Boolean)
           : ([] as string[]),
@@ -9979,7 +12187,7 @@ api.get("/inventory/parts/lookup", async (c) => {
     if ((exact.results || []).length) {
       return c.json({ parts: exact.results || [], query: raw, tokens, matched: "code" });
     }
-    // Multi-token name/code search (e.g. "pvc 90" → PVC 3/4 90)
+    // Multi-token name/code search (e.g. "pvc 90" â†’ PVC 3/4 90)
     let sql = `SELECT id, code, name, image_url, primary_vendor, cost,
          COALESCE((SELECT SUM(b.qty) FROM stock_balances b WHERE b.part_id = parts.id), 0) as total_qty
        FROM parts WHERE active = 1`;
@@ -10018,15 +12226,15 @@ api.get("/inventory/parts/codes", requireRoles(ROLE_PERMS.viewInventory), async 
   }
 });
 
-// ——— ServiceTitan API (admin) ———
+// â€”â€”â€” ServiceTitan API (admin) â€”â€”â€”
 
 /**
  * Zero-charge monthly counts from ServiceTitan (Follow-up Visit + Warranty Service only).
- * Tech → own counts only. Admin/office/supervisor (+ named managers) → full roster.
- * Client cannot request another tech's id — server scopes by session user.
+ * Tech â†’ own counts only. Admin/office/supervisor (+ named managers) â†’ full roster.
+ * Client cannot request another tech's id â€” server scopes by session user.
  */
 /**
- * Studio SSO handoff — logged-in Field App users who may open Studio get a
+ * Studio SSO handoff â€” logged-in Field App users who may open Studio get a
  * short-lived signed URL. Studio verifies STUDIO_SSO_SECRET and sets its cookie.
  */
 api.get("/studio/handoff", async (c) => {
@@ -10076,9 +12284,206 @@ api.get("/zero-charge", async (c) => {
   }
 });
 
-/** Ops Performance — admin / office / supervisor only. Read-only ST. */
+/** Parts Ready — materials for a scheduled job. No ST parts writes. No customer SMS. */
+api.get("/materials/tomorrow", async (c) => {
+  const user = c.get("user");
+  const { canReadMaterials, chicagoIso, listMaterialsForDate } = await import("./jobMaterials");
+  if (!canReadMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const date = (c.req.query("date") || chicagoIso(1)).slice(0, 10);
+  const { listRequests } = await import("./materialsRequests");
+  const requests = await listRequests(c.env.DB, date);
+  const lines = await listMaterialsForDate(c.env.DB, date);
+  const staged = lines.filter((l) => l.status === "staged").length;
+  const open = lines.filter((l) => l.status === "needed" || l.status === "tbd" || l.status === "ordered");
+  const openRequests = requests.filter((r) => r.status === "needed" || r.status === "ordered").length;
+  return c.json({
+    date,
+    requests,
+    lines,
+    open,
+    staged_count: staged,
+    open_count: open.length + openRequests,
+  });
+});
+
+api.get("/materials/flags", async (c) => {
+  const user = c.get("user");
+  const { canReadMaterials, openMaterialFlags } = await import("./jobMaterials");
+  if (!canReadMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const date = (c.req.query("date") || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ jobs: {} });
+  const jobs = await openMaterialFlags(c.env.DB, date);
+  const { requestFlags } = await import("./materialsRequests");
+  const extra = await requestFlags(c.env.DB, date);
+  for (const [id, slot] of Object.entries(extra.jobs)) {
+    jobs[id] = {
+      open: (jobs[id]?.open || 0) + slot.open,
+      staged: jobs[id]?.staged || 0,
+    };
+  }
+  return c.json({ date, jobs, addresses: extra.addresses });
+});
+
+api.get("/materials/job/:jobId", async (c) => {
+  const user = c.get("user");
+  const { canReadMaterials, listMaterialsForJob } = await import("./jobMaterials");
+  if (!canReadMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const jobId = decodeURIComponent(c.req.param("jobId") || "");
+  const lines = await listMaterialsForJob(c.env.DB, jobId);
+  return c.json({ job_id: jobId, lines });
+});
+
+api.post("/materials", async (c) => {
+  const user = c.get("user");
+  const { canEditMaterials, createMaterial } = await import("./jobMaterials");
+  if (!canEditMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{
+    job_id?: string;
+    job_number?: string | null;
+    customer_name?: string | null;
+    address?: string | null;
+    appointment_date?: string | null;
+    description?: string;
+    qty?: number | null;
+    status?: string | null;
+    note?: string | null;
+  }>();
+  const jobId = String(body.job_id || "").trim();
+  const description = String(body.description || "").trim();
+  if (!jobId) return c.json({ error: "job_id required" }, 400);
+  if (description.length < 2) return c.json({ error: "Description required" }, 400);
+  try {
+    const row = await createMaterial(c.env.DB, user, {
+      job_id: jobId,
+      job_number: body.job_number,
+      customer_name: body.customer_name,
+      address: body.address,
+      appointment_date: body.appointment_date,
+      description,
+      qty: body.qty,
+      status: body.status,
+      note: body.note,
+    });
+    return c.json({ ok: true, material: row }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Could not save" }, 400);
+  }
+});
+
+api.get("/materials/suggest-from-pickups", async (c) => {
+  const user = c.get("user");
+  const { canEditMaterials, suggestPickupsForAddress } = await import("./materialsRequests");
+  if (!canEditMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const address = (c.req.query("address") || "").trim();
+  const matches = await suggestPickupsForAddress(c.env.DB, address);
+  return c.json({ matches });
+});
+
+api.get("/materials/techs", async (c) => {
+  const user = c.get("user");
+  const { canEditMaterials, techOptions, ensureMaterialsRequests } = await import(
+    "./materialsRequests"
+  );
+  if (!canEditMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  await ensureMaterialsRequests(c.env.DB);
+  return c.json({ techs: await techOptions(c.env.DB) });
+});
+
+api.post("/materials/requests", async (c) => {
+  const user = c.get("user");
+  const { canEditMaterials, createRequest } = await import("./materialsRequests");
+  if (!canEditMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const body = await c.req.json<{
+    appointment_date?: string | null;
+    address_text?: string;
+    job_id?: string | null;
+    tech_user_ids?: number[];
+    lines?: Array<{ description: string; qty?: number | null }>;
+    note?: string | null;
+  }>();
+  const address = String(body.address_text || "").trim();
+  if (address.length < 4) return c.json({ error: "Address required" }, 400);
+  try {
+    const request = await createRequest(c.env.DB, user, {
+      appointment_date: body.appointment_date,
+      address_text: address,
+      job_id: body.job_id,
+      tech_user_ids: body.tech_user_ids || [],
+      lines: body.lines || [],
+      note: body.note,
+    });
+    try {
+      const { smsSpeedyPull } = await import("./materialsRequests");
+      await smsSpeedyPull(c.env, c.env.DB, request, user.id);
+    } catch {
+      /* in-app notify already sent */
+    }
+    return c.json({ ok: true, request }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "Could not save" }, 400);
+  }
+});
+
+api.get("/materials/requests/:id", async (c) => {
+  const user = c.get("user");
+  const { canReadMaterials, getRequest } = await import("./materialsRequests");
+  if (!canReadMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const row = await getRequest(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json({ error: "Not found" }, 404);
+  return c.json({ request: row });
+});
+
+api.post("/materials/requests/:id/parts-ready", async (c) => {
+  const user = c.get("user");
+  const { canOrderMaterials, markPartsReady } = await import("./materialsRequests");
+  if (!canOrderMaterials(user)) return c.json({ error: "Warehouse only" }, 403);
+  try {
+    const result = await markPartsReady(c.env.DB, user, Number(c.req.param("id")));
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not update";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
+api.post("/materials/requests/:id/order", async (c) => {
+  const user = c.get("user");
+  const { canOrderMaterials, markOrdered } = await import("./materialsRequests");
+  if (!canOrderMaterials(user)) return c.json({ error: "Only warehouse can mark Ordered" }, 403);
+  const body = await c.req.json<{ note?: string | null }>().catch(() => ({ note: null }));
+  try {
+    const request = await markOrdered(c.env.DB, user, Number(c.req.param("id")), body.note);
+    return c.json({ ok: true, request });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not update";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
+api.patch("/materials/:id", async (c) => {
+  const user = c.get("user");
+  const { canEditMaterials, patchMaterial } = await import("./jobMaterials");
+  if (!canEditMaterials(user)) return c.json({ error: "Not allowed" }, 403);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    description?: string;
+    qty?: number;
+    status?: string;
+    note?: string | null;
+    appointment_date?: string | null;
+  }>();
+  try {
+    const row = await patchMaterial(c.env.DB, user, id, body);
+    return c.json({ ok: true, material: row });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not update";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
+/** Ops Performance â€” admin / office / supervisor only. Read-only ST. */
 /**
- * Day Board Phase 1 — READ-ONLY ST appointments for a Chicago day.
+ * Day Board Phase 1 â€” READ-ONLY ST appointments for a Chicago day.
  * Office/admin/supervisor: all tech rows. Driver: own row only.
  * Never writes to ServiceTitan.
  */
@@ -10088,12 +12493,80 @@ api.get("/day-board", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
   const date = c.req.query("date");
+  const fresh = ["1", "true", "yes"].includes(
+    String(c.req.query("fresh") || "").trim().toLowerCase()
+  );
+  const dateKey =
+    (date || "").trim().slice(0, 10) ||
+    new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const view = dayBoardView(user);
+  const cacheKey = dayBoardCacheKey(dateKey, view, user.id);
+  const chicagoToday = new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/Chicago",
+  });
+  const keepMs =
+    dateKey === chicagoToday ? dayBoardCacheTodayMs() : dayBoardCacheStaleMs();
+
+  const serve = (payload: { st_write_enabled?: boolean }, cacheHdr: string) => {
+    payload.st_write_enabled = false;
+    c.header("X-DayBoard-Cache", cacheHdr);
+    return c.json(payload);
+  };
+
   try {
+    if (!fresh) {
+      const hit = await readDayBoardCache(c.env.DB, cacheKey, keepMs);
+      if (hit) {
+        const freshMs = dayBoardCacheFreshMs();
+        if (hit.ageMs <= freshMs) {
+          return serve(hit.payload, "HIT");
+        }
+        if (hit.ageMs <= keepMs) {
+          // Stale-while-revalidate: return now, rebuild in background
+          scheduleWaitUntil(
+            c,
+            (async () => {
+              try {
+                const rebuilt = await buildDayBoard(c.env, c.env.DB, user, date);
+                rebuilt.st_write_enabled = false;
+                await writeDayBoardCache(
+                  c.env.DB,
+                  dayBoardCacheKey(rebuilt.date, rebuilt.view, user.id),
+                  rebuilt
+                );
+              } catch {
+                /* keep last good cache */
+              }
+            })()
+          );
+          return serve(hit.payload, "STALE");
+        }
+      }
+    }
+
     const payload = await buildDayBoard(c.env, c.env.DB, user, date);
     payload.st_write_enabled = false;
-    return c.json(payload);
+    await writeDayBoardCache(
+      c.env.DB,
+      dayBoardCacheKey(payload.date, payload.view, user.id),
+      payload
+    );
+    return serve(payload, fresh ? "BYPASS" : "MISS");
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Day board failed";
+    // Soft: serve last good cache up to 10 min rather than empty board
+    try {
+      const hit = await readDayBoardCache(c.env.DB, cacheKey, keepMs);
+      if (hit && hit.ageMs <= keepMs) {
+        c.header("X-DayBoard-Cache", "STALE");
+        const p = hit.payload;
+        p.st_write_enabled = false;
+        if (!p.error) p.message = p.message || msg;
+        return c.json(p);
+      }
+    } catch {
+      /* fall through */
+    }
     return c.json(
       {
         date: date || "",
@@ -10107,6 +12580,774 @@ api.get("/day-board", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
     );
   }
 });
+
+/** Service pending chip (No Cool) - D1 only until Approve → background ST link. */
+api.post("/day-board/pending", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  const {
+    canWriteDayBoardPending,
+    createDayBoardPending,
+  } = await import("./dayBoardPending");
+  if (!canWriteDayBoardPending(user)) {
+    return c.json({ error: "Office / supervisor only" }, 403);
+  }
+  const body = await c.req.json<{
+    date?: string;
+    tech_user_id?: number | null;
+    st_technician_id?: number | null;
+    display_name?: string | null;
+    customer_name?: string;
+    customer_phone?: string | null;
+    address?: string;
+    issue?: string | null;
+    window_start?: string | null;
+    window_end?: string | null;
+  }>();
+  const result = await createDayBoardPending(c.env.DB, {
+    date: String(body.date || ""),
+    tech_user_id: body.tech_user_id,
+    st_technician_id: body.st_technician_id,
+    display_name: body.display_name,
+    customer_name: String(body.customer_name || ""),
+    customer_phone: body.customer_phone,
+    address: String(body.address || ""),
+    issue: body.issue,
+    window_start: body.window_start,
+    window_end: body.window_end,
+    created_by: user.id,
+  });
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  await writeAudit(
+    c.env.DB,
+    user,
+    "create",
+    "day_board_pending",
+    result.row.id,
+    `Pending ${result.row.issue} - ${result.row.customer_name} - ${result.row.date}`
+  );
+  // Bust day-board cache for this date so chip appears immediately
+  try {
+    await c.env.DB.prepare(
+      `DELETE FROM day_board_cache WHERE cache_key LIKE ?`
+    )
+      .bind(`${result.row.date}|%`)
+      .run();
+  } catch {
+    /* optional */
+  }
+  return c.json({ ok: true, pending: result.row }, 201);
+});
+
+api.post(
+  "/day-board/pending/:id/approve",
+  requireRoles(ROLE_PERMS.viewDayBoard),
+  async (c) => {
+    const user = c.get("user");
+    const {
+      canWriteDayBoardPending,
+      getPendingById,
+      linkPendingToServiceTitan,
+    } = await import("./dayBoardPending");
+    if (!canWriteDayBoardPending(user)) {
+      return c.json({ error: "Office / supervisor only" }, 403);
+    }
+    const id = Number(c.req.param("id"));
+    const row = await getPendingById(c.env.DB, id);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    if (row.status === "discarded") {
+      return c.json({ error: "Already discarded" }, 400);
+    }
+    if (row.status === "linked") {
+      return c.json({ ok: true, pending: row, message: "Already linked" });
+    }
+    // Mark linking immediately so the chip updates before background finishes
+    await c.env.DB.prepare(
+      `UPDATE day_board_pending
+       SET status = 'linking', approved_by = ?, error = NULL, updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(user.id, id)
+      .run();
+    try {
+      await c.env.DB.prepare(
+        `DELETE FROM day_board_cache WHERE cache_key LIKE ?`
+      )
+        .bind(`${row.date}|%`)
+        .run();
+    } catch {
+      /* ignore */
+    }
+    scheduleWaitUntil(
+      c,
+      linkPendingToServiceTitan(c.env, c.env.DB, id, user)
+        .then(async () => {
+          try {
+            await c.env.DB.prepare(
+              `DELETE FROM day_board_cache WHERE cache_key LIKE ?`
+            )
+              .bind(`${row.date}|%`)
+              .run();
+          } catch {
+            /* ignore */
+          }
+        })
+        .catch(() => {})
+    );
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "day_board_pending",
+      id,
+      `Approve -> background ST link (${row.customer_name})`
+    );
+    const pending = await getPendingById(c.env.DB, id);
+    return c.json({
+      ok: true,
+      pending,
+      message: "Linking in background - refresh board in a moment",
+    });
+  }
+);
+
+api.post(
+  "/day-board/pending/:id/retry",
+  requireRoles(ROLE_PERMS.viewDayBoard),
+  async (c) => {
+    const user = c.get("user");
+    const {
+      canWriteDayBoardPending,
+      getPendingById,
+      linkPendingToServiceTitan,
+    } = await import("./dayBoardPending");
+    if (!canWriteDayBoardPending(user)) {
+      return c.json({ error: "Office / supervisor only" }, 403);
+    }
+    const id = Number(c.req.param("id"));
+    const row = await getPendingById(c.env.DB, id);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    if (row.status === "discarded") {
+      return c.json({ error: "Discarded" }, 400);
+    }
+    scheduleWaitUntil(
+      c,
+      linkPendingToServiceTitan(c.env, c.env.DB, id, user)
+        .then(async () => {
+          try {
+            await c.env.DB.prepare(
+              `DELETE FROM day_board_cache WHERE cache_key LIKE ?`
+            )
+              .bind(`${row.date}|%`)
+              .run();
+          } catch {
+            /* ignore */
+          }
+        })
+        .catch(() => {})
+    );
+    const pending = await getPendingById(c.env.DB, id);
+    return c.json({ ok: true, pending, message: "Retrying ST link…" });
+  }
+);
+
+api.post(
+  "/day-board/pending/:id/discard",
+  requireRoles(ROLE_PERMS.viewDayBoard),
+  async (c) => {
+    const user = c.get("user");
+    const { canWriteDayBoardPending, discardPending, getPendingById } =
+      await import("./dayBoardPending");
+    if (!canWriteDayBoardPending(user)) {
+      return c.json({ error: "Office / supervisor only" }, 403);
+    }
+    const id = Number(c.req.param("id"));
+    const before = await getPendingById(c.env.DB, id);
+    const result = await discardPending(c.env.DB, id);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    await writeAudit(
+      c.env.DB,
+      user,
+      "update",
+      "day_board_pending",
+      id,
+      `Discarded pending (D1 only - nothing in ST)`
+    );
+    if (before?.date) {
+      try {
+        await c.env.DB.prepare(
+          `DELETE FROM day_board_cache WHERE cache_key LIKE ?`
+        )
+          .bind(`${before.date}|%`)
+          .run();
+      } catch {
+        /* ignore */
+      }
+    }
+    return c.json({ ok: true });
+  }
+);
+
+let dayBoardReminderTablesReady = false;
+async function ensureDayBoardReminderTables(db: D1Database): Promise<void> {
+  if (dayBoardReminderTablesReady) return;
+  for (const sql of [
+    `CREATE TABLE IF NOT EXISTS day_board_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      board_date TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_by_user_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      completed_by_user_id INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_day_board_reminders_date
+      ON day_board_reminders(board_date, completed_at)`,
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* exists */
+    }
+  }
+  dayBoardReminderTablesReady = true;
+}
+
+function parseBoardDate(raw: string | null | undefined): string | null {
+  const s = String(raw || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return s;
+}
+
+function canEditDayBoardReminders(user: { role: string }): boolean {
+  return user.role === "admin" || user.role === "office" || user.role === "supervisor";
+}
+
+/** Sticky day reminders for office (per Chicago date). No ST writes. */
+api.get("/day-board/reminders", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  await ensureDayBoardReminderTables(c.env.DB);
+  const date = parseBoardDate(c.req.query("date"));
+  if (!date) return c.json({ error: "date=YYYY-MM-DD required" }, 400);
+  try {
+    const open = await c.env.DB.prepare(
+      `SELECT id, board_date, body, created_by_user_id, created_at, completed_at, completed_by_user_id
+       FROM day_board_reminders
+       WHERE board_date = ? AND completed_at IS NULL
+       ORDER BY created_at ASC, id ASC`
+    )
+      .bind(date)
+      .all();
+    return c.json({
+      date,
+      can_edit: canEditDayBoardReminders(user),
+      items: open.results || [],
+    });
+  } catch (e) {
+    return c.json({ date, can_edit: canEditDayBoardReminders(user), items: [], error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+api.post("/day-board/reminders", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canEditDayBoardReminders(user)) return c.json({ error: "Office only" }, 403);
+  await ensureDayBoardReminderTables(c.env.DB);
+  const body = await c.req.json<{ date?: string; body?: string }>().catch(() => ({} as { date?: string; body?: string }));
+  const date = parseBoardDate(body.date);
+  const text = String(body.body || "").replace(/\s+/g, " ").trim();
+  if (!date) return c.json({ error: "date=YYYY-MM-DD required" }, 400);
+  if (text.length < 2) return c.json({ error: "Type a short reminder." }, 400);
+  if (text.length > 500) return c.json({ error: "Keep under 500 characters." }, 400);
+  try {
+    const ins = await c.env.DB.prepare(
+      `INSERT INTO day_board_reminders (board_date, body, created_by_user_id, created_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    )
+      .bind(date, text, user.id)
+      .run();
+    const id = Number(ins.meta.last_row_id);
+    const row = await c.env.DB.prepare(
+      `SELECT id, board_date, body, created_by_user_id, created_at, completed_at, completed_by_user_id
+       FROM day_board_reminders WHERE id = ?`
+    )
+      .bind(id)
+      .first();
+    return c.json({ ok: true, item: row }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+api.post("/day-board/reminders/:id/complete", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canEditDayBoardReminders(user)) return c.json({ error: "Office only" }, 403);
+  await ensureDayBoardReminderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  if (!(id > 0)) return c.json({ error: "Bad id" }, 400);
+  try {
+    await c.env.DB.prepare(
+      `UPDATE day_board_reminders
+       SET completed_at = datetime('now'), completed_by_user_id = ?
+       WHERE id = ? AND completed_at IS NULL`
+    )
+      .bind(user.id, id)
+      .run();
+    return c.json({ ok: true, id });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+
+
+
+
+/** Miller Install quick-add â€” Book Job mirror (dry by default). */
+api.get("/day-board/miller-book/meta", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) {
+    return c.json({ error: "Office / supervisor only", can_book: false }, 403);
+  }
+  try {
+    const meta = await millerBookMeta(c.env, c.env.DB, user.id);
+    return c.json({ ...meta, can_book: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+api.get("/day-board/miller-book/locations", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const q = (c.req.query("q") || "").trim();
+  try {
+    const out = await searchMillerLocations(c.env, c.env.DB, q);
+    return c.json(out);
+  } catch (e) {
+    return c.json({ hits: [], error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+
+api.get("/day-board/miller-book/open-jobs", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const location_id = Number(c.req.query("location_id") || 0);
+  const customer_id = Number(c.req.query("customer_id") || 0);
+  const date = (c.req.query("date") || "").trim();
+  const address = (c.req.query("address") || "").trim();
+  try {
+    const tenantId = await stTenantId(c.env, c.env.DB);
+    if (!tenantId) return c.json({ existing_jobs: [], error: "ServiceTitan not configured" });
+    let existing_jobs: MillerExistingJob[] = [];
+    if (location_id > 0) {
+      existing_jobs = await findOpenJobsAtLocation(
+        c.env,
+        c.env.DB,
+        tenantId,
+        location_id,
+        date || null,
+        customer_id > 0 ? customer_id : null
+      );
+    } else if (address.length >= 5) {
+      existing_jobs = await findOpenJobsAtAddressText(
+        c.env,
+        c.env.DB,
+        tenantId,
+        address,
+        date || null
+      );
+    }
+    let proposal_status: MillerProposalStatus | undefined;
+    if (location_id > 0 || customer_id > 0) {
+      proposal_status = await checkSignedProposal(
+        c.env,
+        c.env.DB,
+        location_id > 0 ? location_id : null,
+        customer_id > 0 ? customer_id : null
+      );
+    }
+    return c.json({ existing_jobs, proposal_status });
+  } catch (e) {
+    return c.json({ existing_jobs: [], error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+/**
+ * Create (or dry-run) ST Book Job for Miller Install quick-add.
+ * LIVE only when MILLER_BOOK_JOB=live. Default dry â€” no ST POST.
+ */
+
+/**
+ * Miller custom presets (user-owned). HARD LOCK pairs stay code starters.
+ * Soft: no money. Atlas runs migration 088_miller_book_presets.
+ */
+
+api.get("/day-board/miller-book/proposal-status", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const location_id = Number(c.req.query("location_id") || 0);
+  const customer_id = Number(c.req.query("customer_id") || 0);
+  try {
+    const proposal: MillerProposalStatus = await checkSignedProposal(
+      c.env,
+      c.env.DB,
+      location_id > 0 ? location_id : null,
+      customer_id > 0 ? customer_id : null
+    );
+    return c.json(proposal);
+  } catch (e) {
+    return c.json(
+      {
+        signed: false,
+        message: "Proposal not signed â€” get with the customer.",
+        error: e instanceof Error ? e.message : String(e),
+      },
+      500
+    );
+  }
+});
+
+api.get("/day-board/miller-book/presets", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const presets = await listMillerCustomPresets(c.env.DB, user.id);
+  return c.json({ presets });
+});
+
+api.post("/day-board/miller-book/presets", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const name = String(body.name || "").trim();
+  const technician_ids = Array.isArray(body.technician_ids)
+    ? (body.technician_ids as unknown[]).map((n) => Number(n)).filter((n) => n > 0)
+    : [];
+  const result = await createMillerCustomPreset(c.env.DB, user.id, name, technician_ids);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result);
+});
+
+api.put("/day-board/miller-book/presets/:id", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const presetId = Number(c.req.param("id"));
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const patch: { name?: string; technician_ids?: number[] } = {};
+  if (body.name != null) patch.name = String(body.name);
+  if (Array.isArray(body.technician_ids)) {
+    patch.technician_ids = (body.technician_ids as unknown[])
+      .map((n) => Number(n))
+      .filter((n) => n > 0);
+  }
+  const result = await updateMillerCustomPreset(c.env.DB, user.id, presetId, patch);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result);
+});
+
+api.delete("/day-board/miller-book/presets/:id", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  const presetId = Number(c.req.param("id"));
+  const result = await deleteMillerCustomPreset(c.env.DB, user.id, presetId);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result);
+});
+
+api.put("/day-board/miller-book/live-flag", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let enabled = false;
+  try {
+    const body = await c.req.json<{ enabled?: boolean }>();
+    enabled = body.enabled === true;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const v = enabled ? "true" : "false";
+  await setSetting(c.env.DB, "miller_book_live_enabled", v);
+  await writeAudit(c.env.DB, user, "update", "setting", null, "miller_book_live_enabled=" + v);
+  return c.json({ ok: true, enabled });
+});
+
+api.get("/clockin-nudges/today", requireRoles(["admin"] as Role[]), async (c) => {
+  const data = await listOpenClockinNudges(c.env, c.env.DB);
+  return c.json(data);
+});
+
+api.get("/review-text/log", requireRoles(["admin"] as Role[]), async (c) => {
+  const db = c.env.DB;
+  const setting = await getSetting(db, "review_text_mode", "off");
+  const resolved = resolveMode(
+    setting,
+    c.env.REVIEW_TEXT_ENABLED,
+    c.env.REVIEW_TEXT_LIVE_SEND,
+    c.env.REVIEW_TEXT_TEST_NUMBER
+  );
+  const tests = parseTestNumbers(c.env.REVIEW_TEXT_TEST_NUMBER);
+  const testNumberMasked = tests.length ? maskPhone(tests[0]) : null;
+  let lastTick: unknown = null;
+  try {
+    const raw = await getSetting(db, "review_text_last_tick", "");
+    lastTick = raw ? JSON.parse(raw) : null;
+  } catch {
+    lastTick = null;
+  }
+  const counts: Record<string, number> = {};
+  try {
+    const grouped = await db
+      .prepare(`SELECT status, COUNT(*) AS n FROM review_text_log GROUP BY status`)
+      .all<{ status: string; n: number }>();
+    for (const row of grouped.results || []) counts[String(row.status)] = Number(row.n) || 0;
+  } catch {
+    /* table missing until migration 117 */
+  }
+  const rows = await listReviewTextLog(db, {
+    status: c.req.query("status") || "",
+    limit: Number(c.req.query("limit") || "200"),
+  });
+  return c.json({
+    mode: resolved.mode,
+    mode_note: resolved.note || null,
+    test_number_masked: testNumberMasked,
+    last_tick: lastTick,
+    counts,
+    previews: reviewTextPreviews(),
+    rows,
+  });
+});
+
+api.put("/review-text/mode", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let mode = "";
+  try {
+    const body = await c.req.json<{ mode?: string }>();
+    mode = String(body?.mode || "").trim().toLowerCase();
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  if (mode !== "off" && mode !== "dry" && mode !== "test") {
+    return c.json({ error: "mode must be off, dry, or test" }, 400);
+  }
+  await setSetting(c.env.DB, "review_text_mode", mode);
+  await writeAudit(c.env.DB, user, "update", "setting", null, "review_text_mode=" + mode);
+  return c.json({ ok: true, mode });
+});
+
+api.post("/review-text/test-send", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  const result = await sendTestReviewText(c.env, c.env.DB, {});
+  await writeAudit(c.env.DB, user, "update", "review_text", null, "review_text_test_send");
+  return c.json(result);
+});
+
+api.post("/review-text/reviewed", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let customerId = 0;
+  let reviewed = false;
+  try {
+    const body = await c.req.json<{ customerId?: unknown; reviewed?: unknown }>();
+    if (typeof body?.customerId !== "number" || !(body.customerId > 0) || typeof body.reviewed !== "boolean") {
+      return c.json({ error: "customerId and reviewed required" }, 400);
+    }
+    customerId = body.customerId;
+    reviewed = body.reviewed;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  await markReviewed(c.env.DB, customerId, user.id, reviewed);
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "review_text_reviewed",
+    customerId,
+    reviewed ? "marked_reviewed" : "cleared_reviewed"
+  );
+  return c.json({ ok: true, customerId, reviewed });
+});
+
+api.get("/review-text/verify", requireRoles(["admin"] as Role[]), async (c) => {
+  const ids = String(c.req.query("ids") || "").split(",");
+  const result = await verifySamplePayments(c.env, c.env.DB, ids);
+  return c.json(result);
+});
+
+api.get("/onsite-nudges/report", requireRoles(["admin"] as Role[]), async (c) => {
+  const days = Number(c.req.query("days") || "14");
+  const data = await onsiteNudgeReport(c.env, c.env.DB, days);
+  return c.json(data);
+});
+
+api.put("/onsite-nudges/mode", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let mode = "";
+  try {
+    const body = await c.req.json<{ mode?: string }>();
+    mode = String(body.mode || "");
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const result = await setOnsiteNudgeMode(c.env.DB, user, mode);
+  if ("error" in result) return c.json({ error: result.error }, 400);
+  return c.json(result);
+});
+
+api.put("/onsite-nudges/geocoder", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let geocoder = "";
+  try {
+    const body = await c.req.json<{ geocoder?: string }>();
+    geocoder = String(body.geocoder || "");
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const result = await setOnsiteGeocoder(c.env.DB, user, geocoder);
+  if ("error" in result) return c.json({ error: result.error }, 400);
+  return c.json(result);
+});
+
+api.put("/day-board/miller-book/nc-flag", requireRoles(["admin"] as Role[]), async (c) => {
+  const user = c.get("user");
+  let enabled = false;
+  try {
+    const body = await c.req.json<{ enabled?: boolean }>();
+    enabled = body.enabled === true;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const v = enabled ? "true" : "false";
+  await setSetting(c.env.DB, "miller_book_nc_enabled", v);
+  await writeAudit(c.env.DB, user, "update", "setting", null, "miller_book_nc_enabled=" + v);
+  return c.json({ ok: true, enabled });
+});
+
+api.post("/day-board/miller-book", requireRoles(ROLE_PERMS.viewDayBoard), async (c) => {
+  const user = c.get("user");
+  if (!canViewDayBoard(user)) return c.json({ error: "Forbidden" }, 403);
+  if (!canMillerBookJob(user)) return c.json({ error: "Office / supervisor only" }, 403);
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  const not_listed =
+    body.not_listed === true ||
+    body.not_listed === 1 ||
+    String(body.not_listed || "").toLowerCase() === "true" ||
+    String(body.not_listed || "").toLowerCase() === "1";
+  const location_id = Number(body.location_id);
+  const job_type_id = Number(body.job_type_id);
+  const crew_id = String(body.crew_id || "").trim();
+  const date = String(body.date || "").trim();
+  const arrival_window_id = String(body.arrival_window_id || "").trim();
+  const address_text =
+    body.address_text != null
+      ? String(body.address_text).trim()
+      : body.address != null
+        ? String(body.address).trim()
+        : "";
+  const technician_ids = Array.isArray(body.technician_ids)
+    ? (body.technician_ids as unknown[]).map((n) => Number(n)).filter((n) => n > 0)
+    : [];
+  if (not_listed) {
+    if (
+      !date ||
+      !arrival_window_id ||
+      (!crew_id && !technician_ids.length) ||
+      (!(location_id > 0) && !address_text)
+    ) {
+      return c.json(
+        {
+          error:
+            "Not listed requires: date, arrival_window_id, technician_ids, and address (or location_id)",
+        },
+        400
+      );
+    }
+  } else if (
+    !(location_id > 0) ||
+    !(job_type_id > 0) ||
+    !date ||
+    !arrival_window_id ||
+    (!crew_id && !technician_ids.length)
+  ) {
+    return c.json(
+      {
+        error:
+          "Required: location_id, job_type_id, date, arrival_window_id, and technician_ids (or crew_id preset)",
+      },
+      400
+    );
+  }
+  try {
+    const force_duplicate =
+      body.force_duplicate === true ||
+      body.force_duplicate === 1 ||
+      String(body.force_duplicate || "").toLowerCase() === "true" ||
+      String(body.force_duplicate || "").toLowerCase() === "1";
+    const result = await createMillerBookJob(c.env, c.env.DB, {
+      location_id: location_id > 0 ? location_id : 0,
+      customer_id: body.customer_id != null ? Number(body.customer_id) : null,
+      job_type_id: job_type_id > 0 ? job_type_id : 0,
+      crew_id: crew_id || "",
+      date,
+      arrival_window_id,
+      custom_start: body.custom_start != null ? String(body.custom_start) : null,
+      custom_end: body.custom_end != null ? String(body.custom_end) : null,
+      summary: body.summary != null ? String(body.summary) : null,
+      technician_ids: technician_ids.length ? technician_ids : null,
+      not_listed,
+      address_text: address_text || null,
+      created_by: user.id,
+      force_duplicate,
+      project_id: Number(body.project_id) > 0 ? Number(body.project_id) : null,
+    });
+    await writeAudit(
+      c.env.DB,
+      user,
+      result.not_listed
+        ? "miller_board_only"
+        : result.dry_run
+          ? "miller_book_job_dry"
+          : "miller_book_job_live",
+      "st_job",
+      result.st_job_id != null ? result.st_job_id : null,
+      result.message.slice(0, 400),
+      { crew_id: crew_id || null, technician_ids, location_id, job_type_id, date, arrival_window_id },
+      {
+        mode: result.mode,
+        ok: result.ok,
+        job_number: result.st_job_number || null,
+        dry_run: result.dry_run,
+      }
+    );
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
 
 api.get("/ops-performance", requireRoles(ROLE_PERMS.viewOpsPerformance), async (c) => {
   const user = c.get("user");
@@ -10131,7 +13372,14 @@ api.get("/ops-performance", requireRoles(ROLE_PERMS.viewOpsPerformance), async (
         timezone: "America/Chicago",
         service: [],
         install: [],
-        pulse: { jobs: null, jobs_prior: null, jobs_delta: null },
+        pulse: {
+          jobs: null,
+          jobs_prior: null,
+          jobs_delta: null,
+          jobs_tagged: null,
+          jobs_tagged_prior: null,
+        },
+        crew_split: "service_only",
         miller_user_id: null,
         error: msg,
       },
@@ -10168,23 +13416,37 @@ api.get(
 );
 
 /**
- * Clock→ST Phase 1: today's ST appointments for the logged-in tech (read-only)
- * plus Field App clock state from D1. Never writes appointment status to ST.
+ * Clock->ST: today's ST appointments for the logged-in tech plus Field App clock state.
+ * ST appointment status writes only when CLOCK_ST_WRITE=1 (live).
  */
+/** Office/supervisor: real job-type lengths. Read-only ServiceTitan. */
+api.get("/job-lengths", requireRoles(ROLE_PERMS.viewJobLengths), async (c) => {
+  const daysRaw = Number(c.req.query("days") || "90");
+  try {
+    const payload = await buildJobLengths(c.env, c.env.DB, daysRaw);
+    return c.json(payload);
+  } catch (e) {
+    const msg =
+      e instanceof JobLengthsError && e.message
+        ? e.message
+        : "Could not load job lengths.";
+    return c.json({ error: msg }, 502);
+  }
+});
+
 api.get("/jobs/today", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
   const user = c.get("user");
   try {
     const payload = await getTodaysJobsForUser(c.env, c.env.DB, user);
-    // Hard assertion — Phase 1 never advertises ST write
-    payload.st_write_enabled = false;
-    void clockStWriteEnabled(c.env);
     return c.json(payload);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to load today’s jobs";
+    const msg = e instanceof Error ? e.message : "Failed to load today's jobs";
+    const mode = clockStWriteMode(c.env);
     return c.json(
       {
         configured: false,
-        st_write_enabled: false,
+        st_write_enabled: mode === "live",
+        st_write_mode: mode,
         technician_id: null,
         today: "",
         jobs: [],
@@ -10196,8 +13458,210 @@ api.get("/jobs/today", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
 });
 
 /**
- * Clock→ST Phase 1: queue Dispatch / Arrive / Complete in D1 (sync_status=queued).
- * Does NOT call ServiceTitan appointment status APIs.
+ * Admin/manual retry: flush queued (and optionally errored) clock events to ST.
+ * GATE: no-op unless CLOCK_ST_WRITE is dry or live.
+ */
+api.post("/clock/sync", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
+  let includeErrors = false;
+  try {
+    const body = await c.req.json();
+    includeErrors = Boolean(body?.include_errors || body?.includeErrors);
+  } catch {
+    includeErrors = false;
+  }
+  const sync = await syncQueuedClockEvents(c.env, c.env.DB, {
+    includeErrors,
+    limit: 100,
+  });
+  return c.json({ ok: true, ...sync, st_write_enabled: clockStWriteEnabled(c.env) });
+});
+
+/**
+ * Shop/Office FA clock-in (non-job). No ST job invented.
+ * ST Non-Job Event / timesheet write is phase 2.
+ */
+
+api.post("/clock/retry", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  const sync = await syncQueuedClockEvents(c.env, c.env.DB, {
+    includeErrors: true,
+    onlyUserId: user.id,
+    limit: 40,
+  });
+  return c.json({ ok: true, ...sync, st_write_enabled: clockStWriteEnabled(c.env) });
+});
+
+api.post("/clock/events/:id/ack", requireRoles(ROLE_PERMS.manageInstallPermit), async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!(id > 0)) return c.json({ error: "invalid id" }, 400);
+  let note = "";
+  try {
+    const body = (await c.req.json()) as { note?: string };
+    note = String(body?.note || "");
+  } catch {
+    note = "";
+  }
+  const saved = await ackClockEventSynced(c.env.DB, id, note);
+  if (!saved.ok) return c.json({ error: saved.error || "Ack failed" }, 404);
+  return c.json({ ok: true });
+});
+
+api.post("/clock/shop/in", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  let body: { kind?: string | null; client_ts?: string | null; note?: string | null } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const result = await clockShopIn(c.env, c.env.DB, user, body);
+  if (!result.ok) {
+    return c.json(
+      { error: result.error, session: result.session ?? null },
+      result.status as 400 | 409 | 500
+    );
+  }
+  let hasJobs = false;
+  try {
+    const today = await getTodaysJobsForUser(c.env, c.env.DB, user);
+    hasJobs = (today.jobs || []).length > 0;
+  } catch {
+    hasJobs = false;
+  }
+  let clock_audit = null as Awaited<ReturnType<typeof runClockAuditAfterPunch>> | null;
+  if (!result.deduped) {
+    try {
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "shop_in",
+        kind: result.session.kind,
+        hasScheduledJobsToday: hasJobs,
+        sessionId: result.session.id,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    session: result.session,
+    label: result.label,
+    st_timesheet_write: false,
+    clock_audit,
+  });
+});
+
+/** Shop/Office FA clock-out. */
+api.post("/clock/shop/out", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  let body: { client_ts?: string | null } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const result = await clockShopOut(c.env, c.env.DB, user, body);
+  if (!result.ok) {
+    return c.json(
+      {
+        error: result.error,
+        session: result.session ?? null,
+        appt_id: result.appt_id ?? null,
+        job_label: result.job_label ?? null,
+      },
+      result.status as 400 | 409 | 500
+    );
+  }
+  let clock_audit = null as Awaited<ReturnType<typeof runClockAuditAfterPunch>> | null;
+  if (!result.deduped) {
+    try {
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "shop_out",
+        kind: result.session.kind,
+        clockInAt: result.session.clock_in_at,
+        clockOutAt: result.session.clock_out_at,
+        sessionId: result.session.id,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+  return c.json({
+    ok: true,
+    deduped: result.deduped,
+    session: result.session,
+    label: result.label,
+    st_timesheet_write: false,
+    clock_audit,
+  });
+});
+
+/** End the day. Blocked while an En route / Arrived job is still open. Does not close the job. */
+api.post("/clock/day/out", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
+  const user = c.get("user");
+  let body: { client_ts?: string | null } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const block = await openJobClockBlock(c.env.DB, user.id);
+  if (block) {
+    return c.json(
+      { error: block.message, appt_id: block.apptId, job_label: block.jobLabel },
+      409
+    );
+  }
+  const openShop = await getOpenShopSession(c.env.DB, user.id);
+  if (openShop) {
+    const result = await clockShopOut(c.env, c.env.DB, user, body);
+    if (!result.ok) {
+      return c.json(
+        {
+          error: result.error,
+          session: result.session ?? null,
+          appt_id: result.appt_id ?? null,
+          job_label: result.job_label ?? null,
+        },
+        result.status as 400 | 409 | 500
+      );
+    }
+    let clock_audit = null as Awaited<ReturnType<typeof runClockAuditAfterPunch>> | null;
+    if (!result.deduped) {
+      try {
+        clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+          action: "shop_out",
+          kind: result.session.kind,
+          clockInAt: result.session.clock_in_at,
+          clockOutAt: result.session.clock_out_at,
+          sessionId: result.session.id,
+        });
+      } catch {
+        clock_audit = null;
+      }
+    }
+    return c.json({
+      ok: true,
+      session: result.session,
+      label: "Clocked out for the day",
+      st_timesheet_write: false,
+      clock_audit,
+    });
+  }
+  const day = await recordDayClockOut(c.env.DB, user.id, body.client_ts);
+  return c.json({
+    ok: true,
+    session: null,
+    day_clock_out: day?.clock_out_at || null,
+    label: "Clocked out for the day",
+    st_timesheet_write: false,
+  });
+});
+
+/**
+ * Clock->ST: queue Dispatch / Arrive / Complete in D1, then optionally sync
+ * appointment status to ServiceTitan when CLOCK_ST_WRITE is dry/live.
+ * Soft: never invents payroll punches or money writes.
  */
 api.post("/clock/:step", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
   const user = c.get("user");
@@ -10208,32 +13672,149 @@ api.post("/clock/:step", requireRoles(ROLE_PERMS.useJobClock), async (c) => {
     st_job_id?: string;
     st_appointment_id?: string | null;
     client_ts?: string | null;
+    job_number?: string | null;
+    customer_name?: string | null;
+    address?: string | null;
   } = {};
   try {
     body = await c.req.json();
   } catch {
     body = {};
   }
-  // PHASE 1 guard — never attempt ST write from this route
-  if (clockStWriteEnabled(c.env)) {
-    return c.json(
-      { error: "ServiceTitan clock sync is not enabled yet (Phase 1)." },
-      503
-    );
+
+  // Permit gate: block Install Complete until permit is on_truck / on_site / na (or ST CF ready).
+  if (step === "complete") {
+    const stJobId = String(body.st_job_id || "").trim();
+    if (stJobId) {
+      const blocked = await permitBlocksComplete(c.env, c.env.DB, stJobId);
+      if (blocked) {
+        return c.json(
+          { error: blocked.error, permit: blocked.permit },
+          blocked.status as 409
+        );
+      }
+    }
   }
-  const result = await recordClockStep(c.env.DB, user, step, body);
+
+  const result = await recordClockStep(c.env, c.env.DB, user, step, body);
   if (!result.ok) {
     return c.json({ error: result.error }, result.status as 400 | 500 | 503);
   }
+
+  let helper_last_clock_out = null as Awaited<
+    ReturnType<typeof maybeNotifyLeadOnHelperLastClockOut>
+  > | null;
+  if (step === "complete" && !result.deduped) {
+    try {
+      helper_last_clock_out = await maybeNotifyLeadOnHelperLastClockOut(
+        c.env,
+        c.env.DB,
+        user,
+        {
+          st_job_id: String(body.st_job_id || ""),
+          st_appointment_id: body.st_appointment_id,
+          job_number: body.job_number,
+          customer_name: body.customer_name,
+          address: body.address,
+        }
+      );
+    } catch {
+      helper_last_clock_out = null;
+    }
+  }
+
+  let sync: Awaited<ReturnType<typeof syncQueuedClockEvents>> | null = null;
+  try {
+    sync = await syncQueuedClockEvents(c.env, c.env.DB, { limit: 20 });
+  } catch {
+    sync = null;
+  }
+
+  let clock_audit = null as Awaited<ReturnType<typeof runClockAuditAfterPunch>> | null;
+  if (!result.deduped) {
+    try {
+      const stFailed =
+        Boolean(sync && (sync.failed > 0 || (sync.errors && sync.errors.length))) ||
+        String(result.event.sync_status || "") === "error";
+      clock_audit = await runClockAuditAfterPunch(c.env, c.env.DB, user, {
+        action: "job_clock",
+        step,
+        stWriteFailed: stFailed,
+        stWriteError: result.event.sync_error || (sync?.errors || [])[0] || null,
+      });
+    } catch {
+      clock_audit = null;
+    }
+  }
+
+  const mode = clockStWriteMode(c.env);
   return c.json({
     ok: true,
     deduped: result.deduped,
     event: result.event,
     clock: result.clock,
     label: result.label,
-    st_write_enabled: false,
+    st_write_enabled: mode === "live",
+    st_write_mode: mode,
+    sync,
+    helper_last_clock_out,
+    clock_audit,
   });
 });
+
+/**
+ * Office/Miller: set install permit where-is-it status (Complete gate).
+ * Soft: no money writes. Status: missing|at_city|on_truck|on_site|na
+ */
+api.put("/install-permits/:stJobId", requireRoles(ROLE_PERMS.manageInstallPermit), async (c) => {
+  const user = c.get("user");
+  const stJobId = String(c.req.param("stJobId") || "").trim();
+  let body: { status?: string; note?: string | null } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const saved = await setD1PermitStatus(c.env.DB, stJobId, String(body.status || ""), {
+    note: body.note,
+    updatedBy: user.id,
+  });
+  if (!saved.ok) return c.json({ error: saved.error }, 400);
+  const permit = await evaluatePermitGate(c.env, c.env.DB, stJobId);
+  return c.json({ ok: true, status: saved.status, permit });
+});
+
+api.get("/install-permits/:stJobId", requireRoles(ROLE_PERMS.manageInstallPermit), async (c) => {
+  const stJobId = String(c.req.param("stJobId") || "").trim();
+  const permit = await evaluatePermitGate(c.env, c.env.DB, stJobId);
+  return c.json({ ok: true, permit });
+});
+
+/**
+ * Build 3b: fill-empty auto-match Field App users -> ST technician IDs.
+ * Unique phone/email/name/alias only. Never overwrites existing IDs. No money writes.
+ * Body/query: dry_run=1|true to report only (no D1 writes).
+ */
+api.post("/admin/st-tech-auto-match", requireRoles(ROLE_PERMS.manageUsers), async (c) => {
+  let dryRun = false;
+  try {
+    const q = c.req.query("dry_run") || c.req.query("dry");
+    if (q && /^(1|true|yes|dry)$/i.test(String(q))) dryRun = true;
+  } catch {
+    /* ignore */
+  }
+  if (!dryRun) {
+    try {
+      const body = await c.req.json();
+      dryRun = Boolean(body?.dry_run || body?.dryRun || body?.dry);
+    } catch {
+      /* no body */
+    }
+  }
+  const report = await autoMatchUsersToStTechnicians(c.env, c.env.DB, { dryRun });
+  return c.json(report, report.ok ? 200 : 503);
+});
+
 
 api.get("/integrations/servicetitan/status", requireRoles(ROLE_PERMS.browseAdmin), async (c) => {
   const configured = await stConfigured(c.env, c.env.DB);
@@ -10324,7 +13905,7 @@ api.post("/inventory/sync-images", requireRoles(ROLE_PERMS.manageInventory), asy
     return c.json(
       {
         error:
-          "ServiceTitan API not configured. Admin → ServiceTitan: add Tenant ID, Client ID, Secret, App Key.",
+          "ServiceTitan API not configured. Admin â†’ ServiceTitan: add Tenant ID, Client ID, Secret, App Key.",
       },
       503
     );
@@ -10352,7 +13933,7 @@ api.post("/inventory/sync-images", requireRoles(ROLE_PERMS.manageInventory), asy
   return c.json({ ok: true, ...result });
 });
 
-/** Pull one page of ST materials into catalog (insert_only — never overwrite prices). Equipment out. */
+/** Pull one page of ST materials into catalog (insert_only â€” never overwrite prices). Equipment out. */
 api.post("/inventory/sync-st-materials", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
   if (!(await stConfigured(c.env, c.env.DB))) {
     return c.json(
@@ -10542,7 +14123,7 @@ api.post(
       );
     }
     if (!(await stConfigured(c.env, c.env.DB))) {
-      return c.json({ error: "ServiceTitan API not configured (Admin → ServiceTitan)." }, 503);
+      return c.json({ error: "ServiceTitan API not configured (Admin â†’ ServiceTitan)." }, 503);
     }
     const r = await syncMaterialImageToPart(
       c.env,
@@ -10568,7 +14149,7 @@ async function promoteStMediaToPermanent(
   let promoted = 0;
   const details: string[] = [];
 
-  // Keys only first — avoid loading many BLOBs into one response
+  // Keys only first â€” avoid loading many BLOBs into one response
   let keys: { key: string; content_type: string; size: number }[] = [];
   try {
     const r = await db
@@ -10819,7 +14400,7 @@ api.get("/inventory/media", async (c) => {
 
 /**
  * Promote already-downloaded ST media into permanent /api/uploads URLs.
- * Safe to call repeatedly — only touches parts still on Images/ paths with cache.
+ * Safe to call repeatedly â€” only touches parts still on Images/ paths with cache.
  */
 api.post(
   "/inventory/persist-images",
@@ -11129,7 +14710,7 @@ api.post("/inventory/parts/:id/barcodes", requireRoles(ROLE_PERMS.manageInventor
       "update",
       "part",
       id,
-      `Linked barcode ${barcode} → ${part.code}`
+      `Linked barcode ${barcode} â†’ ${part.code}`
     );
     const rows = await c.env.DB.prepare(
       `SELECT id, barcode, label, created_at FROM part_barcodes
@@ -11209,7 +14790,7 @@ api.post("/inventory/parts/:id/vendors", requireRoles(ROLE_PERMS.manageInventory
       "update",
       "part_vendors",
       id,
-      `${part.code}: vendor ${body.vendor_name.trim()} cost=${body.cost ?? "—"} avail=${body.available !== false ? 1 : 0}`
+      `${part.code}: vendor ${body.vendor_name.trim()} cost=${body.cost ?? "â€”"} avail=${body.available !== false ? 1 : 0}`
     );
     return c.json({ ok: true, vendor, part: updated });
   } catch (e) {
@@ -11367,7 +14948,7 @@ api.post("/inventory/parts/import", requireRoles(ROLE_PERMS.manageInventory), as
     console.error("parts/import failed", msg);
     return c.json(
       {
-        error: `Import failed: ${msg.slice(0, 200)}. Already-saved parts stay in catalog — Submit again to continue.`,
+        error: `Import failed: ${msg.slice(0, 200)}. Already-saved parts stay in catalog â€” Submit again to continue.`,
       },
       500
     );
@@ -11397,7 +14978,7 @@ api.post("/inventory/stock/set", requireRoles(ROLE_PERMS.manageInventory), async
     );
   } catch (e) {
     return c.json(
-      { error: e instanceof Error ? e.message : "Stock update failed — run migration 015?" },
+      { error: e instanceof Error ? e.message : "Stock update failed â€” run migration 015?" },
       500
     );
   }
@@ -11441,7 +15022,7 @@ api.post("/inventory/stock/adjust", requireRoles(ROLE_PERMS.manageInventory), as
   }
 });
 
-// ——— Part pickup requests (scan → approve ownership) ———
+// â€”â€”â€” Part pickup requests (scan â†’ approve ownership) â€”â€”â€”
 async function nextPickupNumber(db: D1Database): Promise<string> {
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const prefix = `P-${day}-`;
@@ -11571,7 +15152,7 @@ api.get("/inventory/pickups", async (c) => {
  * Where did we buy a part for this job? Search by service address (or street fragment).
  * Pulls warranties + vendor-run will-calls + receipt notes so warehouse can find the vendor.
  */
-/** Office invoice lookup — address → model/serial (ST + local). Office/admin/supervisor. */
+/** Office invoice lookup â€” address â†’ model/serial (ST + local). Office/admin/supervisor. */
 api.get(
   "/office/invoice-lookup",
   requireRoles(["admin", "office", "supervisor"] as Role[]),
@@ -11995,7 +15576,7 @@ api.post("/inventory/pickups", async (c) => {
         body: `${user.display_name} issued ${lines.length} line(s). Stock moves when warehouse scans your truck.`,
         entity: { type: "pickup", id: pid },
         sms: shortSms(
-          `TA: Parts ready for you (${reqNo}). ${user.display_name} staged ${lines.length} line(s) — open the app to finish.`
+          `TA: Parts ready for you (${reqNo}). ${user.display_name} staged ${lines.length} line(s) â€” open the app to finish.`
         ),
         excludeUserId: user.id,
         fromUserId: user.id,
@@ -12039,7 +15620,7 @@ api.post("/inventory/pickups", async (c) => {
         body: `${user.display_name} set up a pickup list for you.`,
         entity: { type: "pickup", id: pid },
         sms: shortSms(
-          `TA: Parts list for you (${reqNo}). ${user.display_name} set it up — check the app.`
+          `TA: Parts list for you (${reqNo}). ${user.display_name} set it up â€” check the app.`
         ),
         excludeUserId: user.id,
         fromUserId: user.id,
@@ -12090,7 +15671,7 @@ api.post("/inventory/pickups", async (c) => {
 });
 
 /**
- * Step 1 — Warehouse hands parts to a person (custody starts).
+ * Step 1 â€” Warehouse hands parts to a person (custody starts).
  * Does not move stock yet; receiver is now accountable until truck is set.
  */
 api.post(
@@ -12183,7 +15764,7 @@ api.post(
 );
 
 /**
- * Step 2 — Receiver (or warehouse with them) puts parts on a truck and stock moves.
+ * Step 2 â€” Receiver (or warehouse with them) puts parts on a truck and stock moves.
  * Also supports one-shot at the counter: warehouse can send handed_to_user_id + truck together when still open.
  */
 api.post("/inventory/pickups/:id/complete", async (c) => {
@@ -12202,7 +15783,7 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
     if (!truck) {
       return c.json(
         {
-          error: `No truck matched “${body.truck_code.trim()}”. Scan unit number (e.g. 001) or pick the truck.`,
+          error: `No truck matched â€œ${body.truck_code.trim()}â€. Scan unit number (e.g. 001) or pick the truck.`,
         },
         400
       );
@@ -12309,7 +15890,7 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
 
   const truckLabel = dest.unit_number ? `Unit ${dest.unit_number}` : dest.name;
   const handedByName = handedBy?.display_name || user.display_name;
-  const custodyNote = `Handoff ${pickup.request_number}: ${handedByName} → ${receiver.display_name} → ${truckLabel}`;
+  const custodyNote = `Handoff ${pickup.request_number}: ${handedByName} â†’ ${receiver.display_name} â†’ ${truckLabel}`;
 
   const errors: string[] = [];
   for (const line of lines.results || []) {
@@ -12385,7 +15966,7 @@ api.post("/inventory/pickups/:id/complete", async (c) => {
   });
 });
 
-// ——— Part pickup / vendor will-call ("parts ready at supply house") ———
+// â€”â€”â€” Part pickup / vendor will-call ("parts ready at supply house") â€”â€”â€”
 // Field App owns this list. ST job # / address are optional free-text for now.
 
 /** Local calendar date YYYY-MM-DD (avoids UTC day-shift from toISOString). */
@@ -12412,8 +15993,8 @@ function defaultVendorRunSource(role: string): "office" | "tech" | "warehouse" |
 
 /**
  * Open lines still on the Waiting list (any ready date).
- * Future-dated items stay counted so warehouse is never shown “0” while work is open.
- * The driver run sheet still filters to “ready today” only.
+ * Future-dated items stay counted so warehouse is never shown â€œ0â€ while work is open.
+ * The driver run sheet still filters to â€œready todayâ€ only.
  */
 async function countPartPickupWaiting(db: D1Database): Promise<number> {
   try {
@@ -12448,7 +16029,7 @@ async function countPartPickupWaiting(db: D1Database): Promise<number> {
   }
 }
 
-/** Ready for a warehouse stop *today* (needed_for_date null or ≤ today). */
+/** Ready for a warehouse stop *today* (needed_for_date null or â‰¤ today). */
 async function countPartPickupReadyToday(db: D1Database): Promise<number> {
   const today = localIsoDate();
   try {
@@ -12492,7 +16073,7 @@ async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): 
     list.every((l) => l.status === "cancelled" || l.status === "voided");
   let status = "open";
   if (pending === 0) {
-    // All closed — fully cancelled/voided tickets vs finished pickups
+    // All closed â€” fully cancelled/voided tickets vs finished pickups
     status = allDropped ? "cancelled" : "done";
   } else if (picked > 0 || list.some((l) => l.status === "partial")) {
     status = "partial";
@@ -12505,7 +16086,7 @@ async function refreshPartPickupTicketStatus(db: D1Database, ticketId: number): 
     .run();
 }
 
-/** Fast badge poll — waiting = all open; ready_today = go pick now */
+/** Fast badge poll â€” waiting = all open; ready_today = go pick now */
 api.get("/inventory/vendor-runs/count", async (c) => {
   const waiting = await countPartPickupWaiting(c.env.DB);
   const ready_today = await countPartPickupReadyToday(c.env.DB);
@@ -12521,6 +16102,8 @@ api.get("/inventory/part-pickups/count", async (c) => {
 /** List pickup tickets grouped by vendor (open / all). */
 api.get("/inventory/part-pickups", async (c) => {
   const status = (c.req.query("status") || "open").trim();
+  const qRaw = (c.req.query("q") || "").trim().toLowerCase();
+  const q = qRaw.length >= 2 ? qRaw : "";
   try {
     const waiting = await countPartPickupWaiting(c.env.DB);
     const ready_today = await countPartPickupReadyToday(c.env.DB);
@@ -12530,11 +16113,12 @@ api.get("/inventory/part-pickups", async (c) => {
         (SELECT COUNT(*) FROM part_pickup_ticket_lines l
           WHERE l.ticket_id = t.id AND l.status IN ('pending','not_ready','partial')) as open_lines,
         (SELECT COUNT(*) FROM part_pickup_ticket_lines l
-          WHERE l.ticket_id = t.id AND l.status = 'picked') as picked_lines
+          WHERE l.ticket_id = t.id AND l.status = 'picked') as picked_lines,
+        (SELECT MAX(l.resolved_at) FROM part_pickup_ticket_lines l WHERE l.ticket_id = t.id) as last_resolved_at
        FROM part_pickup_tickets t
        LEFT JOIN users u ON u.id = t.logged_by_user_id`;
     if (status === "open" || status === "waiting") {
-      // Anything still needing pickup stays listed — even if ticket status is out of date.
+      // Anything still needing pickup stays listed â€” even if ticket status is out of date.
       // Items leave only when every line is picked or not needed (no open lines left).
       sql += ` WHERE (
         t.status IN ('open','partial')
@@ -12555,9 +16139,23 @@ api.get("/inventory/part-pickups", async (c) => {
     } else if (status !== "all") {
       sql += ` WHERE t.status = ?`;
     }
+    // History address/vendor/part search (optional q=, min 2 chars)
+    if (q && (status === "done" || status === "history" || status === "all")) {
+      const qClause = `(
+        lower(IFNULL(t.notes,'')) LIKE ?
+        OR lower(IFNULL(t.vendor_name,'')) LIKE ?
+        OR lower(IFNULL(t.purchase_order,'')) LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM part_pickup_ticket_lines l
+          WHERE l.ticket_id = t.id
+            AND (lower(IFNULL(l.part_name,'')) LIKE ? OR lower(IFNULL(l.part_code,'')) LIKE ?)
+        )
+      )`;
+      sql += /WHERE/i.test(sql) ? ` AND ${qClause}` : ` WHERE ${qClause}`;
+    }
     // History: newest finished pickups first. Open: ready-today / date, then vendor.
     if (status === "done" || status === "history") {
-      sql += ` ORDER BY t.updated_at DESC, t.id DESC LIMIT 100`;
+      sql += ` ORDER BY IFNULL(last_resolved_at, t.updated_at) DESC, t.id DESC LIMIT 100`;
     } else {
       sql += ` ORDER BY
         CASE t.status WHEN 'open' THEN 0 WHEN 'partial' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
@@ -12565,15 +16163,25 @@ api.get("/inventory/part-pickups", async (c) => {
         lower(t.vendor_name), t.id DESC
         LIMIT 100`;
     }
-    // open / waiting / done / history / all build WHERE without ? placeholders
-    const tickets =
-      status === "all" ||
-      status === "open" ||
-      status === "waiting" ||
-      status === "done" ||
-      status === "history"
-        ? await c.env.DB.prepare(sql).all()
-        : await c.env.DB.prepare(sql).bind(status).all();
+    // Bind: optional history q= (5 likes), else status-specific, else none
+    const qLike = q ? `%${q}%` : "";
+    const tickets = await (async () => {
+      if (q && (status === "done" || status === "history" || status === "all")) {
+        return c.env.DB.prepare(sql)
+          .bind(qLike, qLike, qLike, qLike, qLike)
+          .all();
+      }
+      if (
+        status === "all" ||
+        status === "open" ||
+        status === "waiting" ||
+        status === "done" ||
+        status === "history"
+      ) {
+        return c.env.DB.prepare(sql).all();
+      }
+      return c.env.DB.prepare(sql).bind(status).all();
+    })();
 
     const today = localIsoDate();
     const list = [];
@@ -12606,7 +16214,7 @@ api.get("/inventory/part-pickups", async (c) => {
           .bind(tid)
           .all();
       }
-      // Heal open tickets that somehow have zero lines — otherwise warehouse has no "Picked up" button
+      // Heal open tickets that somehow have zero lines â€” otherwise warehouse has no "Picked up" button
       const ticketStatus = String((t as { status?: string }).status || "");
       if (
         (!lines.results || lines.results.length === 0) &&
@@ -12657,7 +16265,7 @@ api.get("/inventory/part-pickups", async (c) => {
       });
     }
 
-    // Vendor names for autocomplete — one entry per place (case-insensitive)
+    // Vendor quicklist / shortcuts: only vendors used 3+ times (one-offs stay typeable via free text)
     const vendorNameByKey = new Map<string, string>();
     function addVendorSuggestion(raw: string | null | undefined) {
       const cleaned = canonicalizePartsStoreName(String(raw || "")) || String(raw || "").trim();
@@ -12669,19 +16277,20 @@ api.get("/inventory/part-pickups", async (c) => {
     }
     try {
       const vn = await c.env.DB.prepare(
-        `SELECT DISTINCT vendor_name as name FROM (
-           SELECT vendor_name FROM part_pickup_tickets
-           UNION SELECT vendor_name FROM vendor_run_lines
-           UNION SELECT vendor_name FROM part_vendors
-         ) WHERE name IS NOT NULL AND trim(name) != ''
-         ORDER BY lower(name) LIMIT 200`
-      ).all<{ name: string }>();
+        `SELECT vendor_name as name, COUNT(*) as c
+         FROM part_pickup_tickets
+         WHERE vendor_name IS NOT NULL AND trim(vendor_name) != ''
+         GROUP BY lower(trim(vendor_name))
+         HAVING c >= 3
+         ORDER BY c DESC, lower(name)
+         LIMIT 80`
+      ).all<{ name: string; c: number }>();
       for (const r of vn.results || []) addVendorSuggestion(r.name);
     } catch {
       try {
         const vn = await c.env.DB.prepare(
           `SELECT DISTINCT vendor_name as name FROM part_pickup_tickets
-           WHERE vendor_name IS NOT NULL ORDER BY lower(vendor_name) LIMIT 120`
+           WHERE vendor_name IS NOT NULL ORDER BY lower(vendor_name) LIMIT 40`
         ).all<{ name: string }>();
         for (const r of vn.results || []) addVendorSuggestion(r.name);
       } catch {
@@ -12692,7 +16301,7 @@ api.get("/inventory/part-pickups", async (c) => {
       a.localeCompare(b, undefined, { sensitivity: "base" })
     );
 
-    // Group tickets by vendor for chips — "AutoZone" and "autozone" are one chip
+    // Group tickets by vendor for chips â€” "AutoZone" and "autozone" are one chip
     type TicketRow = (typeof list)[number];
     /** Latest activity: line resolved_at, else ticket updated_at / created_at */
     function ticketActivityMs(t: TicketRow): number {
@@ -12712,7 +16321,7 @@ api.get("/inventory/part-pickups", async (c) => {
     const byVendor = new Map<string, { vendor_name: string; tickets: TicketRow[] }>();
     for (const t of list) {
       const raw = String((t as { vendor_name: string }).vendor_name || "Unknown").trim() || "Unknown";
-      // Key from canonical name so "carrier" and "Carrier - Part being delivered…"
+      // Key from canonical name so "carrier" and "Carrier - Part being deliveredâ€¦"
       // both land under one "Carrier Enterprise" chip (not two identical labels).
       const display = canonicalizePartsStoreName(raw) || raw;
       const key = vendorNameKey(display) || vendorNameKey(raw) || "unknown";
@@ -12746,6 +16355,7 @@ api.get("/inventory/part-pickups", async (c) => {
            FROM warranty_claims
            WHERE status = 'return_to_vendor'
              AND IFNULL(parked, 0) = 0
+             AND IFNULL(voided, 0) = 0
            ORDER BY dropped_off_at ASC
            LIMIT 200`
         ).all<{
@@ -12759,7 +16369,7 @@ api.get("/inventory/part-pickups", async (c) => {
         }>();
         for (const row of wr.results || []) {
           const rawVendor = String(row.vendor_name || "").trim();
-          // Skip unknown vendor — cannot place on a trip stop
+          // Skip unknown vendor â€” cannot place on a trip stop
           if (!rawVendor) continue;
           // Urgent physical return only: return_to_vendor + not parked.
           // Hold/delivered never become stops. Johnstone/Solar waiting only while still File.
@@ -12795,15 +16405,16 @@ api.get("/inventory/part-pickups", async (c) => {
           }
         }
       } catch (e) {
-        // parked column missing (pre-079) — retry without parked filter
+        // parked column missing (pre-079) â€” retry without parked filter
         const msg = e instanceof Error ? e.message : String(e);
-        if (/no such column.*parked/i.test(msg)) {
+        if (/no such column.*(parked|voided)/i.test(msg)) {
           try {
             const wr = await c.env.DB.prepare(
               `SELECT id, log_number, part_name, service_address, vendor_name, status,
                       IFNULL(needs_vendor_return, 0) as needs_vendor_return
                FROM warranty_claims
                WHERE status = 'return_to_vendor'
+                 ${/parked/i.test(msg) ? "" : "AND IFNULL(parked, 0) = 0"}
                ORDER BY dropped_off_at ASC
                LIMIT 200`
             ).all<{
@@ -12902,10 +16513,67 @@ api.get("/inventory/part-pickups", async (c) => {
 });
 
 /**
- * Create a pickup ticket — part description + address.
- * Optional contact_name (who to ask about the item) — stored in purchase_order.
+ * Create a pickup ticket â€” part description + address.
+ * Optional contact_name (who to ask about the item) â€” stored in purchase_order.
  * Blank contact always defaults to the logged-in user (every role).
  */
+api.get("/inventory/part-pickups/schedule-queue", async (c) => {
+  const user = c.get("user");
+  const { isMillerUser, listScheduleQueue, availableTechs } = await import(
+    "./partPickupSchedule"
+  );
+  if (!isMillerUser(user) && user.role !== "office") {
+    return c.json({ error: "Not allowed" }, 403);
+  }
+  const queue = await listScheduleQueue(c.env.DB);
+  const techs = await availableTechs(c.env.DB);
+  return c.json({
+    queue,
+    techs,
+    waiting: queue.length,
+    note: "Techs on approved time off today are hidden. Still confirm on Today's jobs.",
+  });
+});
+
+api.post("/inventory/part-pickups/:id/miller-assign", async (c) => {
+  const user = c.get("user");
+  const { assignMillerTech } = await import("./partPickupSchedule");
+  const body = await c.req.json<{ tech_user_id?: number }>();
+  const techId = Number(body.tech_user_id);
+  if (!techId) return c.json({ error: "Pick a tech" }, 400);
+  try {
+    await assignMillerTech(c.env.DB, user, Number(c.req.param("id")), techId);
+    return c.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not assign";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
+api.post("/inventory/part-pickups/:id/mark-booked", async (c) => {
+  const user = c.get("user");
+  const { setScheduleStatus } = await import("./partPickupSchedule");
+  try {
+    await setScheduleStatus(c.env.DB, user, Number(c.req.param("id")), "booked");
+    return c.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not update";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
+api.post("/inventory/part-pickups/:id/skip-schedule", async (c) => {
+  const user = c.get("user");
+  const { setScheduleStatus } = await import("./partPickupSchedule");
+  try {
+    await setScheduleStatus(c.env.DB, user, Number(c.req.param("id")), "skipped");
+    return c.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not update";
+    return c.json({ error: msg }, msg === "Not found" ? 404 : 400);
+  }
+});
+
 api.post("/inventory/part-pickups", async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
@@ -12917,6 +16585,7 @@ api.post("/inventory/part-pickups", async (c) => {
     vendor_name?: string;
     /** First day the part is ready to pick (future = do not go yet). */
     needed_for_date?: string | null;
+    needs_install_schedule?: boolean | number | null;
     purchase_order?: string | null;
     notes?: string | null;
     parts?: Array<{ part_name?: string | null; part_code?: string | null }>;
@@ -12967,7 +16636,7 @@ api.post("/inventory/part-pickups", async (c) => {
       .first<{ display_name: string }>();
     contactName = cu?.display_name?.trim() || null;
   }
-  // Any role — blank contact defaults to the logged-in user (warehouse always has a name)
+  // Any role â€” blank contact defaults to the logged-in user (warehouse always has a name)
   if (!contactName) contactName = user.display_name || null;
 
   // Ready date: default today (pick now). Future date = stays on list but not on today's run.
@@ -12998,7 +16667,7 @@ api.post("/inventory/part-pickups", async (c) => {
         .bind(ticketId, description)
         .run();
     } catch (lineErr) {
-      // Don't leave an empty ticket with no pick button — roll back ticket
+      // Don't leave an empty ticket with no pick button â€” roll back ticket
       try {
         await c.env.DB.prepare(`DELETE FROM part_pickup_tickets WHERE id = ?`)
           .bind(ticketId)
@@ -13009,18 +16678,34 @@ api.post("/inventory/part-pickups", async (c) => {
       throw lineErr;
     }
 
+    try {
+      const { ensurePickupScheduleColumns } = await import("./partPickupSchedule");
+      await ensurePickupScheduleColumns(c.env.DB);
+      const needs =
+        body.needs_install_schedule === true || body.needs_install_schedule === 1 ? 1 : 0;
+      await c.env.DB.prepare(
+        `UPDATE part_pickup_tickets
+         SET contact_user_id = ?, needs_install_schedule = ?
+         WHERE id = ?`
+      )
+        .bind(contactUserId || user.id, needs, ticketId)
+        .run();
+    } catch {
+      /* columns optional until migration 099 */
+    }
+
     await writeAudit(
       c.env.DB,
       user,
       "create",
       "part_pickup",
       ticketId,
-      `Pickup request · ${vendor} · ${description.slice(0, 80)} · for ${address.slice(0, 40)} · contact ${contactStored || "—"}`
+      `Pickup request · ${vendor} · ${description.slice(0, 80)} · for ${address.slice(0, 40)} · contact ${contactStored || "â€”"}`
     );
 
     const bg = (async () => {
       try {
-        // Always notify warehouse/office/admin — even when ready date is in the future
+        // Always notify warehouse/office/admin â€” even when ready date is in the future
         const notifyIds = await usersByRoles(c.env.DB, ["warehouse", "office", "admin", "supervisor"]);
         const whenBit = isFuture
           ? ` · ready ${needed} (not today)`
@@ -13032,7 +16717,7 @@ api.post("/inventory/part-pickups", async (c) => {
           `Part pickup · ${vendor.slice(0, 40)}`,
           `${description.slice(0, 70)} · for ${address.slice(0, 40)}${whenBit}${
             contactStored ? ` · contact ${contactStored}` : ""
-          } — ${user.display_name}`,
+          } â€” ${user.display_name}`,
           { type: "part_pickup", id: ticketId }
         );
       } catch {
@@ -13154,7 +16839,7 @@ api.put("/inventory/part-pickups/:id/lines", async (c) => {
       if (!line.id) continue;
       const name = line.part_name != null ? String(line.part_name).trim() || null : null;
       if (!name || name.length < 2) continue;
-      // Allow update on any still-open line (not only pending — was blocking description edits)
+      // Allow update on any still-open line (not only pending â€” was blocking description edits)
       const r = await c.env.DB.prepare(
         `UPDATE part_pickup_ticket_lines SET part_name = ?
          WHERE id = ? AND ticket_id = ?
@@ -13253,7 +16938,7 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
   }
   if (status === "voided" && notesIn.length < 3) {
     return c.json(
-      { error: "Void requires a reason — cannot void with a blank reason." },
+      { error: "Void requires a reason â€” cannot void with a blank reason." },
       400
     );
   }
@@ -13363,15 +17048,12 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     ) {
       try {
         await ensureStockLocations(c.env.DB);
-        const wh = await c.env.DB.prepare(
-          `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1
-           ORDER BY sort_order, id LIMIT 1`
-        ).first<{ id: number }>();
-        if (wh) {
+        const binId = await shopBinForPart(c.env.DB, line.part_id);
+        if (binId) {
           await adjustStockQty(
             c.env.DB,
             line.part_id,
-            wh.id,
+            binId,
             qtyRecv,
             user.id,
             "vendor_pickup",
@@ -13384,6 +17066,12 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
     }
 
     await refreshPartPickupTicketStatus(c.env.DB, line.ticket_id);
+    try {
+      const { afterPickupLineResolved } = await import("./partPickupSchedule");
+      await afterPickupLineResolved(c.env.DB, line.ticket_id, user.id, status);
+    } catch {
+      /* schedule notify best-effort */
+    }
 
     const label = line.part_name || line.part_code || `Line ${lineId}`;
     const statusLabel =
@@ -13407,43 +17095,10 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
       line.ticket_id,
       `${statusLabel} · ${line.vendor_name} · ${label}${
         qtyRecv != null ? ` · qty ${qtyRecv}` : ""
-      }${notesIn ? ` · ${notesIn.slice(0, 60)}` : ""} — by ${user.display_name}`
+      }${notesIn ? ` · ${notesIn.slice(0, 60)}` : ""} â€” by ${user.display_name}`
     );
 
-    // Notify requester in background — SMS only when their part arrives (or partial/not ready)
-    if (line.logged_by_user_id && line.logged_by_user_id !== user.id) {
-      const title = `${statusLabel} · ${line.vendor_name}`;
-      const detail = `${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}${
-        body.notes ? ` · ${String(body.notes).trim()}` : ""
-      } — ${user.display_name}`;
-      // Text when the part shows up (or partial / not ready so they know the status)
-      const smsOn =
-        status === "picked" || status === "partial" || status === "not_ready";
-      const smsText = smsOn
-        ? shortSms(
-            status === "picked"
-              ? `TA: Your part is in · ${line.vendor_name}: ${label}${qtyRecv != null ? ` (qty ${qtyRecv})` : ""}. Open app for details.`
-              : status === "partial"
-                ? `TA: Partial pickup · ${line.vendor_name}: ${label}${qtyRecv != null ? ` · got ${qtyRecv}` : ""}.`
-                : `TA: Not ready yet · ${line.vendor_name}: ${label}. We'll update when it arrives.`
-          )
-        : null;
-      scheduleWaitUntil(
-        c,
-        notifyAndSms(c.env, c.env.DB, [line.logged_by_user_id], {
-          kind: "vendor_run",
-          title,
-          body: detail,
-          entity: { type: "part_pickup", id: line.ticket_id },
-          sms: smsText,
-          excludeUserId: user.id,
-          fromUserId: user.id,
-          smsContext: `vendor_run:${lineId}:${status}`,
-        }).catch(() => {
-          /* non-fatal */
-        })
-      );
-    }
+    // Picked-up / partial notifies are in-app only (afterPickupLineResolved). No SMS.
 
     // Reminder for the person who picked up: record where parts were left at the office
     if (status === "picked" || status === "partial") {
@@ -13466,7 +17121,7 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
               [user.id],
               "parts_place_reminder",
               `Where did you put the ${line.vendor_name} parts?`,
-              `${label}${qtyRecv != null ? ` · qty ${qtyRecv}` : ""} — when you're back at the office, open Parts drop-off and record where you left them (counter, cage, shelf, truck…).`,
+              `${label}${qtyRecv != null ? ` · qty ${qtyRecv}` : ""} â€” when you're back at the office, open Shop counter and record where you left them (counter, cage, shelf, truckâ€¦).`,
               { type: "part_pickup", id: line.ticket_id }
             );
           } catch {
@@ -13494,7 +17149,7 @@ api.post("/inventory/part-pickups/lines/:lineId/resolve", async (c) => {
   }
 });
 
-// ——— Parts drop-off (brought to shop from vendor, ready to put away / issue) ———
+// â€”â€”â€” Parts drop-off (brought to shop from vendor, ready to put away / issue) â€”â€”â€”
 
 let partsDropoffTablesReady = false;
 async function ensurePartsDropoffTables(db: D1Database): Promise<void> {
@@ -13511,6 +17166,8 @@ async function ensurePartsDropoffTables(db: D1Database): Promise<void> {
       received_by_user_id INTEGER,
       received_at TEXT,
       source TEXT NOT NULL DEFAULT 'tech',
+      disposition TEXT,
+      vehicle_id INTEGER,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`,
@@ -13528,6 +17185,8 @@ async function ensurePartsDropoffTables(db: D1Database): Promise<void> {
     `ALTER TABLE parts_dropoffs ADD COLUMN pickup_ticket_id INTEGER`,
     `ALTER TABLE parts_dropoffs ADD COLUMN pickup_line_id INTEGER`,
     `CREATE INDEX IF NOT EXISTS idx_parts_dropoffs_pickup_line ON parts_dropoffs(pickup_line_id)`,
+    `ALTER TABLE parts_dropoffs ADD COLUMN disposition TEXT`,
+    `ALTER TABLE parts_dropoffs ADD COLUMN vehicle_id INTEGER`,
   ];
   for (const sql of stmts) {
     try {
@@ -13633,7 +17292,7 @@ api.get("/inventory/parts-dropoffs/pending-placement", async (c) => {
             [user.id],
             "parts_place_reminder",
             `Where did you put the ${p.vendor_name} parts?`,
-            `${p.part_name} · open Brought to shop and record where you left them.`,
+            `${p.part_name} · open Shop counter and record where you left them.`,
             { type: "part_pickup", id: p.ticket_id }
           );
         }
@@ -13666,19 +17325,38 @@ api.get("/inventory/parts-dropoffs", async (c) => {
       where = "WHERE d.status = 'cancelled'";
     }
     // else all
-    const rows = await c.env.DB.prepare(
-      `SELECT d.*,
-          du.display_name as dropped_by_name,
-          ru.display_name as received_by_name
-       FROM parts_dropoffs d
-       LEFT JOIN users du ON du.id = d.dropped_by_user_id
-       LEFT JOIN users ru ON ru.id = d.received_by_user_id
-       ${where}
-       ORDER BY
+    const listSql = `ORDER BY
          CASE d.status WHEN 'waiting' THEN 0 WHEN 'received' THEN 1 ELSE 2 END,
          d.created_at DESC
-       LIMIT 80`
-    ).all();
+       LIMIT 80`;
+    let rows;
+    try {
+      rows = await c.env.DB.prepare(
+        `SELECT d.*,
+            du.display_name as dropped_by_name,
+            ru.display_name as received_by_name,
+            vv.unit_number as vehicle_unit
+         FROM parts_dropoffs d
+         LEFT JOIN users du ON du.id = d.dropped_by_user_id
+         LEFT JOIN users ru ON ru.id = d.received_by_user_id
+         LEFT JOIN vehicles vv ON vv.id = d.vehicle_id
+         ${where}
+         ${listSql}`
+      ).all();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such column/i.test(msg)) throw err;
+      rows = await c.env.DB.prepare(
+        `SELECT d.*,
+            du.display_name as dropped_by_name,
+            ru.display_name as received_by_name
+         FROM parts_dropoffs d
+         LEFT JOIN users du ON du.id = d.dropped_by_user_id
+         LEFT JOIN users ru ON ru.id = d.received_by_user_id
+         ${where}
+         ${listSql}`
+      ).all();
+    }
 
     const list = [];
     for (const r of rows.results || []) {
@@ -13742,7 +17420,7 @@ api.post("/inventory/parts-dropoffs", async (c) => {
       .map((p) => {
         const label = (p.part_name || p.part_code || "Part").trim();
         const q = Number(p.qty);
-        return Number.isFinite(q) && q !== 1 ? `${q}× ${label}` : label;
+        return Number.isFinite(q) && q !== 1 ? `${q}Ã- ${label}` : label;
       })
       .filter(Boolean)
       .join(", ");
@@ -13813,7 +17491,7 @@ api.post("/inventory/parts-dropoffs", async (c) => {
           targets.filter((id) => id !== user.id),
           "parts_dropoff",
           `Parts at shop · ${vendor}`,
-          `${summary}${forUnit ? ` · unit ${forUnit}` : ""}${notes ? ` · ${notes.slice(0, 80)}` : ""} — dropped by ${user.display_name}`,
+          `${summary}${forUnit ? ` · unit ${forUnit}` : ""}${notes ? ` · ${notes.slice(0, 80)}` : ""} â€” dropped by ${user.display_name}`,
           { type: "parts_dropoff", id: dropoffId }
         ).catch(() => {
           /* non-fatal */
@@ -13860,6 +17538,243 @@ api.post("/inventory/parts-dropoffs", async (c) => {
   }
 });
 
+function dropoffNormName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\(.*?\)/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Trucks assigned to this person (employee seat or name). Pool labels are not a van. */
+async function vansAssignedToUser(
+  db: D1Database,
+  user: { display_name: string; username: string | null; employee_id: number | null }
+): Promise<{ id: number; unit_number: string }[]> {
+  const names: string[] = [];
+  if (user.display_name?.trim()) names.push(dropoffNormName(user.display_name));
+  if (user.username?.trim()) names.push(dropoffNormName(user.username));
+  const empIds: number[] = [];
+  if (user.employee_id) {
+    empIds.push(user.employee_id);
+    try {
+      const emp = await db
+        .prepare(`SELECT name FROM employees WHERE id = ? AND active = 1`)
+        .bind(user.employee_id)
+        .first<{ name: string }>();
+      if (emp?.name) names.push(dropoffNormName(emp.name));
+    } catch {
+      /* employees table optional */
+    }
+  }
+
+  type VanRow = {
+    id: number;
+    unit_number: string;
+    assigned_driver: string | null;
+    assigned_employee_id: number | null;
+    helper_employee_id: number | null;
+  };
+  let rows: VanRow[] = [];
+  try {
+    const q = await db
+      .prepare(
+        `SELECT id, unit_number, assigned_driver, assigned_employee_id, helper_employee_id
+         FROM vehicles
+         WHERE status != 'retired'`
+      )
+      .all<VanRow>();
+    rows = q.results || [];
+  } catch {
+    const q = await db
+      .prepare(
+        `SELECT id, unit_number, assigned_driver
+         FROM vehicles
+         WHERE status != 'retired'`
+      )
+      .all<{ id: number; unit_number: string; assigned_driver: string | null }>();
+    rows = (q.results || []).map((r) => ({
+      ...r,
+      assigned_employee_id: null,
+      helper_employee_id: null,
+    }));
+  }
+
+  const hits: { id: number; unit_number: string }[] = [];
+  const seen = new Set<number>();
+  for (const v of rows) {
+    if (seen.has(v.id)) continue;
+    const byEmp =
+      (v.assigned_employee_id != null && empIds.includes(Number(v.assigned_employee_id))) ||
+      (v.helper_employee_id != null && empIds.includes(Number(v.helper_employee_id)));
+    if (byEmp) {
+      seen.add(v.id);
+      hits.push({ id: v.id, unit_number: v.unit_number });
+      continue;
+    }
+    if (isPoolDriverLabel(v.assigned_driver)) continue;
+    const ad = dropoffNormName(v.assigned_driver || "");
+    if (!ad) continue;
+    const hit = names.some(
+      (n) => n.length >= 3 && (ad === n || ad.includes(n) || n.includes(ad))
+    );
+    if (!hit) continue;
+    seen.add(v.id);
+    hits.push({ id: v.id, unit_number: v.unit_number });
+  }
+  hits.sort((a, b) => a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true }));
+  return hits;
+}
+
+/** Vans the signed-in person can put shop-counter parts on. */
+api.get("/inventory/parts-dropoffs/my-vans", async (c) => {
+  const user = c.get("user");
+  if (user.role === "viewer") return c.json({ vans: [] });
+  const vans = await vansAssignedToUser(c.env.DB, user);
+  return c.json({ vans });
+});
+
+/**
+ * Tech took the waiting parts off the counter and onto their van.
+ * Status becomes received so the row leaves "at shop". disposition records van stock.
+ * Catalog qty is added only when a line's part number matches one active part.
+ */
+api.post("/inventory/parts-dropoffs/:id/van-stock", async (c) => {
+  const user = c.get("user");
+  const allowed = ["admin", "office", "driver", "mechanic", "supervisor"];
+  if (!allowed.includes(user.role)) {
+    return c.json({ error: "Van stock is for the person putting the parts on their van." }, 403);
+  }
+  await ensurePartsDropoffTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ vehicle_id?: number }>().catch(() => ({} as { vehicle_id?: number }));
+
+  const before = await c.env.DB.prepare(`SELECT * FROM parts_dropoffs WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      status: string;
+      dropped_by_user_id: number | null;
+      vendor_name: string;
+      part_summary: string;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+  if (before.status !== "waiting") {
+    return c.json({ error: "That drop-off is no longer waiting on the counter." }, 400);
+  }
+
+  const vans = await vansAssignedToUser(c.env.DB, user);
+  if (!vans.length) {
+    return c.json(
+      { error: "No van is assigned to you. Ask the office to assign your truck, then try again." },
+      400
+    );
+  }
+  let van = vans[0];
+  const want = Number(body.vehicle_id);
+  if (vans.length > 1) {
+    const picked = vans.find((v) => v.id === want);
+    if (!picked) return c.json({ error: "Choose which van.", vans }, 409);
+    van = picked;
+  } else if (want && want !== vans[0].id) {
+    return c.json({ error: "That van is not assigned to you." }, 403);
+  }
+
+  const note = `Van stock ${van.unit_number}`;
+  let upd;
+  try {
+    upd = await c.env.DB.prepare(
+      `UPDATE parts_dropoffs SET
+         status = 'received',
+         disposition = 'van_stock',
+         vehicle_id = ?,
+         received_by_user_id = ?,
+         received_at = datetime('now'),
+         notes = trim(COALESCE(notes,'') || CASE WHEN notes IS NOT NULL AND trim(notes) != '' THEN ' | ' ELSE '' END || ?),
+         updated_at = datetime('now')
+       WHERE id = ? AND status = 'waiting'`
+    )
+      .bind(van.id, user.id, note, id)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/no such column/i.test(msg)) {
+      return c.json({ error: "Van stock is not ready on this server yet." }, 503);
+    }
+    return c.json({ error: msg }, 500);
+  }
+  if (!Number(upd.meta?.changes ?? 0)) {
+    return c.json({ error: "That drop-off is no longer waiting on the counter." }, 400);
+  }
+
+  let stockAdded = 0;
+  let movedFromShop = 0;
+  try {
+    await ensureStockLocations(c.env.DB);
+    const locId = await ensureVehicleStockLocation(c.env.DB, van.id, van.unit_number);
+    const lines = await c.env.DB.prepare(
+      `SELECT part_code, qty FROM parts_dropoff_lines WHERE dropoff_id = ?`
+    )
+      .bind(id)
+      .all<{ part_code: string | null; qty: number | null }>();
+    if (locId) {
+      for (const line of lines.results || []) {
+        try {
+          const booked = await applyCounterLineToVan(
+            c.env.DB,
+            user.id,
+            id,
+            van.unit_number,
+            locId,
+            line.part_code || "",
+            Number(line.qty)
+          );
+          if (booked.moved > 0 || booked.received > 0) stockAdded += 1;
+          if (booked.moved > 0) movedFromShop += 1;
+        } catch {
+          /* The counter record stands even if a catalog line cannot be added. */
+        }
+      }
+    }
+  } catch {
+    /* Free-text counter lines often have no catalog part. */
+  }
+
+  if (before.dropped_by_user_id && before.dropped_by_user_id !== user.id) {
+    scheduleWaitUntil(
+      c,
+      notifyUsers(
+        c.env.DB,
+        [before.dropped_by_user_id],
+        "parts_dropoff",
+        `Van stock - ${before.vendor_name}`,
+        `${before.part_summary} - ${user.display_name} put these on van ${van.unit_number}`,
+        { type: "parts_dropoff", id }
+      ).catch(() => {
+        /* ignore */
+      })
+    );
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "parts_dropoff",
+    id,
+    `Van stock ${van.unit_number}: ${before.part_summary.slice(0, 80)}`
+  );
+  const row = await c.env.DB.prepare(`SELECT * FROM parts_dropoffs WHERE id = ?`).bind(id).first();
+  return c.json({
+    ok: true,
+    dropoff: row,
+    vehicle: { id: van.id, unit_number: van.unit_number },
+    stock_added: stockAdded,
+    moved_from_shop: movedFromShop,
+  });
+});
+
 /** Warehouse marks drop-off received (put away / ready to issue). */
 api.post("/inventory/parts-dropoffs/:id/receive", async (c) => {
   const user = c.get("user");
@@ -13898,7 +17813,7 @@ api.post("/inventory/parts-dropoffs/:id/receive", async (c) => {
         [before.dropped_by_user_id],
         "parts_dropoff",
         `Drop-off received · ${before.vendor_name}`,
-        `${before.part_summary} — ${user.display_name} has it at the shop`,
+        `${before.part_summary} â€” ${user.display_name} has it at the shop`,
         { type: "parts_dropoff", id }
       ).catch(() => {
         /* ignore */
@@ -14041,7 +17956,7 @@ api.patch("/inventory/pickups/:id", requireRoles(ROLE_PERMS.manageInventory), as
   return c.json({ ok: true });
 });
 
-// ——— Company assets (bottles, ladders, tools) — outside pricebook ———
+// â€”â€”â€” Company assets (bottles, ladders, tools) â€” outside pricebook â€”â€”â€”
 
 async function driverLocationIds(
   db: D1Database,
@@ -14329,7 +18244,7 @@ api.patch("/assets/:id", requireRoles(ROLE_PERMS.manageCompanyAssets), async (c)
         `INSERT INTO company_asset_events (asset_id, event_type, condition_after, notes, created_by_user_id)
          VALUES (?, 'status', ?, ?, ?)`
       )
-        .bind(id, body.condition || null, `Status → ${body.status}`, user.id)
+        .bind(id, body.condition || null, `Status â†’ ${body.status}`, user.id)
         .run();
     }
     await writeAudit(c.env.DB, user, "update", "company_asset", id, "Updated asset");
@@ -14425,7 +18340,7 @@ api.post("/assets/:id/transfer", requireRoles(ROLE_PERMS.manageCompanyAssets), a
   }
 });
 
-/** Condition / damage — warehouse anywhere; field only on their truck gear */
+/** Condition / damage â€” warehouse anywhere; field only on their truck gear */
 api.post("/assets/:id/condition", requireRoles(ROLE_PERMS.viewCompanyAssets), async (c) => {
   const user = c.get("user");
   const id = Number(c.req.param("id"));
@@ -14449,7 +18364,7 @@ api.post("/assets/:id/condition", requireRoles(ROLE_PERMS.viewCompanyAssets), as
       const locIds = await driverLocationIds(c.env.DB, user);
       const locId = data.asset.location_id as number | null;
       if (locIds === null) {
-        /* mechanic — allow condition report */
+        /* mechanic â€” allow condition report */
       } else if (locId == null || !locIds.includes(locId)) {
         return c.json({ error: "You can only report condition on your truck's equipment" }, 403);
       }
@@ -14483,7 +18398,7 @@ api.post("/assets/:id/condition", requireRoles(ROLE_PERMS.viewCompanyAssets), as
       "update",
       "company_asset",
       id,
-      `Condition → ${body.condition}`
+      `Condition â†’ ${body.condition}`
     );
     return c.json({ ok: true });
   } catch (e) {
@@ -14491,7 +18406,7 @@ api.post("/assets/:id/condition", requireRoles(ROLE_PERMS.viewCompanyAssets), as
   }
 });
 
-/** Warehouse → truck (or any location → location) transfer. */
+/** Warehouse â†’ truck (or any location â†’ location) transfer. */
 api.post("/inventory/stock/transfer", requireRoles(ROLE_PERMS.manageInventory), async (c) => {
   const user = c.get("user");
   const body = await c.req.json<{
@@ -14526,7 +18441,7 @@ api.post("/inventory/stock/transfer", requireRoles(ROLE_PERMS.manageInventory), 
       "update",
       "parts",
       body.part_id,
-      `Transfer ${body.qty} loc ${body.from_location_id} → ${body.to_location_id}`
+      `Transfer ${body.qty} loc ${body.from_location_id} â†’ ${body.to_location_id}`
     );
     return c.json({ ok: true, ...r });
   } catch (e) {
@@ -14553,7 +18468,7 @@ api.post(
     }>();
     if (!part) return c.json({ error: "Not found" }, 404);
     if (!(await stConfigured(c.env, c.env.DB))) {
-      return c.json({ error: "ServiceTitan not configured (Admin → ServiceTitan)" }, 503);
+      return c.json({ error: "ServiceTitan not configured (Admin â†’ ServiceTitan)" }, 503);
     }
     try {
       const r = await createStMaterial(c.env, c.env.DB, {
@@ -14612,7 +18527,7 @@ api.post(
 );
 
 api.get("/inventory/summary", requireRoles(ROLE_PERMS.viewInventory), async (c) => {
-  // Lightweight counts only — no ensureStockLocations (was slow on every page open)
+  // Lightweight counts only â€” no ensureStockLocations (was slow on every page open)
   try {
     const [parts, locs, lines] = await Promise.all([
       c.env.DB.prepare(`SELECT COUNT(*) as c FROM parts WHERE active = 1`).first<{ c: number }>(),
@@ -14686,7 +18601,7 @@ api.put(
         "update",
         "parts",
         partId,
-        `Location levels loc=${body.location_id} min=${body.min_qty ?? "—"} max=${body.max_qty ?? "—"}`
+        `Location levels loc=${body.location_id} min=${body.min_qty ?? "â€”"} max=${body.max_qty ?? "â€”"}`
       );
       return c.json({ ok: true });
     } catch (e) {
@@ -14699,7 +18614,7 @@ api.put(
   }
 );
 
-// ——— Truck stock counts (tech fills sheet; warehouse applies to inventory) ———
+// â€”â€”â€” Truck stock counts (tech fills sheet; warehouse applies to inventory) â€”â€”â€”
 
 async function loadTruckCountSheet(db: D1Database, id: number) {
   const count = await db
@@ -14935,12 +18850,12 @@ api.put("/inventory/truck-counts/:id/lines", async (c) => {
       .first<{ id: number; status: string; vehicle_id: number }>();
     if (!sheet) return c.json({ error: "Not found" }, 404);
     if (sheet.status !== "open" && sheet.status !== "submitted") {
-      return c.json({ error: `Sheet is ${sheet.status} — cannot edit` }, 400);
+      return c.json({ error: `Sheet is ${sheet.status} â€” cannot edit` }, 400);
     }
     // submitted sheets: warehouse can still tweak before apply; techs only edit open
     if (user.role === "driver") {
       if (sheet.status !== "open") {
-        return c.json({ error: "Already submitted — ask warehouse to reopen if needed" }, 403);
+        return c.json({ error: "Already submitted â€” ask warehouse to reopen if needed" }, 403);
       }
       const vids = await getDriverVehicleIds(c.env.DB, user);
       if (!vids?.includes(sheet.vehicle_id)) {
@@ -15030,7 +18945,7 @@ api.post("/inventory/truck-counts/:id/submit", async (c) => {
     if ((blank?.c ?? 0) > 0) {
       return c.json(
         {
-          error: `${blank?.c} part(s) still blank — enter a count or check “Don’t need on truck”`,
+          error: `${blank?.c} part(s) still blank â€” enter a count or check â€œDonâ€™t need on truckâ€`,
         },
         400
       );
@@ -15060,7 +18975,7 @@ api.post("/inventory/truck-counts/:id/submit", async (c) => {
       notifyIds.filter((uid) => uid !== user.id),
       "truck_stock_count",
       `Truck stock count · unit ${unit?.unit_number || sheet.vehicle_id}`,
-      `Signed by ${signedName} — ready for warehouse to apply`,
+      `Signed by ${signedName} â€” ready for warehouse to apply`,
       { type: "truck_stock_count", id }
     );
 
@@ -15091,6 +19006,24 @@ api.post("/inventory/truck-counts/:id/apply", async (c) => {
     if (!sheet) return c.json({ error: "Not found" }, 404);
     if (sheet.status === "applied") return c.json({ error: "Already applied" }, 400);
     if (sheet.status === "cancelled") return c.json({ error: "Cancelled" }, 400);
+    try {
+      const loc = await c.env.DB.prepare(
+        `SELECT counted_live_at as at FROM stock_locations WHERE id = ?`
+      )
+        .bind(sheet.location_id)
+        .first<{ at: string | null }>();
+      if (loc?.at) {
+        return c.json(
+          {
+            error:
+              "This truck is already live. Change the quantity in Live inventory, on Adjust.",
+          },
+          400
+        );
+      }
+    } catch {
+      /* older locations have no live stamp */
+    }
 
     const lines = await c.env.DB.prepare(
       `SELECT * FROM truck_stock_count_lines WHERE count_id = ?`
@@ -15154,7 +19087,7 @@ api.post("/inventory/truck-counts/:id/reopen", async (c) => {
       .first<{ status: string }>();
     if (!sheet) return c.json({ error: "Not found" }, 404);
     if (sheet.status === "applied") {
-      return c.json({ error: "Already applied — open a new count sheet instead" }, 400);
+      return c.json({ error: "Already applied â€” open a new count sheet instead" }, 400);
     }
     await c.env.DB.prepare(
       `UPDATE truck_stock_counts SET
@@ -15185,7 +19118,7 @@ api.get("/inventory/low-stock-report", requireRoles(ROLE_PERMS.viewInventory), a
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/stock_location_levels|no such table/i.test(msg)) {
-      // Table optional — still run without location overrides
+      // Table optional â€” still run without location overrides
       return c.json({ ok: true, warehouse: [], trucks: [], error: msg });
     }
     return c.json({ error: msg }, 500);
@@ -15331,7 +19264,7 @@ api.patch("/inventory/parts/:id", requireRoles(ROLE_PERMS.manageInventory), asyn
         "update",
         "parts",
         id,
-        `Levels ${part.code}: min=${body.min_qty ?? "—"} max=${body.max_qty ?? "—"}`
+        `Levels ${part.code}: min=${body.min_qty ?? "â€”"} max=${body.max_qty ?? "â€”"}`
       );
     }
   } catch (e) {
@@ -15381,13 +19314,13 @@ api.delete("/inventory/parts/:id", requireRoles(ROLE_PERMS.manageInventory), asy
       } else {
         st = {
           ok: false,
-          detail: "ServiceTitan not configured — removed from app only",
+          detail: "ServiceTitan not configured â€” removed from app only",
         };
       }
     } else if (deactivateSt && !removed.external_st_id) {
       st = {
         ok: true,
-        detail: "No ServiceTitan id on this part — app only",
+        detail: "No ServiceTitan id on this part â€” app only",
       };
     }
 
@@ -15407,8 +19340,8 @@ api.delete("/inventory/parts/:id", requireRoles(ROLE_PERMS.manageInventory), asy
       st,
       message:
         st?.ok === false
-          ? `Removed “${removed.name}” from this app. ServiceTitan: ${st.detail}`
-          : `Removed “${removed.name}” from this app` +
+          ? `Removed â€œ${removed.name}â€ from this app. ServiceTitan: ${st.detail}`
+          : `Removed â€œ${removed.name}â€ from this app` +
             (deactivateSt && removed.external_st_id
               ? " and deactivated in ServiceTitan pricebook"
               : ""),
@@ -15470,7 +19403,7 @@ api.get("/reports/fuel.csv", requireRoles(ROLE_PERMS.viewReports), async (c) => 
   const header = "fuel_date,unit_number,employee,odometer,gallons,total_cost,station_notes,entered_by\n";
   const lines = (rows.results || [])
     .map((r) =>
-      [r.fuel_date, r.unit_number, r.employee, r.odometer, r.gallons ?? "", r.total_cost ?? "", csvEscape(r.station_notes), r.entered_by]
+      [r.fuel_date, r.unit_number, r.employee, r.odometer, r.gallons ?? "", r.total_cost ?? "", csvEscape(repairUtf8Mojibake(r.station_notes)), r.entered_by]
         .join(",")
     )
     .join("\n");
@@ -15539,7 +19472,7 @@ function csvEscape(v: string | null): string {
   return v;
 }
 
-// ——— Time off requests (employee → manager approval) ———
+// â€”â€”â€” Time off requests (employee â†’ manager approval) â€”â€”â€”
 
 let timeOffTablesReady = false;
 async function ensureTimeOffTables(db: D1Database): Promise<void> {
@@ -15581,21 +19514,45 @@ async function ensureTimeOffTables(db: D1Database): Promise<void> {
   timeOffTablesReady = true;
 }
 
-const TIME_OFF_TYPES = new Set(["pto", "sick", "personal", "unpaid", "other"]);
+const TIME_OFF_TYPES = new Set(["pto", "sick", "personal", "unpaid", "other", "bereavement"]);
 
 function isIsoDate(s: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
-function timeOffTypeLabel(t: string): string {
+function timeOffTypeLabel(
+  t: string,
+  hoursDeducted?: number | null,
+  status?: string | null
+): string {
+  const key = String(t || "")
+    .trim()
+    .toLowerCase();
   const map: Record<string, string> = {
-    pto: "PTO / vacation",
+    pto: "Vacation",
     sick: "Sick",
     personal: "Personal",
     unpaid: "Unpaid",
     other: "Other",
+    bereavement: "Bereavement",
   };
-  return map[t] || t;
+  const base = map[key] || t;
+  const st = String(status || "").toLowerCase();
+  // Never rewrite pending to Unpaid just because hours_deducted is null
+  if (st === "pending" || st === "cancelled" || st === "declined") return base;
+  const paidBank = key === "pto" || key === "personal" || key === "sick";
+  // Approved paid types with no bank take — keep intent visible
+  if (
+    (st === "approved" || st === "") &&
+    paidBank &&
+    hoursDeducted !== undefined &&
+    (hoursDeducted == null ||
+      !Number.isFinite(Number(hoursDeducted)) ||
+      Number(hoursDeducted) <= 0)
+  ) {
+    return `${base} -> Unpaid (no bank hours)`;
+  }
+  return base;
 }
 
 /** Who can decide for this request: assigned manager, or admin/office. */
@@ -15751,12 +19708,24 @@ api.post("/time-off", async (c) => {
   if (!TIME_OFF_TYPES.has(requestType)) {
     return c.json({ error: "Invalid request type" }, 400);
   }
-  const reason = (body.reason || "").trim() || null;
+  let reason = (body.reason || "").trim() || null;
+  const weekdayCount = weekdayDaysInclusive(start, end);
+  if (weekdayCount < 1) {
+    return c.json(
+      {
+        error:
+          "Saturday and Sunday donâ€™t count as time-off days. Pick a range with at least one weekday (Monâ€“Fri).",
+      },
+      400
+    );
+  }
   const hoursNeeded = hoursForDateRange(start, end, 8);
+  let effectiveType = requestType;
+  let bankNote: string | null = null;
 
-  // Failsafe: vacation/sick can only be requested up to available bank
-  // (balance minus other pending requests of the same bank). Unpaid/other stay open.
-  if (requestType === "pto" || requestType === "sick") {
+  // Paid types (pto / personal / sick): if bank is short, file as Unpaid â€” never pretend paid.
+  const wantBank = bankKindForTimeOffType(requestType);
+  if (wantBank) {
     await ensurePtoTables(c.env.DB);
     const urow = await c.env.DB.prepare(`SELECT employee_id FROM users WHERE id = ?`)
       .bind(user.id)
@@ -15766,62 +19735,61 @@ api.post("/time-off", async (c) => {
       return c.json(
         {
           error:
-            "Your login is not linked to an employee record, so vacation/sick can’t be requested. Ask office to link you in People.",
+            "Your login is not linked to an employee record, so paid time off canâ€™t be requested. Ask office to link you in People â€” or submit as Unpaid.",
         },
         400
       );
     }
-    if (empId) {
-      const asOf = ptoLocalIsoDate();
-      const emp = await c.env.DB.prepare(
-        `SELECT id, name, active, hire_date, birthday_md FROM employees WHERE id = ?`
-      )
-        .bind(empId)
-        .first<EmployeePtoProfile>();
-      if (emp?.hire_date) await applyDueAnniversary(c.env.DB, empId, emp.hire_date, asOf);
-      const bal = await c.env.DB.prepare(`SELECT * FROM pto_balances WHERE employee_id = ?`)
-        .bind(empId)
-        .first<{
-          vacation_entitlement_hours: number;
-          vacation_used_hours: number;
-          sick_entitlement_hours: number;
-          sick_used_hours: number;
-        }>();
-      const vacBal =
-        Number(bal?.vacation_entitlement_hours ?? 0) - Number(bal?.vacation_used_hours ?? 0);
-      const sickBal =
-        Number(bal?.sick_entitlement_hours ?? 0) - Number(bal?.sick_used_hours ?? 0);
-      const bankKind = requestType === "sick" ? "sick" : "vacation";
-      const balance = bankKind === "sick" ? sickBal : vacBal;
+    const asOf = ptoLocalIsoDate();
+    const emp = await c.env.DB.prepare(
+      `SELECT id, name, active, hire_date, birthday_md FROM employees WHERE id = ?`
+    )
+      .bind(empId)
+      .first<EmployeePtoProfile>();
+    if (emp?.hire_date) await applyDueAnniversary(c.env.DB, empId, emp.hire_date, asOf);
+    const bal = await c.env.DB.prepare(`SELECT * FROM pto_balances WHERE employee_id = ?`)
+      .bind(empId)
+      .first<{
+        vacation_entitlement_hours: number;
+        vacation_used_hours: number;
+        sick_entitlement_hours: number;
+        sick_used_hours: number;
+      }>();
+    const vacBal =
+      Number(bal?.vacation_entitlement_hours ?? 0) - Number(bal?.vacation_used_hours ?? 0);
+    const sickBal =
+      Number(bal?.sick_entitlement_hours ?? 0) - Number(bal?.sick_used_hours ?? 0);
+    const balance = wantBank === "sick" ? sickBal : vacBal;
 
-      // Pending same-bank requests already spoken for
-      const pendingType = requestType === "sick" ? "sick" : "pto";
-      const pendingRows = await c.env.DB.prepare(
-        `SELECT start_date, end_date FROM time_off_requests
-         WHERE user_id = ? AND status = 'pending' AND request_type = ?`
-      )
-        .bind(user.id, pendingType)
-        .all<{ start_date: string; end_date: string }>();
-      let pendingHours = 0;
-      for (const r of pendingRows.results || []) {
-        pendingHours += hoursForDateRange(r.start_date, r.end_date, 8);
-      }
-      const available = balance - pendingHours;
-      if (hoursNeeded > available + 1e-9) {
-        const label = bankKind === "sick" ? "sick" : "vacation";
-        return c.json(
-          {
-            error: `Not enough ${label} hours. This request needs ${hoursNeeded}h; you have ${Math.max(0, Math.round(available * 10) / 10)}h available${
-              pendingHours > 0 ? ` (${pendingHours}h already in pending requests)` : ""
-            }.`,
-            hours_needed: hoursNeeded,
-            hours_available: Math.max(0, available),
-            balance,
-            pending_hours: pendingHours,
-          },
-          400
-        );
-      }
+    // Pending same-bank requests already spoken for (pto+personal share vacation)
+    const pendingRows = await c.env.DB.prepare(
+      wantBank === "sick"
+        ? `SELECT start_date, end_date FROM time_off_requests
+           WHERE user_id = ? AND status = 'pending' AND request_type = 'sick'`
+        : `SELECT start_date, end_date FROM time_off_requests
+           WHERE user_id = ? AND status = 'pending' AND request_type IN ('pto','personal')`
+    )
+      .bind(user.id)
+      .all<{ start_date: string; end_date: string }>();
+    let pendingHours = 0;
+    for (const r of pendingRows.results || []) {
+      pendingHours += hoursForDateRange(r.start_date, r.end_date, 8);
+    }
+    const available = balance - pendingHours;
+    const plan = splitWeekdaysByBankHours(start, end, available, 8);
+    if (plan.mode === "full_unpaid") {
+      // Keep Vacation/Sick type so approve can still deduct the right bank (Chris HARD).
+      // Do NOT rewrite to unpaid on create — office sees short bank in note.
+      effectiveType = requestType;
+      bankNote = `Bank short: no ${wantBank === "sick" ? "sick" : "vacation"} left for ${hoursNeeded}h (weekdays). Request stays ${requestType === "sick" ? "Sick" : "Vacation"} — manager approves hours against bank.`;
+    } else if (plan.mode === "split") {
+      // Pending stays one row as unpaid when bank can't cover the whole range
+      // (approve will split paid/unpaid days if bank has some hours then).
+      effectiveType = requestType;
+      bankNote = `Bank short: only ${plan.paidHours}h ${wantBank === "sick" ? "sick" : "vacation"} of ${hoursNeeded}h needed. Request stays ${requestType === "sick" ? "Sick" : "Vacation"} for manager approve (hours editable).`;
+    }
+    if (bankNote) {
+      reason = reason ? `${reason} · ${bankNote}` : bankNote;
     }
   }
 
@@ -15851,13 +19819,13 @@ api.post("/time-off", async (c) => {
          status, created_at, updated_at
        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
     )
-      .bind(user.id, managerId, start, end, requestType, reason)
+      .bind(user.id, managerId, start, end, effectiveType, reason)
       .run();
     const id = Number(ins.meta.last_row_id);
 
     const range =
-      start === end ? start : `${start} → ${end}`;
-    const label = timeOffTypeLabel(requestType);
+      start === end ? start : `${start} â†’ ${end}`;
+    const label = timeOffTypeLabel(effectiveType);
 
     // Notify manager (+ admins if manager missing)
     const notifyIds = new Set<number>();
@@ -15903,7 +19871,15 @@ api.post("/time-off", async (c) => {
       .bind(id)
       .first();
 
-    return c.json({ ok: true, request: row }, 201);
+    return c.json(
+      {
+        ok: true,
+        request: row,
+        filed_as: effectiveType,
+        auto_unpaid: effectiveType === "unpaid" && requestType !== "unpaid",
+      },
+      201
+    );
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
   }
@@ -15916,7 +19892,7 @@ api.post("/time-off/:id/decide", async (c) => {
   const body = await c.req.json<{
     decision?: "approved" | "declined";
     remarks?: string | null;
-    /** Optional override; default = 8h × calendar days in range */
+    /** Optional override; default = 8h Ã- weekdays in range */
     hours?: number | null;
   }>();
   const decision = body.decision;
@@ -15935,13 +19911,14 @@ api.post("/time-off/:id/decide", async (c) => {
       start_date: string;
       end_date: string;
       request_type: string;
+      reason: string | null;
     }>();
   if (!before) return c.json({ error: "Not found" }, 404);
   if (before.status !== "pending") {
     return c.json({ error: "This request was already decided or cancelled" }, 400);
   }
   if (!canDecideTimeOff(user, before)) {
-    return c.json({ error: "Only the employee’s manager (or office/admin) can decide" }, 403);
+    return c.json({ error: "Only the employeeâ€™s manager (or office/admin) can decide" }, 403);
   }
 
   const hoursOverride =
@@ -15949,42 +19926,29 @@ api.post("/time-off/:id/decide", async (c) => {
       ? Math.max(0, Number(body.hours))
       : null;
 
-  const range =
-    before.start_date === before.end_date
-      ? before.start_date
-      : `${before.start_date} → ${before.end_date}`;
-  const typeLabel = timeOffTypeLabel(before.request_type);
-  const decisionLabel = decision === "approved" ? "Approved" : "Declined";
+  let effectiveType = String(before.request_type || "pto").toLowerCase();
+  let paidStart = before.start_date;
+  let paidEnd = before.end_date;
+  let unpaidSplit: { start: string; end: string } | null = null;
 
-  // Pre-check bank BEFORE marking approved (failsafe — no overdraw)
+  // Pre-check bank BEFORE marking approved â€” short bank â†’ Unpaid (or paid/unpaid split)
   let approveEmpId: number | null = null;
   let approveHours = 0;
   let approveKind: PtoKind | null = null;
   if (decision === "approved") {
-    approveKind =
-      before.request_type === "pto"
-        ? "vacation"
-        : before.request_type === "sick"
-          ? "sick"
-          : null;
-    if (approveKind) {
+    const bankKind = bankKindForTimeOffType(effectiveType);
+    if (bankKind) {
       await ensurePtoTables(c.env.DB);
       const urow = await c.env.DB.prepare(`SELECT employee_id FROM users WHERE id = ?`)
         .bind(before.user_id)
         .first<{ employee_id: number | null }>();
       approveEmpId = urow?.employee_id ? Number(urow.employee_id) : null;
       if (!approveEmpId) {
-        return c.json(
-          {
-            error:
-              "Cannot approve — employee login is not linked to People, so banks can’t be updated. Link them first or decline.",
-          },
-          400
-        );
-      }
-      approveHours =
-        hoursOverride ?? hoursForDateRange(before.start_date, before.end_date, 8);
-      if (approveHours > 0) {
+        // Can't verify bank — keep requested type, 0h deduct (UI: Vacation -> Unpaid)
+        effectiveType = before.request_type;
+        approveKind = null;
+        approveHours = 0;
+      } else {
         const empRow = await c.env.DB.prepare(
           `SELECT id, name, active, hire_date, birthday_md FROM employees WHERE id = ?`
         )
@@ -16011,30 +19975,150 @@ api.post("/time-off/:id/decide", async (c) => {
         const sickLeft =
           Number(curBal?.sick_entitlement_hours ?? 0) -
           Number(curBal?.sick_used_hours ?? 0);
-        const left = approveKind === "sick" ? sickLeft : vacLeft;
-        if (approveHours > left + 1e-9) {
-          return c.json(
-            {
-              error: `Cannot approve — only ${Math.max(0, Math.round(left * 10) / 10)}h ${approveKind} left; this request needs ${approveHours}h. Decline it or have them shorten the dates.`,
-            },
-            400
-          );
+        const left = bankKind === "sick" ? sickLeft : vacLeft;
+        // Always plan against real bank left (weekdays only). Override caps deduct hours.
+        const plan = splitWeekdaysByBankHours(
+          before.start_date,
+          before.end_date,
+          left,
+          8
+        );
+
+        if (plan.mode === "full_paid") {
+          approveKind = bankKind;
+          approveHours =
+            hoursOverride != null
+              ? Math.min(hoursOverride, plan.paidHours)
+              : plan.paidHours;
+          effectiveType = before.request_type; // keep pto/personal/sick
+          // hoursOverride can shrink hours without a bank split â€” clamp end_date
+          // so one-day PTO never keeps a multi-day range (Day Board sticky fix).
+          if (
+            hoursOverride != null &&
+            approveHours > 0 &&
+            approveHours < plan.paidHours &&
+            plan.weekdays.length
+          ) {
+            const n = Math.max(
+              1,
+              Math.min(plan.weekdays.length, Math.ceil(approveHours / 8 - 1e-9))
+            );
+            paidStart = plan.weekdays[0];
+            paidEnd = plan.weekdays[n - 1];
+          }
+        } else if (plan.mode === "full_unpaid") {
+          // Keep Vacation/Sick type; hours_deducted=0 (UI shows "-> Unpaid (no bank hours)")
+          effectiveType = before.request_type;
+          approveKind = null;
+          approveHours = 0;
+        } else {
+          // Split: this row = paid weekdays; sibling unpaid row for the rest
+          paidStart = plan.paidDays[0];
+          paidEnd = plan.paidDays[plan.paidDays.length - 1];
+          unpaidSplit = {
+            start: plan.unpaidDays[0],
+            end: plan.unpaidDays[plan.unpaidDays.length - 1],
+          };
+          approveKind = bankKind;
+          approveHours =
+            hoursOverride != null
+              ? Math.min(hoursOverride, plan.paidHours)
+              : plan.paidHours;
+          effectiveType = before.request_type;
+          if (
+            hoursOverride != null &&
+            approveHours > 0 &&
+            approveHours < plan.paidHours &&
+            plan.paidDays.length
+          ) {
+            const n = Math.max(
+              1,
+              Math.min(plan.paidDays.length, Math.ceil(approveHours / 8 - 1e-9))
+            );
+            paidStart = plan.paidDays[0];
+            paidEnd = plan.paidDays[n - 1];
+            const rest = plan.weekdays.slice(n);
+            if (rest.length) {
+              unpaidSplit = { start: rest[0], end: rest[rest.length - 1] };
+            } else {
+              unpaidSplit = null;
+            }
+          }
         }
       }
+    } else {
+      // Already unpaid/other â€” no bank deduct
+      approveKind = null;
+      approveHours = 0;
     }
   }
+
+  const range =
+    paidStart === paidEnd ? paidStart : `${paidStart} â†’ ${paidEnd}`;
+  const typeLabel = timeOffTypeLabel(effectiveType);
+  const decisionLabel = decision === "approved" ? "Approved" : "Declined";
 
   await c.env.DB.prepare(
     `UPDATE time_off_requests SET
        status = ?,
+       request_type = ?,
+       start_date = ?,
+       end_date = ?,
        manager_remarks = ?,
        decided_by_user_id = ?,
        decided_at = datetime('now'),
        updated_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(decision, remarks, user.id, id)
+    .bind(
+      decision,
+      decision === "approved" ? effectiveType : before.request_type,
+      decision === "approved" ? paidStart : before.start_date,
+      decision === "approved" ? paidEnd : before.end_date,
+      remarks,
+      user.id,
+      id
+    )
     .run();
+
+  let unpaidSiblingId: number | null = null;
+  if (decision === "approved" && unpaidSplit) {
+    try {
+      const note = `Unpaid remainder after bank cover (from request #${id})`;
+      const ins = await c.env.DB.prepare(
+        `INSERT INTO time_off_requests (
+           user_id, manager_user_id, start_date, end_date, request_type, reason,
+           status, manager_remarks, decided_by_user_id, decided_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'unpaid', ?, 'approved', ?, ?, datetime('now'), datetime('now'), datetime('now'))`
+      )
+        .bind(
+          before.user_id,
+          before.manager_user_id,
+          unpaidSplit.start,
+          unpaidSplit.end,
+          note,
+          remarks,
+          user.id
+        )
+        .run();
+      unpaidSiblingId = Number(ins.meta.last_row_id) || null;
+      try {
+        await c.env.DB.prepare(
+          `UPDATE time_off_requests SET
+             usage_status = 'pending_confirm',
+             hours_deducted = 0,
+             hours_actual = NULL
+           WHERE id = ?`
+        )
+          .bind(unpaidSiblingId)
+          .run();
+      } catch {
+        /* optional columns */
+      }
+    } catch {
+      /* sibling best-effort */
+    }
+  }
 
   let ptoNote: string | null = null;
   if (decision === "approved" && approveKind && approveEmpId && approveHours > 0) {
@@ -16043,7 +20127,7 @@ api.post("/time-off/:id/decide", async (c) => {
         employee_id: approveEmpId,
         kind: approveKind,
         hours: approveHours,
-        entry_date: before.start_date,
+        entry_date: paidStart,
         time_off_request_id: id,
         note: `${typeLabel} ${range}`,
         created_by_user_id: user.id,
@@ -16052,6 +20136,9 @@ api.post("/time-off/:id/decide", async (c) => {
         approveKind === "vacation"
           ? `Deducted ${approveHours}h vacation → balance ${bal.vacation_balance}h`
           : `Deducted ${approveHours}h sick → balance ${bal.sick_balance}h`;
+      if (unpaidSiblingId) {
+        ptoNote += ` - unpaid remainder #${unpaidSiblingId}`;
+      }
       try {
         await c.env.DB.prepare(
           `UPDATE time_off_requests SET
@@ -16071,17 +20158,49 @@ api.post("/time-off/:id/decide", async (c) => {
     } catch {
       /* deduct best-effort after status write */
     }
+  } else if (decision === "approved") {
+    // bereavement / unpaid / other / zero-hour - stamp 0; never touch bank ledger
+    const noBankType = String(effectiveType || "").toLowerCase();
+    ptoNote =
+      noBankType === "unpaid"
+        ? "Approved as Unpaid - no bank hours deducted"
+        : noBankType === "bereavement" || noBankType === "other"
+          ? `Approved - ${typeLabel} - no bank hours deducted`
+          : "Approved - no bank hours deducted";
+    try {
+      await c.env.DB.prepare(
+        `UPDATE time_off_requests SET
+           usage_status = 'pending_confirm',
+           hours_deducted = 0
+         WHERE id = ?`
+      )
+        .bind(id)
+        .run();
+    } catch {
+      /* optional */
+    }
   }
+
+  const notifyRange =
+    unpaidSplit && decision === "approved"
+      ? `${before.start_date} â†’ ${before.end_date}`
+      : range;
+  const notifyType =
+    unpaidSplit && decision === "approved"
+      ? `${timeOffTypeLabel(effectiveType)} + Unpaid`
+      : typeLabel;
 
   scheduleWaitUntil(
     c,
     notifyAndSms(c.env, c.env.DB, [before.user_id], {
       kind: "time_off_decision",
-      title: `Time off ${decisionLabel.toLowerCase()} · ${typeLabel}`,
-      body: `${range}${remarks ? ` · Manager: ${remarks}` : ` · by ${user.display_name}`}`,
+      title: `Time off ${decisionLabel.toLowerCase()} · ${notifyType}`,
+      body: `${notifyRange}${remarks ? ` · Manager: ${remarks}` : ` · by ${user.display_name}`}${
+        ptoNote ? ` · ${ptoNote}` : ""
+      }`,
       entity: { type: "time_off", id },
       sms: shortSms(
-        `TA: Your ${typeLabel} (${range}) was ${decisionLabel.toLowerCase()}${
+        `TA: Your ${notifyType} (${notifyRange}) was ${decisionLabel.toLowerCase()}${
           remarks ? ` · ${remarks.slice(0, 80)}` : ""
         }.`
       ),
@@ -16127,7 +20246,7 @@ api.get("/time-off/balances/me", async (c) => {
       linked: false,
       vacation_balance: null,
       sick_balance: null,
-      message: "No employee roster link — ask office to link your login to an employee.",
+      message: "No employee roster link â€” ask office to link your login to an employee.",
     });
   }
   const emp = await c.env.DB.prepare(
@@ -16147,7 +20266,7 @@ api.get("/time-off/balances/me", async (c) => {
   });
 });
 
-/** Office PTO board — sheet-style roster with balances (negatives allowed). */
+/** Office PTO board â€” sheet-style roster with balances (negatives allowed). */
 api.get("/time-off/board", requireRoles(["admin", "office", "supervisor"] as Role[]), async (c) => {
   await ensurePtoTables(c.env.DB);
   const asOf = ptoLocalIsoDate();
@@ -16159,10 +20278,32 @@ api.get("/time-off/board", requireRoles(["admin", "office", "supervisor"] as Rol
   const byId = new Map(
     (bals.results || []).map((b: { employee_id: number }) => [b.employee_id, b])
   );
-  const rows = (emps.results || []).map((e) =>
-    boardRowFrom(e, (byId.get(e.id) as never) || null, asOf)
+  // Linked Field App logins - admin-create requires one
+  const linked = await c.env.DB.prepare(
+    `SELECT employee_id FROM users WHERE active = 1 AND employee_id IS NOT NULL`
+  ).all<{ employee_id: number }>();
+  const linkedIds = new Set(
+    (linked.results || []).map((u) => Number(u.employee_id)).filter((n) => n > 0)
   );
+  const rows = (emps.results || []).map((e) => ({
+    ...boardRowFrom(e, (byId.get(e.id) as never) || null, asOf),
+    has_app_login: linkedIds.has(Number(e.id)),
+  }));
   return c.json({ as_of: asOf, rows });
+});
+
+
+/** Shop-wide: today's birthdays + anniversaries (all authenticated roles). */
+api.get("/recognition/today", async (c) => {
+  await ensurePtoTables(c.env.DB);
+  const asOf = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const emps = await c.env.DB.prepare(
+    `SELECT id, name, active, hire_date, birthday_md FROM employees WHERE active = 1`
+  ).all<EmployeePtoProfile>();
+  return c.json({
+    as_of: asOf,
+    events: todayRecognition(emps.results || [], asOf),
+  });
 });
 
 /** Birthdays + anniversaries in the next ~45 days. */
@@ -16207,7 +20348,7 @@ api.get("/time-off/report", requireRoles(["admin", "office", "supervisor"] as Ro
     reqSql += ` AND r.start_date <= ?`;
     binds.push(to);
   }
-  // Oldest → newest so Print report reads chronologically from anniversary start.
+  // Oldest â†’ newest so Print report reads chronologically from anniversary start.
   reqSql += ` ORDER BY r.start_date ASC, r.id ASC`;
   const requests = await c.env.DB.prepare(reqSql)
     .bind(...binds)
@@ -16252,7 +20393,183 @@ api.get("/time-off/report", requireRoles(["admin", "office", "supervisor"] as Ro
   });
 });
 
-/** Manual balance adjust (office) — can create negatives. */
+/** Lean prior history for Create / Manual adjust forms (Tool Loans style).
+ *  Newest first. Includes pending+approved+declined requests + ledger. No money. */
+api.get("/time-off/history", requireRoles(["admin", "office", "supervisor"] as Role[]), async (c) => {
+  await ensurePtoTables(c.env.DB);
+  await ensureTimeOffTables(c.env.DB);
+  const employeeId = Number(c.req.query("employee_id") || "0");
+  if (!employeeId) return c.json({ error: "employee_id required" }, 400);
+
+  const emp = await c.env.DB.prepare(
+    `SELECT id, name, active, hire_date, birthday_md FROM employees WHERE id = ?`
+  )
+    .bind(employeeId)
+    .first<EmployeePtoProfile>();
+  if (!emp) return c.json({ error: "Employee not found" }, 404);
+
+  const asOf = ptoLocalIsoDate();
+  if (emp.hire_date) {
+    await applyDueAnniversary(c.env.DB, employeeId, emp.hire_date, asOf);
+  }
+  const bal = await c.env.DB.prepare(`SELECT * FROM pto_balances WHERE employee_id = ?`)
+    .bind(employeeId)
+    .first();
+  const balance = bal
+    ? boardRowFrom(emp, bal as never, asOf)
+    : null;
+
+  const requests = await c.env.DB.prepare(
+    `SELECT r.id, r.start_date, r.end_date, r.request_type, r.status,
+            r.hours_deducted, r.reason, r.manager_remarks, r.created_at, r.decided_at,
+            u.display_name as employee_name, d.display_name as decided_by_name
+     FROM time_off_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users d ON d.id = r.decided_by_user_id
+     WHERE u.employee_id = ?
+       AND r.status IN ('pending', 'approved', 'declined')
+     ORDER BY r.start_date DESC, r.id DESC
+     LIMIT 40`
+  )
+    .bind(employeeId)
+    .all();
+
+  const ledger = await c.env.DB.prepare(
+    `SELECT id, entry_date, kind, hours, source, note
+     FROM pto_ledger
+     WHERE employee_id = ?
+     ORDER BY entry_date DESC, id DESC
+     LIMIT 40`
+  )
+    .bind(employeeId)
+    .all();
+
+  return c.json({
+    employee: { id: emp.id, name: emp.name },
+    balance,
+    as_of: asOf,
+    requests: requests.results || [],
+    ledger: ledger.results || [],
+  });
+});
+
+
+
+/** Admin/office: create a time-off request for any linked employee (pending).
+ *  UI then calls /time-off/:id/decide to approve - same bank/ledger path as employee-submitted. */
+api.post(
+  "/time-off/admin-create",
+  requireRoles(["admin", "office"] as Role[]),
+  async (c) => {
+    const actor = c.get("user");
+    await ensureTimeOffTables(c.env.DB);
+    const body = await c.req.json<{
+      employee_id?: number;
+      start_date?: string;
+      end_date?: string;
+      request_type?: string;
+      reason?: string | null;
+    }>();
+
+    const empId = Number(body.employee_id || 0);
+    if (!empId) return c.json({ error: "employee_id required" }, 400);
+
+    const start = (body.start_date || "").trim();
+    const end = (body.end_date || "").trim() || start;
+    if (!isIsoDate(start) || !isIsoDate(end)) {
+      return c.json({ error: "Start and end dates are required (YYYY-MM-DD)" }, 400);
+    }
+    if (end < start) {
+      return c.json({ error: "End date cannot be before start date" }, 400);
+    }
+    const requestType = (body.request_type || "pto").trim().toLowerCase();
+    if (!TIME_OFF_TYPES.has(requestType)) {
+      return c.json({ error: "Invalid request type" }, 400);
+    }
+    const weekdayCount = weekdayDaysInclusive(start, end);
+    if (weekdayCount < 1) {
+      return c.json(
+        {
+          error:
+            "Saturday and Sunday don't count as time-off days. Pick a range with at least one weekday (Mon-Fri).",
+        },
+        400
+      );
+    }
+
+    const emp = await c.env.DB.prepare(
+      `SELECT id, name, active FROM employees WHERE id = ?`
+    )
+      .bind(empId)
+      .first<{ id: number; name: string; active: number }>();
+    if (!emp) return c.json({ error: "Employee not found" }, 404);
+
+    const urow = await c.env.DB.prepare(
+      `SELECT id, display_name FROM users WHERE employee_id = ? AND active = 1 ORDER BY id LIMIT 1`
+    )
+      .bind(empId)
+      .first<{ id: number; display_name: string }>();
+    if (!urow) {
+      return c.json(
+        {
+          error: `No active Field App login linked to ${emp.name}. Link them in People / Admin first.`,
+        },
+        400
+      );
+    }
+
+    let reason = (body.reason || "").trim() || null;
+    const adminTag = `Admin-created by ${actor.display_name}`;
+    reason = reason ? `${reason} - ${adminTag}` : adminTag;
+
+    try {
+      const ins = await c.env.DB.prepare(
+        `INSERT INTO time_off_requests (
+           user_id, manager_user_id, start_date, end_date, request_type, reason,
+           status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+      )
+        .bind(urow.id, actor.id, start, end, requestType, reason)
+        .run();
+      const id = Number(ins.meta.last_row_id);
+      const range = start === end ? start : `${start} → ${end}`;
+      const label = timeOffTypeLabel(requestType);
+
+      await writeAudit(
+        c.env.DB,
+        actor,
+        "create",
+        "time_off_request",
+        id,
+        `Admin create - ${label} - ${emp.name} - ${range}`
+      );
+
+      const row = await c.env.DB.prepare(
+        `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+         FROM time_off_requests r
+         JOIN users u ON u.id = r.user_id
+         LEFT JOIN users m ON m.id = r.manager_user_id
+         WHERE r.id = ?`
+      )
+        .bind(id)
+        .first();
+
+      return c.json(
+        {
+          ok: true,
+          request: row,
+          user_id: urow.id,
+          employee_id: empId,
+        },
+        201
+      );
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  }
+);
+
+/** Manual balance adjust (office) â€” can create negatives. */
 api.post(
   "/time-off/manual-adjust",
   requireRoles(["admin", "office"] as Role[]),
@@ -16453,6 +20770,78 @@ api.get(
 );
 
 /**
+ * Month/range calendar: approved time-off overlapping fromâ†’to.
+ * Client expands weekdays only (Sat/Sun never painted as PTO).
+ */
+api.get(
+  "/time-off/calendar",
+  requireRoles(["admin", "office", "supervisor"] as Role[]),
+  async (c) => {
+    await ensureTimeOffTables(c.env.DB);
+    const from = (c.req.query("from") || "").trim();
+    const to = (c.req.query("to") || "").trim();
+    if (!isIsoDate(from) || !isIsoDate(to) || to < from) {
+      return c.json({ error: "from and to (YYYY-MM-DD) required" }, 400);
+    }
+    try {
+      const q = await c.env.DB.prepare(
+        `SELECT r.id, r.user_id, r.start_date, r.end_date, r.request_type, r.reason,
+                r.hours_deducted, u.display_name as employee_name, e.name as roster_name
+         FROM time_off_requests r
+         JOIN users u ON u.id = r.user_id
+         LEFT JOIN employees e ON e.id = u.employee_id
+         WHERE r.status = 'approved'
+           AND r.start_date <= ?
+           AND r.end_date >= ?
+         ORDER BY r.start_date ASC, r.id ASC
+         LIMIT 500`
+      )
+        .bind(to, from)
+        .all<{
+          id: number;
+          user_id: number;
+          start_date: string;
+          end_date: string;
+          request_type: string;
+          reason: string | null;
+          hours_deducted: number | null;
+          employee_name: string | null;
+          roster_name: string | null;
+        }>();
+      const items = (q.results || []).map((r) => {
+        const start = String(r.start_date);
+        const end = String(r.end_date);
+        const days = weekdayDaysInclusive(start, end);
+        const deducted =
+          r.hours_deducted != null && Number.isFinite(Number(r.hours_deducted))
+            ? Number(r.hours_deducted)
+            : null;
+        const type = String(r.request_type);
+        return {
+          id: Number(r.id),
+          user_id: Number(r.user_id),
+          employee_name: String(r.roster_name || r.employee_name || "Employee"),
+          request_type: type,
+          type_label: timeOffTypeLabel(type, deducted),
+          start_date: start,
+          end_date: end,
+          weekday_days: days,
+          hours_deducted: deducted ?? 0,
+          reason: r.reason || null,
+        };
+      });
+      return c.json({ from, to, items });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such table/i.test(msg)) {
+        return c.json({ from, to, items: [], error: "time_off_requests missing" });
+      }
+      return c.json({ error: msg }, 500);
+    }
+  }
+);
+
+/**
  * Payroll confirm: taken (no change) / partial (credit difference) / not_taken (full restore).
  */
 api.post(
@@ -16544,7 +20933,7 @@ api.post(
       }
     }
 
-    // Already confirmed with same outcome — idempotent
+    // Already confirmed with same outcome â€” idempotent
     if (
       before.usage_status === nextStatus &&
       before.hours_actual != null &&
@@ -16618,9 +21007,9 @@ api.post(
         note:
           note ||
           (nextStatus === "not_taken"
-            ? "Payroll: came in — restored deducted hours"
+            ? "Payroll: came in â€” restored deducted hours"
             : nextStatus === "partial"
-              ? `Payroll: partial — kept ${hoursActual}h of ${deducted}h`
+              ? `Payroll: partial â€” kept ${hoursActual}h of ${deducted}h`
               : "Payroll confirm"),
         created_by_user_id: me.id,
       });
@@ -16775,7 +21164,7 @@ api.post(
 /**
  * Import Time Off Log rows into pto_ledger for Print report history.
  * Does NOT change balances (Employees sheet / board remains source of truth for banks).
- * Idempotent: replaces prior "Sheet log · …" import rows.
+ * Idempotent: replaces prior "Sheet log ..." import rows.
  */
 api.post(
   "/time-off/import-log",
@@ -16994,7 +21383,7 @@ async function applyImportRow(
     )
     .bind(employeeId, vacEnt, vacUsed, sickEnt, sickUsed, lastAnn)
     .run();
-  // Balances only — usage history comes from /time-off/import-log (Time Off Log sheet).
+  // Balances only â€” usage history comes from /time-off/import-log (Time Off Log sheet).
   void byUserId;
 }
 
@@ -17044,8 +21433,8 @@ api.post("/time-off/:id/cancel", async (c) => {
   return c.json({ ok: true });
 });
 
-// ——— Tool loan requests (employee → office only, company-use only) ———
-// After approval: pending_order → ordered → arrived → paperwork_signed
+// â€”â€”â€” Tool loan requests (employee â†’ office only, company-use only) â€”â€”â€”
+// After approval: pending_order â†’ ordered â†’ arrived â†’ paperwork_signed
 
 /** Minimum weekly payroll deduction for tool loans (even if 10% of balance is less). */
 const TOOL_LOAN_MIN_WEEKLY_PAYMENT = 50;
@@ -17085,6 +21474,10 @@ async function ensureToolLoanTables(db: D1Database): Promise<void> {
       paperwork_signed_at TEXT,
       paperwork_note TEXT,
       paperwork_key TEXT,
+      actual_cost REAL,
+      carrier TEXT,
+      tracking_number TEXT,
+      tracking_url TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`,
@@ -17092,7 +21485,7 @@ async function ensureToolLoanTables(db: D1Database): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_tool_loan_status ON tool_loan_requests(status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_tool_loan_manager ON tool_loan_requests(manager_user_id, status)`,
     `CREATE INDEX IF NOT EXISTS idx_tool_loan_part ON tool_loan_requests(part_status, status)`,
-    // Legacy: manager step removed — open manager-queue items go to office
+    // Legacy: manager step removed â€” open manager-queue items go to office
     `UPDATE tool_loan_requests SET status = 'pending_office', updated_at = datetime('now')
      WHERE status = 'pending_manager'`,
     // Fulfillment columns (existing DBs created before 047 / 065)
@@ -17103,6 +21496,11 @@ async function ensureToolLoanTables(db: D1Database): Promise<void> {
     `ALTER TABLE tool_loan_requests ADD COLUMN paperwork_signed_at TEXT`,
     `ALTER TABLE tool_loan_requests ADD COLUMN paperwork_note TEXT`,
     `ALTER TABLE tool_loan_requests ADD COLUMN paperwork_key TEXT`,
+    // Cost-verify + tracking (migration 100)
+    `ALTER TABLE tool_loan_requests ADD COLUMN actual_cost REAL`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN carrier TEXT`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN tracking_number TEXT`,
+    `ALTER TABLE tool_loan_requests ADD COLUMN tracking_url TEXT`,
     // Approved loans with no part track yet start as "waiting to order"
     `UPDATE tool_loan_requests SET part_status = 'pending_order', updated_at = datetime('now')
      WHERE status = 'approved' AND (part_status IS NULL OR part_status = '')`,
@@ -17129,7 +21527,7 @@ async function ensureToolLoanTables(db: D1Database): Promise<void> {
   toolLoanTablesReady = true;
 }
 
-/** Link request(s) ↔ payroll charge (many requests may share one charge). */
+/** Link request(s) â†” payroll charge (many requests may share one charge). */
 async function linkRequestsToCharge(
   db: D1Database,
   chargeId: number,
@@ -17165,11 +21563,11 @@ function isOfficeRole(role: string): boolean {
   return role === "admin" || role === "office" || role === "supervisor";
 }
 
-// Money ledger (charges / payments / payroll export) — office & admin
+// Money ledger (charges / payments / payroll export) â€” office & admin
 registerToolLoanLedger(api);
 
 /**
- * Inline ledger GETs — self-contained so the owner report always works even if
+ * Inline ledger GETs â€” self-contained so the owner report always works even if
  * the toolLoanLedger module path has issues on a given deploy.
  */
 async function toolLoanBalanceRows(db: D1Database) {
@@ -17292,7 +21690,7 @@ api.get("/tool-loan-ledger/owner-report", async (c) => {
         employee_count: rows.length,
       },
       policy_note:
-        "Weekly deduction = 10% of remaining balance, minimum $50 (e.g. $600 → $60/week). Former employees excluded (balances remain on file).",
+        "Weekly deduction = 10% of remaining balance, minimum $50 (e.g. $600 â†’ $60/week). Former employees excluded (balances remain on file).",
     });
   } catch (e) {
     return c.json(
@@ -17311,7 +21709,7 @@ api.get("/tool-loan-ledger/summary", async (c) => {
     // Always treat week_of as the pay Friday (snap mid-week dates forward)
     const weekOfRaw = (c.req.query("week_of") || "").slice(0, 10);
     const weekOf = weekOfRaw ? toPayFriday(weekOfRaw) : toPayFriday();
-    // Mon–Fri window so a Wed apply still counts for this Friday's paycheck
+    // Monâ€“Fri window so a Wed apply still counts for this Friday's paycheck
     const [wy, wm, wd] = weekOf.split("-").map(Number);
     const weekMonDate = new Date(wy, wm - 1, wd - 4, 12, 0, 0, 0);
     const weekMon = `${weekMonDate.getFullYear()}-${String(weekMonDate.getMonth() + 1).padStart(2, "0")}-${String(weekMonDate.getDate()).padStart(2, "0")}`;
@@ -17389,7 +21787,7 @@ api.get("/tool-loan-ledger/summary", async (c) => {
       ])
     );
 
-    // Who already has a payroll payment this pay week (Mon → Friday paycheck)
+    // Who already has a payroll payment this pay week (Mon â†’ Friday paycheck)
     const alreadyForWeek = new Map<number, { amount: number; applied_at: string }>();
     let weekAlreadyCount = 0;
     let weekAlreadyTotal = 0;
@@ -17513,7 +21911,7 @@ api.get("/tool-loan-ledger/payroll-week", async (c) => {
 });
 
 /**
- * Server-rendered HTML for owner print — does not depend on React state.
+ * Server-rendered HTML for owner print â€” does not depend on React state.
  * Open in a new tab; cookies are sent same-origin so auth works.
  */
 api.get("/tool-loan-ledger/owner-report-print", async (c) => {
@@ -17531,7 +21929,7 @@ api.get("/tool-loan-ledger/owner-report-print", async (c) => {
       10
     );
     const weekOf = toPayFriday(weekOfRaw);
-    // Payroll print: current employees only (hide former — e.g. Willie, Valdez)
+    // Payroll print: current employees only (hide former â€” e.g. Willie, Valdez)
     let rows = (await toolLoanBalanceRows(c.env.DB)).filter((r) => r.status !== "former");
     if (!includeZero) rows = rows.filter((r) => r.balance > 0.009);
     // Honor manual skips for this pay Friday (same as on-screen deduction report)
@@ -17586,7 +21984,7 @@ api.get("/tool-loan-ledger/owner-report-print", async (c) => {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Tool Loan Payroll — ${esc(weekOf)}</title>
+  <title>Tool Loan Payroll â€” ${esc(weekOf)}</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -17777,7 +22175,7 @@ api.get("/tool-loan-ledger/owner-report-print", async (c) => {
       <span class="value">${money(totalWeek)}</span>
     </div>
   </div>
-  <p class="note">Use each row for one person only — lines separate employees so deductions are not mixed. Amount owed is remaining balance; weekly deduction is what to take this paycheck (10% of balance, min $50).</p>
+  <p class="note">Use each row for one person only â€” lines separate employees so deductions are not mixed. Amount owed is remaining balance; weekly deduction is what to take this paycheck (10% of balance, min $50).</p>
   <table>
     <thead>
       <tr>
@@ -17795,7 +22193,7 @@ api.get("/tool-loan-ledger/owner-report-print", async (c) => {
       </tr>
     </tfoot>
   </table>
-  <p class="foot">Confidential — for payroll use only · Total Assurance A/C &amp; Heating · Week of ${esc(weekOf)}</p>
+  <p class="foot">Confidential â€” for payroll use only · Total Assurance A/C &amp; Heating · Week of ${esc(weekOf)}</p>
   <script>
     window.addEventListener("load", function () {
       setTimeout(function () { window.focus(); window.print(); }, 450);
@@ -17895,7 +22293,7 @@ api.get("/tool-loans", async (c) => {
       pendingForMe = p?.c ?? 0;
     }
 
-    // Employee-facing balance for accurate weekly estimate (policy formula only — never office override)
+    // Employee-facing balance for accurate weekly estimate (policy formula only â€” never office override)
     let ledgerBalance = 0;
     let ledgerPersonName: string | null = null;
     if (view !== "approvals") {
@@ -17956,7 +22354,7 @@ api.post("/tool-loans", async (c) => {
   if (!itemName || itemName.length < 2) {
     return c.json({ error: "Tool / part name is required" }, 400);
   }
-  // item_url is optional free text (store name, partial link, full URL, or blank) — never require http(s)
+  // item_url is optional free text (store name, partial link, full URL, or blank) â€” never require http(s)
   if (!Number.isFinite(amount) || amount <= 0) {
     return c.json({ error: "Enter a valid loan amount" }, 400);
   }
@@ -17964,7 +22362,7 @@ api.post("/tool-loans", async (c) => {
     return c.json(
       {
         error:
-          "Describe how this tool helps your company field work (required — loans are for job use only).",
+          "Describe how this tool helps your company field work (required â€” loans are for job use only).",
       },
       400
     );
@@ -17973,13 +22371,13 @@ api.post("/tool-loans", async (c) => {
     return c.json(
       {
         error:
-          "You must accept the tool loan terms (10% of loan weekly, $50 minimum — e.g. $600 → $60/week; total loans ≤ weekly pay; company field tools only).",
+          "You must accept the tool loan terms (10% of loan weekly, $50 minimum â€” e.g. $600 â†’ $60/week; total loans â‰¤ weekly pay; company field tools only).",
       },
       400
     );
   }
 
-  // manager_user_id kept for schema/history only — not used for approval routing
+  // manager_user_id kept for schema/history only â€” not used for approval routing
   let managerId: number | null = null;
   try {
     const me = await c.env.DB.prepare(`SELECT manager_user_id FROM users WHERE id = ?`)
@@ -17991,7 +22389,7 @@ api.post("/tool-loans", async (c) => {
   }
 
   try {
-    // weekly_pay column kept for schema compat; office already knows pay — not collected from employee
+    // weekly_pay column kept for schema compat; office already knows pay â€” not collected from employee
     const ins = await c.env.DB.prepare(
       `INSERT INTO tool_loan_requests (
          user_id, manager_user_id, item_name, item_url, amount, weekly_pay, purpose,
@@ -18013,7 +22411,7 @@ api.post("/tool-loans", async (c) => {
           notifyIds,
           "tool_loan_request",
           `Tool loan request · ${user.display_name}`,
-          `${itemName} · $${amount.toFixed(2)} — needs office approval`,
+          `${itemName} · $${amount.toFixed(2)} â€” needs office approval`,
           { type: "tool_loan", id }
         ).catch(() => {
           /* non-fatal */
@@ -18054,7 +22452,7 @@ api.post("/tool-loans", async (c) => {
 /**
  * Office/admin decision only.
  * Body: decision = approved | declined, remarks?
- * pending_office (or legacy pending_manager) → approved | declined
+ * pending_office (or legacy pending_manager) â†’ approved | declined
  */
 api.post("/tool-loans/:id/decide", async (c) => {
   const user = c.get("user");
@@ -18127,7 +22525,7 @@ api.post("/tool-loans/:id/decide", async (c) => {
   const decisionLabel = nextStatus === "approved" ? "Approved" : "Declined";
   const decisionBody =
     nextStatus === "approved"
-      ? `$${Number(before.amount).toFixed(2)} · Loan approved — we'll order the part next${
+      ? `$${Number(before.amount).toFixed(2)} · Loan approved â€” we'll order the part next${
           remarks ? ` · ${remarks}` : ""
         }`
       : `$${Number(before.amount).toFixed(2)}${
@@ -18214,7 +22612,7 @@ api.get("/tool-loans/:id/ledger-match", async (c) => {
 
   const bal = await ledgerBalanceForUserId(c.env.DB, req.user_id);
   const target = Math.round(Number(req.amount) * 100) / 100;
-  // Only recent charges — no months-old history for matching a new purchase
+  // Only recent charges â€” no months-old history for matching a new purchase
   const recentDays = 45;
   let charges: {
     id: number;
@@ -18303,7 +22701,7 @@ api.get("/tool-loans/:id/ledger-match", async (c) => {
         ...row,
         tool_loan_request_id: Number(row.tool_loan_request_id) || null,
         amount_match: Math.abs(amt - target) < 0.02,
-        // Charge can host many requests — only "already" if this request is on it
+        // Charge can host many requests â€” only "already" if this request is on it
         already_linked: thisLinked,
         linked_request_ids: linkedIds,
         linked_items: linkedReqs
@@ -18375,9 +22773,9 @@ api.get("/tool-loans/:id/ledger-match", async (c) => {
  * Office updates part fulfillment after approval.
  * Body: part_status = ordered | arrived | paperwork_signed, note?, paperwork_key?
  * For paperwork_signed also accepts:
- *   linked_charge_id — link an existing recent ledger charge
- *   create_charge — { pretax_amount, tax_rate } create payroll charge with tax included
- * Flow: pending_order → ordered → arrived → paperwork_signed
+ *   linked_charge_id â€” link an existing recent ledger charge
+ *   create_charge â€” { pretax_amount, tax_rate } create payroll charge with tax included
+ * Flow: pending_order â†’ ordered â†’ arrived â†’ paperwork_signed
  */
 api.post("/tool-loans/:id/part-status", async (c) => {
   const user = c.get("user");
@@ -18399,6 +22797,13 @@ api.post("/tool-loans/:id/part-status", async (c) => {
       total_amount?: number | string;
       description?: string;
     } | null;
+    /** Price paid. Set when ordering or when it arrives. Becomes the loan amount. */
+    actual_cost?: number | string | null;
+    /** Create or link the payroll charge and return it for printing. Does not mark the loan signed. */
+    prepare_print?: boolean;
+    carrier?: string | null;
+    tracking_number?: string | null;
+    tracking_url?: string | null;
   }>();
   const next = body.part_status;
   if (
@@ -18456,6 +22861,15 @@ api.post("/tool-loans/:id/part-status", async (c) => {
   if (rank[next] < rank[cur]) {
     return c.json({ error: "Cannot move part status backward" }, 400);
   }
+  const preparePrint = body.prepare_print === true;
+  if (preparePrint) {
+    if (cur !== "ordered" && cur !== "arrived") {
+      return c.json({ error: "Place the order before printing the form" }, 400);
+    }
+    if (next !== cur) {
+      return c.json({ error: "Printing the form leaves the loan on its current step" }, 400);
+    }
+  }
   if (next === "paperwork_signed" && rank[cur] < rank.arrived && cur !== "paperwork_signed") {
     // Allow if somehow already has arrived_at, else require arrived first
     if (!before.arrived_at) {
@@ -18463,6 +22877,44 @@ api.post("/tool-loans/:id/part-status", async (c) => {
         { error: "Mark the part arrived before recording signed paperwork" },
         400
       );
+    }
+  }
+
+  const trimOrNull = (v: unknown): string | null => {
+    const s = (v == null ? "" : String(v)).trim();
+    return s || null;
+  };
+  const prior = before as typeof before & {
+    carrier?: string | null;
+    tracking_number?: string | null;
+    tracking_url?: string | null;
+    actual_cost?: number | null;
+  };
+  let nextCarrier = body.carrier !== undefined ? trimOrNull(body.carrier) : prior.carrier ?? null;
+  let nextTrackingNumber =
+    body.tracking_number !== undefined ? trimOrNull(body.tracking_number) : prior.tracking_number ?? null;
+  let nextTrackingUrl =
+    body.tracking_url !== undefined ? trimOrNull(body.tracking_url) : prior.tracking_url ?? null;
+  if (!(next === "ordered" || next === "arrived" || cur === "ordered" || cur === "arrived")) {
+    if (body.carrier === undefined) nextCarrier = prior.carrier ?? null;
+    if (body.tracking_number === undefined) nextTrackingNumber = prior.tracking_number ?? null;
+    if (body.tracking_url === undefined) nextTrackingUrl = prior.tracking_url ?? null;
+  }
+
+  let nextActualCost: number | null = prior.actual_cost != null ? Number(prior.actual_cost) : null;
+  let nextAmount = Number(before.amount);
+  if (next === "ordered" || next === "arrived") {
+    const rawText = body.actual_cost == null ? "" : String(body.actual_cost).trim();
+    if (rawText) {
+      const rawCost = Number(rawText);
+      if (!(Number.isFinite(rawCost) && rawCost > 0)) {
+        return c.json({ error: "Price paid must be a positive amount" }, 400);
+      }
+      const paid = Math.round(rawCost * 100) / 100;
+      nextActualCost = paid;
+      nextAmount = paid;
+    } else if (next === "arrived" && !(nextActualCost != null && nextActualCost > 0)) {
+      return c.json({ error: "Enter the price paid" }, 400);
     }
   }
 
@@ -18485,16 +22937,23 @@ api.post("/tool-loans/:id/part-status", async (c) => {
   /** Set when paperwork is linked to / creates a payroll charge */
   let linkedChargeId: number | null = null;
 
-  if (next === "paperwork_signed") {
+  if (next === "paperwork_signed" || preparePrint) {
     if (note !== null) paperworkNote = note;
     if (paperworkKeyRaw) paperworkKey = paperworkKeyRaw;
 
     const wantsCreate = Boolean(body.create_charge);
     const linkId = Number(body.linked_charge_id) || 0;
 
+    if (preparePrint && !wantsCreate && !linkId) {
+      return c.json(
+        { error: "Create a payroll charge or pick an existing one before printing" },
+        400
+      );
+    }
+
     if (wantsCreate && linkId) {
       return c.json(
-        { error: "Choose either an existing loan or create a new one — not both" },
+        { error: "Choose either an existing loan or create a new one â€” not both" },
         400
       );
     }
@@ -18683,6 +23142,11 @@ api.post("/tool-loans/:id/part-status", async (c) => {
        paperwork_signed_at = ?,
        paperwork_note = ?,
        paperwork_key = ?,
+       actual_cost = ?,
+       carrier = ?,
+       tracking_number = ?,
+       tracking_url = ?,
+       amount = ?,
        updated_at = datetime('now')
      WHERE id = ?`
   )
@@ -18694,6 +23158,11 @@ api.post("/tool-loans/:id/part-status", async (c) => {
       paperworkSignedAt,
       paperworkNote,
       paperworkKey,
+      nextActualCost,
+      nextCarrier,
+      nextTrackingNumber,
+      nextTrackingUrl,
+      nextAmount,
       id
     )
     .run();
@@ -18741,7 +23210,11 @@ api.post("/tool-loans/:id/part-status", async (c) => {
     id,
     `part_status=${next} · ${before.item_name}${
       paperworkKey ? ` · paperwork=${paperworkKey}` : ""
-    }${linkedChargeId ? ` · charge=#${linkedChargeId}` : ""}`
+    }${linkedChargeId ? ` · charge=#${linkedChargeId}` : ""}${
+      (next === "ordered" || next === "arrived") && nextActualCost != null
+        ? ` · price=${nextActualCost.toFixed(2)}`
+        : ""
+    }${nextTrackingNumber ? ` · track=${nextTrackingNumber}` : ""}`
   );
 
   const row = await c.env.DB.prepare(
@@ -18767,10 +23240,23 @@ api.post("/tool-loans/:id/cancel", async (c) => {
   const id = Number(c.req.param("id"));
   const before = await c.env.DB.prepare(`SELECT * FROM tool_loan_requests WHERE id = ?`)
     .bind(id)
-    .first<{ id: number; user_id: number; status: string; manager_user_id: number | null }>();
+    .first<{ id: number; user_id: number; status: string; manager_user_id: number | null; part_status: string | null }>();
   if (!before) return c.json({ error: "Not found" }, 404);
-  if (before.status !== "pending_manager" && before.status !== "pending_office") {
-    return c.json({ error: "Only open requests can be cancelled" }, 400);
+  const canCancelPending =
+    before.status === "pending_manager" || before.status === "pending_office";
+  const canCancelApprovedNotOrdered =
+    before.status === "approved" &&
+    (before.part_status == null ||
+      before.part_status === "" ||
+      before.part_status === "pending_order");
+  if (!canCancelPending && !canCancelApprovedNotOrdered) {
+    return c.json(
+      {
+        error:
+          "Only pending requests, or approved ones not yet ordered, can be cancelled",
+      },
+      400
+    );
   }
   const isOwner = before.user_id === user.id;
   if (!isOwner && !isOfficeRole(user.role)) {
@@ -18778,7 +23264,11 @@ api.post("/tool-loans/:id/cancel", async (c) => {
   }
 
   await c.env.DB.prepare(
-    `UPDATE tool_loan_requests SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
+    `UPDATE tool_loan_requests SET
+       status = 'cancelled',
+       part_status = NULL,
+       updated_at = datetime('now')
+     WHERE id = ?`
   )
     .bind(id)
     .run();
@@ -18787,7 +23277,101 @@ api.post("/tool-loans/:id/cancel", async (c) => {
   return c.json({ ok: true });
 });
 
-// ——— Parts order hub (mechanic order tracking; vendors open externally) ———
+
+api.post("/tool-loans/:id/amount", async (c) => {
+  const user = c.get("user");
+  await ensureToolLoanTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ amount?: number }>();
+  const amount = Number(body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return c.json({ error: "Enter a valid loan amount" }, 400);
+  }
+  const rounded = Math.round(amount * 100) / 100;
+
+  const before = await c.env.DB.prepare(`SELECT * FROM tool_loan_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      status: string;
+      part_status: string | null;
+      item_name: string;
+      amount: number;
+      paperwork_signed_at: string | null;
+    }>();
+  if (!before) return c.json({ error: "Not found" }, 404);
+
+  const isOwner = before.user_id === user.id;
+  if (!isOwner && !isOfficeRole(user.role)) {
+    return c.json({ error: "Only you (or office/admin) can edit this amount" }, 403);
+  }
+
+  if (before.status === "declined" || before.status === "cancelled") {
+    return c.json({ error: "This request is closed" }, 400);
+  }
+
+  if (before.paperwork_signed_at || before.part_status === "paperwork_signed") {
+    return c.json(
+      { error: "Amount locked after paperwork â€” amend the payroll charge instead" },
+      400
+    );
+  }
+
+  const linked = await c.env.DB.prepare(
+    `SELECT charge_id FROM tool_loan_charge_links WHERE request_id = ? LIMIT 1`
+  )
+    .bind(id)
+    .first<{ charge_id: number }>();
+  if (linked) {
+    return c.json(
+      { error: "Amount locked â€” this request already has a payroll charge" },
+      400
+    );
+  }
+
+  const editablePending =
+    before.status === "pending_manager" || before.status === "pending_office";
+  const editableApproved =
+    before.status === "approved" &&
+    (before.part_status == null ||
+      before.part_status === "" ||
+      before.part_status === "pending_order" ||
+      before.part_status === "ordered" ||
+      before.part_status === "arrived");
+  if (!editablePending && !editableApproved) {
+    return c.json({ error: "This request cannot change amount in its current status" }, 400);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE tool_loan_requests SET amount = ?, updated_at = datetime('now') WHERE id = ?`
+  )
+    .bind(rounded, id)
+    .run();
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "tool_loan_request",
+    id,
+    `Amount ${Number(before.amount).toFixed(2)} â†’ ${rounded.toFixed(2)} · ${before.item_name}`
+  );
+
+  const row = await c.env.DB.prepare(
+    `SELECT r.*, u.display_name as employee_name, m.display_name as manager_name
+     FROM tool_loan_requests r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN users m ON m.id = r.manager_user_id
+     WHERE r.id = ?`
+  )
+    .bind(id)
+    .first();
+
+  return c.json({ ok: true, request: row });
+});
+
+// â€”â€”â€” Parts order hub (mechanic order tracking; vendors open externally) â€”â€”â€”
 
 const PARTS_ORDER_VENDORS = {
   autozone: {
@@ -18831,6 +23415,52 @@ async function ensurePartsOrderTables(db: D1Database): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_parts_order_user ON parts_order_requests(user_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_parts_order_status ON parts_order_requests(status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_parts_order_issue ON parts_order_requests(issue_id)`,
+    `ALTER TABLE parts_order_requests ADD COLUMN job_ref TEXT`,
+    `ALTER TABLE parts_order_requests ADD COLUMN needed_by TEXT`,
+    `ALTER TABLE parts_order_requests ADD COLUMN deliver_to TEXT`,
+    `ALTER TABLE parts_order_requests ADD COLUMN eta_on TEXT`,
+    `ALTER TABLE parts_order_requests ADD COLUMN po_number TEXT`,
+    `ALTER TABLE parts_order_requests ADD COLUMN qty REAL`,
+    `CREATE TABLE IF NOT EXISTS parts_order_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER,
+      arrival_id INTEGER,
+      actor_user_id INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_order_events_req ON parts_order_events(request_id, id)`,
+    `CREATE TABLE IF NOT EXISTS parts_arrivals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      part_description TEXT NOT NULL,
+      vendor_name TEXT,
+      po_number TEXT,
+      request_id INTEGER,
+      known_user_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'unmatched',
+      logged_by_user_id INTEGER NOT NULL,
+      not_needed_by_user_id INTEGER,
+      not_needed_at TEXT,
+      qty REAL,
+      place_kind TEXT,
+      place_location_id INTEGER,
+      place_label TEXT,
+      photo_key TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_parts_arrivals_status ON parts_arrivals(status, created_at DESC)`,
+    `ALTER TABLE parts_arrivals ADD COLUMN qty REAL`,
+    `ALTER TABLE parts_arrivals ADD COLUMN place_kind TEXT`,
+    `ALTER TABLE parts_arrivals ADD COLUMN place_location_id INTEGER`,
+    `ALTER TABLE parts_arrivals ADD COLUMN place_label TEXT`,
+    `ALTER TABLE parts_arrivals ADD COLUMN photo_key TEXT`,
+    `ALTER TABLE parts_arrivals ADD COLUMN stock_part_id INTEGER`,
+    `ALTER TABLE parts_arrivals ADD COLUMN stock_location_id INTEGER`,
+    `ALTER TABLE parts_arrivals ADD COLUMN stock_qty REAL`,
   ];
   for (const sql of stmts) {
     try {
@@ -18847,9 +23477,283 @@ function canUsePartsOrderHub(role: string): boolean {
     role === "admin" ||
     role === "office" ||
     role === "mechanic" ||
+    role === "driver" ||
     role === "warehouse" ||
     role === "viewer"
   );
+}
+
+function canReceiveParts(role: string): boolean {
+  return role === "admin" || role === "office" || role === "warehouse";
+}
+
+/** Warehouse marks ordered / arriving. Admin stays so the owner can operate. */
+function canWarehouseOrder(role: string): boolean {
+  return role === "admin" || role === "warehouse";
+}
+
+function etaYmdFromOrder(row: { eta_on?: string | null; arriving_at?: string | null }): string | null {
+  const eta = String(row.eta_on || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(eta)) return eta;
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(row.arriving_at || ""));
+  return m ? m[1] : null;
+}
+
+async function logPartsOrderEvent(
+  db: D1Database,
+  row: {
+    requestId?: number | null;
+    arrivalId?: number | null;
+    actorId: number;
+    eventType: string;
+    fromStatus?: string | null;
+    toStatus?: string | null;
+    note?: string | null;
+  }
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO parts_order_events (
+         request_id, arrival_id, actor_user_id, event_type, from_status, to_status, note, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    )
+    .bind(
+      row.requestId ?? null,
+      row.arrivalId ?? null,
+      row.actorId,
+      row.eventType,
+      row.fromStatus ?? null,
+      row.toStatus ?? null,
+      row.note ?? null
+    )
+    .run();
+}
+
+async function decoratePartsOrders(db: D1Database, rows: Record<string, unknown>[]) {
+  const today = chicagoTodayYmd();
+  const ids = rows.map((r) => Number(r.id)).filter((id) => id > 0);
+  const eventsById = new Map<number, Record<string, unknown>[]>();
+  if (ids.length) {
+    try {
+      const ph = ids.map(() => "?").join(",");
+      const ev = await db
+        .prepare(
+          `SELECT e.id, e.request_id, e.actor_user_id, e.event_type, e.from_status, e.to_status,
+                  e.note, e.created_at, u.display_name as actor_name
+           FROM parts_order_events e
+           LEFT JOIN users u ON u.id = e.actor_user_id
+           WHERE e.request_id IN (${ph})
+           ORDER BY e.id DESC`
+        )
+        .bind(...ids)
+        .all<Record<string, unknown>>();
+      for (const e of ev.results || []) {
+        const rid = Number(e.request_id);
+        const list = eventsById.get(rid) || [];
+        if (list.length < 12) list.push(e);
+        eventsById.set(rid, list);
+      }
+    } catch {
+      /* history table is created on first use */
+    }
+  }
+  return rows.map((r) => {
+    const status = String(r.status || "");
+    const open = status === "ordered" || status === "arriving";
+    return {
+      ...r,
+      events: eventsById.get(Number(r.id)) || [],
+      still_needed_due: open && etaIsStale(etaYmdFromOrder(r as { eta_on?: string | null; arriving_at?: string | null }), today),
+    };
+  });
+}
+
+async function receiveOpenPartRequest(
+  db: D1Database,
+  requestId: number,
+  actorId: number,
+  note: string
+): Promise<{
+  error?: string;
+  userId?: number;
+  part?: string;
+  fromStatus?: string;
+  jobRef?: string | null;
+}> {
+  const before = await db
+    .prepare(
+      `SELECT id, user_id, status, part_description, received_at, job_ref
+       FROM parts_order_requests WHERE id = ?`
+    )
+    .bind(requestId)
+    .first<{
+      id: number;
+      user_id: number;
+      status: string;
+      part_description: string;
+      received_at: string | null;
+      job_ref: string | null;
+    }>();
+  if (!before) return { error: "That part request was not found." };
+  if (before.status === "cancelled") return { error: "That request was cancelled." };
+  if (before.status === "received") return { error: "That request is already received." };
+  if (before.status !== "needed" && before.status !== "ordered" && before.status !== "arriving") {
+    return { error: "Pick an open part request." };
+  }
+  await db
+    .prepare(
+      `UPDATE parts_order_requests
+       SET status = 'received',
+           received_at = COALESCE(received_at, ?),
+           updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .bind(new Date().toISOString(), requestId)
+    .run();
+  await logPartsOrderEvent(db, {
+    requestId,
+    actorId,
+    eventType: "status",
+    fromStatus: before.status,
+    toStatus: "received",
+    note,
+  });
+  return {
+    userId: before.user_id,
+    part: before.part_description,
+    fromStatus: before.status,
+    jobRef: before.job_ref,
+  };
+}
+
+const PART_JOB_LOOKBACK_DAYS = 21;
+const PART_BOARD_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
+
+/** Assigned techs from cached office day boards only. Does not call ServiceTitan. */
+async function assignedTechIdsForJob(
+  db: D1Database,
+  jobRef: string | null | undefined
+): Promise<number[]> {
+  if (!jobRefMatchKey(jobRef) || isShopStockJobRef(jobRef)) return [];
+  const today = chicagoTodayYmd();
+  const ids = new Set<number>();
+  for (let i = 0; i < PART_JOB_LOOKBACK_DAYS; i++) {
+    const ymd = addDaysYmd(today, -i);
+    if (!ymd) continue;
+    const hit = await readDayBoardCache(
+      db,
+      dayBoardCacheKey(ymd, "office", 0),
+      PART_BOARD_MAX_AGE_MS
+    );
+    if (!hit) continue;
+    for (const row of hit.payload.rows || []) {
+      const uid = Number(row.user_id);
+      if (!uid) continue;
+      for (const job of row.jobs || []) {
+        if (jobRefMatches(jobRef, job.job_number, job.st_job_id)) ids.add(uid);
+      }
+    }
+  }
+  return [...ids];
+}
+
+async function sendPartReceivedNotice(
+  db: D1Database,
+  opts: {
+    requestId: number;
+    requesterId: number;
+    jobRef: string | null;
+    part: string;
+    actorId: number;
+    actorName: string;
+  }
+): Promise<void> {
+  const ids = new Set<number>();
+  if (opts.requesterId > 0) ids.add(opts.requesterId);
+  for (const id of await assignedTechIdsForJob(db, opts.jobRef)) ids.add(id);
+  for (const id of await usersByRoles(db, ["warehouse", "office", "supervisor"])) ids.add(id);
+  for (const id of await chrisMarroquinUserIds(db)) ids.add(id);
+  ids.delete(opts.actorId);
+  if (!ids.size) return;
+
+  const part = String(opts.part || "").replace(/\s+/g, " ").trim().slice(0, 80) || "part";
+  const who = String(opts.actorName || "").replace(/\s+/g, " ").trim();
+  const job = String(opts.jobRef || "").replace(/\s+/g, " ").trim();
+  const title = `Part received - ${part.slice(0, 60)}`;
+  const body = [who ? `Received by ${who}.` : "Received.", job].filter(Boolean).join(" ");
+  await notifyUsers(db, [...ids], "parts_order_status", title, body, {
+    type: "parts_order",
+    id: opts.requestId,
+  });
+}
+
+/** One in-app ping per request per ETA. Never changes status. Never texts. */
+async function pingStalePartOrders(db: D1Database): Promise<void> {
+  await ensurePartsOrderTables(db);
+  const today = chicagoTodayYmd();
+  let rows: {
+    id: number;
+    user_id: number;
+    part_description: string;
+    status: string;
+    eta_on: string | null;
+    arriving_at: string | null;
+  }[] = [];
+  try {
+    const q = await db
+      .prepare(
+        `SELECT id, user_id, part_description, status, eta_on, arriving_at
+         FROM parts_order_requests
+         WHERE status IN ('ordered', 'arriving')`
+      )
+      .all<{
+        id: number;
+        user_id: number;
+        part_description: string;
+        status: string;
+        eta_on: string | null;
+        arriving_at: string | null;
+      }>();
+    rows = q.results || [];
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    const eta = etaYmdFromOrder(row);
+    if (!eta || !etaIsStale(eta, today)) continue;
+    const note = `eta=${eta}`;
+    try {
+      const prior = await db
+        .prepare(
+          `SELECT id FROM parts_order_events
+           WHERE request_id = ? AND event_type = 'still_needed_ping' AND note = ?
+           LIMIT 1`
+        )
+        .bind(row.id, note)
+        .first<{ id: number }>();
+      if (prior) continue;
+      await logPartsOrderEvent(db, {
+        requestId: row.id,
+        actorId: 0,
+        eventType: "still_needed_ping",
+        fromStatus: row.status,
+        toStatus: row.status,
+        note,
+      });
+      const part =
+        String(row.part_description || "").replace(/\s+/g, " ").trim().slice(0, 80) || "part";
+      await notifyUsers(
+        db,
+        [row.user_id],
+        "parts_order_status",
+        "Still needed?",
+        `Still needed? ${part} ETA ${eta} is past 14 days.`,
+        { type: "parts_order", id: row.id }
+      );
+    } catch {
+      /* one row must not stop the rest */
+    }
+  }
 }
 
 function canManageAllPartsOrders(role: string): boolean {
@@ -18878,7 +23782,7 @@ api.get("/parts-orders/pending-count", async (c) => {
   try {
     if (user.role === "viewer") return c.json({ pending: 0 });
     // Open work: still needed / ordered / arriving (not done)
-    if (user.role === "mechanic") {
+    if (user.role === "mechanic" || user.role === "driver") {
       const row = await c.env.DB.prepare(
         `SELECT COUNT(*) as c FROM parts_order_requests
          WHERE user_id = ? AND status IN ('needed', 'ordered', 'arriving')`
@@ -18932,7 +23836,7 @@ api.get("/parts-orders", async (c) => {
           OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days'))`
       );
     } else {
-      // all — last 90 days closed + all open
+      // all â€” last 90 days closed + all open
       where.push(
         `(r.status IN ('needed', 'ordered', 'arriving')
           OR date(COALESCE(r.received_at, r.updated_at, r.created_at)) >= date('now', '-90 days'))`
@@ -18962,7 +23866,7 @@ api.get("/parts-orders", async (c) => {
     const rows = await c.env.DB.prepare(sql).bind(...binds).all();
 
     let pending = 0;
-    if (user.role === "mechanic") {
+    if (user.role === "mechanic" || user.role === "driver") {
       const p = await c.env.DB.prepare(
         `SELECT COUNT(*) as c FROM parts_order_requests
          WHERE user_id = ? AND status IN ('needed', 'ordered', 'arriving')`
@@ -18978,8 +23882,20 @@ api.get("/parts-orders", async (c) => {
       pending = p?.c ?? 0;
     }
 
+    const requests = await decoratePartsOrders(
+      c.env.DB,
+      (rows.results || []) as Record<string, unknown>[]
+    );
+    if (user.role === "admin" || user.role === "office" || user.role === "warehouse") {
+      scheduleWaitUntil(
+        c,
+        pingStalePartOrders(c.env.DB).catch(() => {
+          /* best-effort backorder ping */
+        })
+      );
+    }
     return c.json({
-      requests: rows.results || [],
+      requests,
       pending,
       vendors: [PARTS_ORDER_VENDORS.autozone, PARTS_ORDER_VENDORS.firstcall],
     });
@@ -19011,12 +23927,27 @@ api.post("/parts-orders", async (c) => {
     issue_id?: number | null;
     vendor_preference?: PartsOrderVendorPref;
     notes?: string;
+    job_ref?: string;
+    shop_stock?: boolean;
+    needed_by?: string;
+    deliver_to?: string;
+    po_number?: string;
   }>();
 
   const partDescription = (body.part_description || "").trim();
   if (!partDescription || partDescription.length < 2) {
     return c.json({ error: "Describe the part you need" }, 400);
   }
+  const jobRef = normalizeJobRef(body.job_ref, Boolean(body.shop_stock));
+  const jobErr = jobRefError(jobRef);
+  if (jobErr) return c.json({ error: jobErr }, 400);
+  const neededBy = String(body.needed_by || "").trim();
+  const needErr = neededByError(neededBy);
+  if (needErr) return c.json({ error: needErr }, 400);
+  const deliverTo = String(body.deliver_to || "").trim();
+  const deliverErr = deliverToError(deliverTo);
+  if (deliverErr) return c.json({ error: deliverErr }, 400);
+  const poNumber = (body.po_number || "").trim() || null;
   const partNumber = (body.part_number || "").trim() || null;
   const vehicleLabel = (body.vehicle_label || "").trim() || null;
   const vehicleId =
@@ -19037,8 +23968,9 @@ api.post("/parts-orders", async (c) => {
     const ins = await c.env.DB.prepare(
       `INSERT INTO parts_order_requests (
          user_id, vehicle_id, vehicle_label, issue_id, part_description, part_number,
-         vendor_preference, notes, status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'needed', datetime('now'), datetime('now'))`
+         vendor_preference, notes, status, job_ref, needed_by, deliver_to, po_number,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'needed', ?, ?, ?, ?, datetime('now'), datetime('now'))`
     )
       .bind(
         user.id,
@@ -19048,10 +23980,22 @@ api.post("/parts-orders", async (c) => {
         partDescription,
         partNumber,
         vendorPref,
-        notes
+        notes,
+        jobRef,
+        neededBy,
+        deliverTo,
+        poNumber
       )
       .run();
     const id = Number(ins.meta.last_row_id);
+    await logPartsOrderEvent(c.env.DB, {
+      requestId: id,
+      actorId: user.id,
+      eventType: "status",
+      fromStatus: null,
+      toStatus: "needed",
+      note: `${jobRef} - needed by ${neededBy}`,
+    });
 
     // Notify warehouse + office/admin (not the requester)
     const notifyIds = new Set<number>();
@@ -19120,6 +24064,8 @@ api.post("/parts-orders/:id/status", async (c) => {
     status?: PartsOrderStatus;
     ordered_from?: string | null;
     order_note?: string | null;
+    eta_on?: string | null;
+    po_number?: string | null;
   }>();
   const next = body.status;
   const allowed: PartsOrderStatus[] = [
@@ -19145,22 +24091,37 @@ api.post("/parts-orders/:id/status", async (c) => {
       ordered_at: string | null;
       arriving_at: string | null;
       received_at: string | null;
+      eta_on: string | null;
+      po_number: string | null;
     }>();
   if (!before) return c.json({ error: "Not found" }, 404);
 
-  // Mechanics can update any open shop order; cancel only own or admin/office
+  // Cancel only own or admin/office. Ordered and arriving are warehouse (or admin).
   if (next === "cancelled") {
     const isOwner = before.user_id === user.id;
     if (!isOwner && user.role !== "admin" && user.role !== "office") {
       return c.json({ error: "Only the requester or office/admin can cancel" }, 403);
     }
   }
+  if (next === "ordered" || next === "arriving") {
+    if (!canWarehouseOrder(user.role)) {
+      return c.json({ error: "Only warehouse can mark a part ordered or arriving." }, 403);
+    }
+  }
+  if (next === "received") {
+    return c.json(
+      { error: "Receive this on the Receiving card and pick the open request." },
+      400
+    );
+  }
 
   let orderedFrom = before.ordered_from;
-  if (body.ordered_from === "autozone" || body.ordered_from === "firstcall" || body.ordered_from === "other") {
+  if (
+    body.ordered_from === "autozone" ||
+    body.ordered_from === "firstcall" ||
+    body.ordered_from === "other"
+  ) {
     orderedFrom = body.ordered_from;
-  } else if (next === "ordered" && !orderedFrom) {
-    orderedFrom = "other";
   }
 
   const orderNote =
@@ -19177,9 +24138,25 @@ api.post("/parts-orders/:id/status", async (c) => {
     if (!orderedAt) orderedAt = nowIso;
     if (!arrivingAt) arrivingAt = nowIso;
   }
-  if (next === "received") {
-    if (!orderedAt) orderedAt = nowIso;
-    if (!receivedAt) receivedAt = nowIso;
+
+  let etaOn = before.eta_on;
+  if (body.eta_on !== undefined) {
+    const e = String(body.eta_on || "").trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(e)) etaOn = e;
+  }
+  let poNumber = before.po_number;
+  if (body.po_number !== undefined) {
+    poNumber = String(body.po_number || "").trim() || null;
+  }
+
+  if (next === "ordered" || next === "arriving") {
+    const fieldErr = orderFieldsError({
+      status: next,
+      orderedFrom,
+      poNumber,
+      etaOn,
+    });
+    if (fieldErr) return c.json({ error: fieldErr }, 400);
   }
 
   await c.env.DB.prepare(
@@ -19190,11 +24167,23 @@ api.post("/parts-orders/:id/status", async (c) => {
        ordered_at = ?,
        arriving_at = ?,
        received_at = ?,
+       eta_on = ?,
+       po_number = ?,
        updated_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(next, orderedFrom, orderNote, orderedAt, arrivingAt, receivedAt, id)
+    .bind(next, orderedFrom, orderNote, orderedAt, arrivingAt, receivedAt, etaOn, poNumber, id)
     .run();
+  if (next !== before.status) {
+    await logPartsOrderEvent(c.env.DB, {
+      requestId: id,
+      actorId: user.id,
+      eventType: "status",
+      fromStatus: before.status,
+      toStatus: next,
+      note: orderNote,
+    });
+  }
 
   // Notify requester on progress (if someone else updated)
   if (before.user_id !== user.id && next !== before.status) {
@@ -19203,11 +24192,9 @@ api.post("/parts-orders/:id/status", async (c) => {
         ? "ordered"
         : next === "arriving"
           ? "on the way / arriving"
-          : next === "received"
-            ? "received"
-            : next === "cancelled"
-              ? "cancelled"
-              : next;
+          : next === "cancelled"
+            ? "cancelled"
+            : next;
     scheduleWaitUntil(
       c,
       notifyUsers(
@@ -19256,7 +24243,7 @@ api.post("/parts-orders/:id/status", async (c) => {
     "update",
     "parts_order_request",
     id,
-    `${before.status}→${next}`
+    `${before.status}â†’${next}`
   );
 
   const row = await c.env.DB.prepare(
@@ -19293,18 +24280,862 @@ api.post("/parts-orders/:id/cancel", async (c) => {
   )
     .bind(id)
     .run();
+  await logPartsOrderEvent(c.env.DB, {
+    requestId: id,
+    actorId: user.id,
+    eventType: "status",
+    fromStatus: before.status,
+    toStatus: "cancelled",
+    note: "Cancelled",
+  });
   await writeAudit(c.env.DB, user, "update", "parts_order_request", id, "Cancelled");
   return c.json({ ok: true });
 });
 
-// ——— Field parts delivery runs (accountability when tech needs materials brought out) ———
+api.get("/parts-orders/open-search", async (c) => {
+  const user = c.get("user");
+  if (!canReceiveParts(user.role)) return c.json({ error: "Not allowed" }, 403);
+  await ensurePartsOrderTables(c.env.DB);
+  const q = String(c.req.query("q") || "").trim();
+  const like = `%${q.replace(/[%_]/g, "")}%`;
+  const sql = q
+    ? `SELECT r.id, r.part_description, r.part_number, r.job_ref, r.po_number, r.qty,
+              r.vendor_preference, r.ordered_from, r.created_at, r.status, r.user_id,
+              u.display_name as requested_by_name
+       FROM parts_order_requests r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.status IN ('needed', 'ordered', 'arriving')
+         AND (
+           r.part_description LIKE ? OR IFNULL(r.part_number, '') LIKE ?
+           OR IFNULL(r.job_ref, '') LIKE ? OR IFNULL(r.po_number, '') LIKE ?
+           OR IFNULL(r.ordered_from, '') LIKE ? OR IFNULL(r.vendor_preference, '') LIKE ?
+           OR IFNULL(r.order_note, '') LIKE ? OR u.display_name LIKE ?
+         )
+       ORDER BY r.created_at DESC
+       LIMIT 20`
+    : `SELECT r.id, r.part_description, r.part_number, r.job_ref, r.po_number, r.qty,
+              r.vendor_preference, r.ordered_from, r.created_at, r.status, r.user_id,
+              u.display_name as requested_by_name
+       FROM parts_order_requests r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.status IN ('needed', 'ordered', 'arriving')
+       ORDER BY r.created_at DESC
+       LIMIT 20`;
+  const stmt = c.env.DB.prepare(sql);
+  const rows = q ? await stmt.bind(like, like, like, like, like, like, like, like).all() : await stmt.all();
+  return c.json({ requests: rows.results || [] });
+});
+
+api.get("/parts-orders/requesters", async (c) => {
+  const user = c.get("user");
+  if (!canReceiveParts(user.role)) return c.json({ error: "Not allowed" }, 403);
+  const q = String(c.req.query("q") || "").trim();
+  if (q.length < 2) return c.json({ users: [] });
+  const like = `%${q.replace(/[%_]/g, "")}%`;
+  const rows = await c.env.DB.prepare(
+    `SELECT id, display_name FROM users
+     WHERE active = 1 AND display_name LIKE ?
+     ORDER BY display_name
+     LIMIT 8`
+  )
+    .bind(like)
+    .all<{ id: number; display_name: string }>();
+  return c.json({ users: rows.results || [] });
+});
+
+/** Place is the shelf or truck the quantity is booked to. Floor falls back to the order. */
+async function resolveDockPlace(
+  db: D1Database,
+  kindRaw: unknown,
+  locationIdRaw: unknown
+): Promise<{ error?: string; kind: string; locationId: number | null; label: string }> {
+  const kind = String(kindRaw || "").trim().toLowerCase();
+  if (kind === "floor") return { kind: "floor", locationId: null, label: "Floor" };
+  if (kind !== "section" && kind !== "truck") {
+    return { error: "Pick where it sits: a section, a truck, or Floor.", kind: "", locationId: null, label: "" };
+  }
+  const id = Number(locationIdRaw);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { error: "Pick where it sits.", kind: "", locationId: null, label: "" };
+  }
+  const row = await db
+    .prepare(
+      `SELECT l.id, l.type, l.name, l.zone, l.active, v.unit_number
+       FROM stock_locations l
+       LEFT JOIN vehicles v ON v.id = l.vehicle_id
+       WHERE l.id = ?`
+    )
+    .bind(id)
+    .first<{
+      id: number;
+      type: string;
+      name: string;
+      zone: string | null;
+      active: number;
+      unit_number: string | null;
+    }>();
+  if (!row || Number(row.active) !== 1) {
+    return { error: "That place is not on the list.", kind: "", locationId: null, label: "" };
+  }
+  if (kind === "section") {
+    if (row.type !== "warehouse" && row.type !== "attic") {
+      return { error: "Pick a stock section.", kind: "", locationId: null, label: "" };
+    }
+    return {
+      kind: "section",
+      locationId: row.id,
+      label: sectionPlaceLabel(row.name, row.zone, row.type),
+    };
+  }
+  if (row.type !== "vehicle") {
+    return { error: "Pick a truck.", kind: "", locationId: null, label: "" };
+  }
+  return {
+    kind: "truck",
+    locationId: row.id,
+    label: truckPlaceLabel(row.unit_number, row.name),
+  };
+}
+
+api.get("/parts-orders/arrivals", async (c) => {
+  const user = c.get("user");
+  if (!canUsePartsOrderHub(user.role)) return c.json({ error: "Not allowed" }, 403);
+  await ensurePartsOrderTables(c.env.DB);
+  const mineOnly = !canReceiveParts(user.role);
+  const sql = `SELECT a.*,
+      ku.display_name as known_user_name,
+      lu.display_name as logged_by_name,
+      r.job_ref as linked_job,
+      r.part_description as linked_part,
+      r.qty as linked_qty,
+      r.created_at as linked_requested_at,
+      ru.display_name as linked_requester_name
+    FROM parts_arrivals a
+    LEFT JOIN users ku ON ku.id = a.known_user_id
+    LEFT JOIN users lu ON lu.id = a.logged_by_user_id
+    LEFT JOIN parts_order_requests r ON r.id = a.request_id
+    LEFT JOIN users ru ON ru.id = r.user_id
+    WHERE ${mineOnly ? "a.known_user_id = ? AND a.status = 'unmatched'" : "a.status IN ('unmatched', 'docked', 'received', 'returned')"}
+    ORDER BY CASE a.status WHEN 'unmatched' THEN 0 WHEN 'docked' THEN 1 WHEN 'received' THEN 2 ELSE 3 END,
+             a.created_at DESC
+    LIMIT 40`;
+  try {
+    const stmt = c.env.DB.prepare(sql);
+    const rows = mineOnly ? await stmt.bind(user.id).all() : await stmt.all();
+    return c.json({ arrivals: rows.results || [] });
+  } catch (e) {
+    return c.json({ arrivals: [], error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+api.post("/parts-orders/arrivals", async (c) => {
+  const user = c.get("user");
+  if (!canReceiveParts(user.role)) return c.json({ error: "Not allowed" }, 403);
+  await ensurePartsOrderTables(c.env.DB);
+  const body = await c.req.json<{
+    part_description?: string;
+    vendor_name?: string;
+    po_number?: string;
+    request_id?: number | null;
+    unmatched?: boolean;
+    known_user_id?: number | null;
+    qty?: number | string | null;
+    place_kind?: string;
+    place_location_id?: number | null;
+    photo_key?: string | null;
+  }>();
+  const part = (body.part_description || "").trim();
+  if (part.length < 2) return c.json({ error: "Enter the part that arrived" }, 400);
+  const vendor = (body.vendor_name || "").trim() || null;
+  const po = (body.po_number || "").trim() || null;
+  const requestId = Number(body.request_id) > 0 ? Number(body.request_id) : null;
+  const knownUserId = Number(body.known_user_id) > 0 ? Number(body.known_user_id) : null;
+  if (!requestId && !body.unmatched) {
+    return c.json({ error: "Pick an open part request, or mark it as an unmatched arrival." }, 400);
+  }
+  const qty = parseArrivalQty(body.qty);
+  if (qty == null) return c.json({ error: "Enter the actual qty." }, 400);
+  const photo = cleanArrivalPhotoKey(body.photo_key);
+  if (photo.error) return c.json({ error: photo.error }, 400);
+  const place = await resolveDockPlace(c.env.DB, body.place_kind, body.place_location_id);
+  if (place.error) return c.json({ error: place.error }, 400);
+
+  let linkedUser: number | null = null;
+  let linkedJob: string | null = null;
+  let linkedPart: string | null = null;
+  if (requestId) {
+    const got = await receiveOpenPartRequest(
+      c.env.DB,
+      requestId,
+      user.id,
+      "Docked on the receiving card and linked to this request"
+    );
+    if (got.error) return c.json({ error: got.error }, 400);
+    linkedUser = got.userId ?? null;
+    linkedJob = got.jobRef ?? null;
+    linkedPart = got.part ?? null;
+  }
+
+  const status = requestId ? "docked" : "unmatched";
+  const ins = await c.env.DB.prepare(
+    `INSERT INTO parts_arrivals (
+       part_description, vendor_name, po_number, request_id, known_user_id, status,
+       logged_by_user_id, qty, place_kind, place_location_id, place_label, photo_key,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+  )
+    .bind(
+      part,
+      vendor,
+      po,
+      requestId,
+      requestId ? linkedUser : knownUserId,
+      status,
+      user.id,
+      qty,
+      place.kind,
+      place.locationId,
+      place.label,
+      photo.key
+    )
+    .run();
+  const arrivalId = Number(ins.meta.last_row_id);
+  await logPartsOrderEvent(c.env.DB, {
+    requestId,
+    arrivalId,
+    actorId: user.id,
+    eventType: "status",
+    fromStatus: null,
+    toStatus: status,
+    note: requestId ? "Docked and linked at receiving" : "Unmatched arrival",
+  });
+
+  if (!requestId) {
+    const ids = new Set(await usersByRoles(c.env.DB, ["admin", "office"]));
+    if (knownUserId) ids.add(knownUserId);
+    ids.delete(user.id);
+    const bodyText = toAsciiUiText(unmatchedArrivalBody(part, vendor || ""));
+    if (ids.size) {
+      scheduleWaitUntil(
+        c,
+        notifyUsers(
+          c.env.DB,
+          [...ids],
+          "parts_arrival",
+          "Unmatched arrival",
+          bodyText,
+          { type: "parts_arrival", id: arrivalId }
+        ).catch(() => {
+          /* in-app only */
+        })
+      );
+    }
+  } else {
+    scheduleWaitUntil(
+      c,
+      sendPartReceivedNotice(c.env.DB, {
+        requestId,
+        requesterId: linkedUser || 0,
+        jobRef: linkedJob,
+        part: linkedPart || part,
+        actorId: user.id,
+        actorName: user.display_name,
+      }).catch(() => {
+        /* push is best-effort */
+      })
+    );
+  }
+
+  await writeAudit(
+    c.env.DB,
+    user,
+    "create",
+    "parts_arrival",
+    arrivalId,
+    `${status} - ${part.slice(0, 80)}`
+  );
+  let stockNote = "";
+  if (requestId) {
+    try {
+      stockNote = await bookArrivalStock(c.env.DB, user.id, {
+        id: arrivalId,
+        qty,
+        placeKind: place.kind,
+        placeLocationId: place.locationId,
+        partDescription: part,
+        requestId,
+      });
+    } catch {
+      stockNote = "The request is received. The count could not be updated.";
+    }
+  }
+  return c.json({ ok: true, id: arrivalId, status, stock_note: stockNote }, 201);
+});
+
+api.post("/parts-orders/arrivals/:id/link", async (c) => {
+  const user = c.get("user");
+  if (!canReceiveParts(user.role)) return c.json({ error: "Not allowed" }, 403);
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ request_id?: number }>();
+  const requestId = Number(body.request_id);
+  if (!requestId) return c.json({ error: "Pick an open part request." }, 400);
+  const arrival = await c.env.DB.prepare(`SELECT * FROM parts_arrivals WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      status: string;
+      request_id: number | null;
+      part_description: string;
+      qty: number | null;
+      place_kind: string | null;
+      place_location_id: number | null;
+    }>();
+  if (!arrival) return c.json({ error: "Not found" }, 404);
+  if (arrival.status === "returned") return c.json({ error: "Already returned" }, 400);
+  if (arrival.request_id) return c.json({ error: "Already linked to a request" }, 400);
+  const got = await receiveOpenPartRequest(
+    c.env.DB,
+    requestId,
+    user.id,
+    "Linked from an unmatched arrival"
+  );
+  if (got.error) return c.json({ error: got.error }, 400);
+  await c.env.DB.prepare(
+    `UPDATE parts_arrivals
+     SET request_id = ?, known_user_id = COALESCE(known_user_id, ?), status = 'docked', updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(requestId, got.userId ?? null, id)
+    .run();
+  await logPartsOrderEvent(c.env.DB, {
+    requestId,
+    arrivalId: id,
+    actorId: user.id,
+    eventType: "status",
+    fromStatus: arrival.status,
+    toStatus: "docked",
+    note: "Linked to an open request",
+  });
+  scheduleWaitUntil(
+    c,
+    sendPartReceivedNotice(c.env.DB, {
+      requestId,
+      requesterId: got.userId || 0,
+      jobRef: got.jobRef || null,
+      part: got.part || arrival.part_description,
+      actorId: user.id,
+      actorName: user.display_name,
+    }).catch(() => {
+      /* push is best-effort */
+    })
+  );
+  let stockNote = "";
+  try {
+    stockNote = await bookArrivalStock(c.env.DB, user.id, {
+      id: arrival.id,
+      qty: arrival.qty,
+      placeKind: arrival.place_kind,
+      placeLocationId: arrival.place_location_id,
+      partDescription: arrival.part_description,
+      requestId,
+    });
+  } catch {
+    stockNote = "The request is received. The count could not be updated.";
+  }
+  return c.json({ ok: true, stock_note: stockNote });
+});
+
+api.post("/parts-orders/arrivals/:id/not-needed", async (c) => {
+  const user = c.get("user");
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const arrival = await c.env.DB.prepare(`SELECT * FROM parts_arrivals WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      status: string;
+      request_id: number | null;
+      known_user_id: number | null;
+      not_needed_at: string | null;
+    }>();
+  if (!arrival) return c.json({ error: "Not found" }, 404);
+  const isOffice = user.role === "admin" || user.role === "office";
+  const isRequester = arrival.known_user_id != null && arrival.known_user_id === user.id;
+  if (!isOffice && !isRequester) {
+    return c.json({ error: "Only the requester or office can confirm this" }, 403);
+  }
+  if (arrival.request_id) return c.json({ error: "This arrival is already linked to a request" }, 400);
+  if (arrival.not_needed_at) return c.json({ ok: true, already: true });
+  await c.env.DB.prepare(
+    `UPDATE parts_arrivals
+     SET not_needed_by_user_id = ?, not_needed_at = datetime('now'), updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(user.id, id)
+    .run();
+  await logPartsOrderEvent(c.env.DB, {
+    arrivalId: id,
+    actorId: user.id,
+    eventType: "not_needed",
+    fromStatus: arrival.status,
+    toStatus: arrival.status,
+    note: "Not needed",
+  });
+  return c.json({ ok: true });
+});
+
+api.post("/parts-orders/arrivals/:id/return", async (c) => {
+  const user = c.get("user");
+  if (!canReceiveParts(user.role)) return c.json({ error: "Not allowed" }, 403);
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const arrival = await c.env.DB.prepare(`SELECT * FROM parts_arrivals WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      status: string;
+      request_id: number | null;
+      not_needed_at: string | null;
+      part_description: string;
+    }>();
+  if (!arrival) return c.json({ error: "Not found" }, 404);
+  if (arrival.status === "returned") return c.json({ error: "Already returned" }, 400);
+  if (await handoffsReady(c.env.DB) && (await proofRequiredArrivalReturn(c.env.DB))) {
+    const proof = await c.env.DB.prepare(
+      `SELECT 1 AS ok FROM vendor_handoffs WHERE source_type = 'parts_arrival' AND source_id = ? LIMIT 1`
+    ).bind(id).first<{ ok: number }>();
+    if (!proof?.ok) {
+      return c.json({ error: "Proof of hand-off required. Have the vendor rep sign on the card first.", code: "handoff_required" }, 409);
+    }
+  }
+  const block = arrivalReturnBlock({
+    requestId: arrival.request_id,
+    notNeededAt: arrival.not_needed_at,
+  });
+  if (block) return c.json({ error: block }, 409);
+  let stockNote = "";
+  try {
+    stockNote = await releaseArrivalStock(c.env.DB, user.id, id);
+  } catch {
+    stockNote = "The box is returned. The count could not be changed.";
+  }
+  await c.env.DB.prepare(
+    `UPDATE parts_arrivals SET status = 'returned', updated_at = datetime('now') WHERE id = ?`
+  )
+    .bind(id)
+    .run();
+  await logPartsOrderEvent(c.env.DB, {
+    requestId: arrival.request_id,
+    arrivalId: id,
+    actorId: user.id,
+    eventType: "status",
+    fromStatus: arrival.status,
+    toStatus: "returned",
+    note: "Marked return",
+  });
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "parts_arrival",
+    id,
+    `returned - ${arrival.part_description.slice(0, 80)}`
+  );
+  return c.json({ ok: true, stock_note: stockNote });
+});
+
+api.post("/parts-orders/arrivals/:id/not-needed-return", async (c) => {
+  const user = c.get("user");
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const arrival = await c.env.DB.prepare(`SELECT * FROM parts_arrivals WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      status: string;
+      request_id: number | null;
+      known_user_id: number | null;
+      part_description: string;
+    }>();
+  if (!arrival) return c.json({ error: "Not found" }, 404);
+  if (arrival.status === "returned") return c.json({ error: "Already returned" }, 400);
+  if (await handoffsReady(c.env.DB) && (await proofRequiredArrivalReturn(c.env.DB))) {
+    const proof = await c.env.DB.prepare(
+      `SELECT 1 AS ok FROM vendor_handoffs WHERE source_type = 'parts_arrival' AND source_id = ? LIMIT 1`
+    ).bind(id).first<{ ok: number }>();
+    if (!proof?.ok) {
+      return c.json({ error: "Proof of hand-off required. Have the vendor rep sign on the card first.", code: "handoff_required" }, 409);
+    }
+  }
+  if (arrival.request_id) return c.json({ error: "This arrival is linked to a request. Use Return." }, 400);
+  const isRequester = arrival.known_user_id != null && arrival.known_user_id === user.id;
+  if (!canReceiveParts(user.role) && !isRequester) {
+    return c.json({ error: "Only warehouse, office, or the requester can do this" }, 403);
+  }
+  await c.env.DB.prepare(
+    `UPDATE parts_arrivals
+     SET not_needed_by_user_id = COALESCE(not_needed_by_user_id, ?),
+         not_needed_at = COALESCE(not_needed_at, datetime('now')),
+         status = 'returned',
+         updated_at = datetime('now')
+     WHERE id = ?`
+  )
+    .bind(user.id, id)
+    .run();
+  await logPartsOrderEvent(c.env.DB, {
+    arrivalId: id,
+    actorId: user.id,
+    eventType: "not_needed",
+    fromStatus: arrival.status,
+    toStatus: "returned",
+    note: "Not needed and returned",
+  });
+  await writeAudit(
+    c.env.DB,
+    user,
+    "update",
+    "parts_arrival",
+    id,
+    `not needed return - ${String(arrival.part_description || "").slice(0, 80)}`
+  );
+  return c.json({ ok: true });
+});
+
+async function openDeliveries(db: D1Database) {
+  const D = await import("./deliveries");
+  if (!(await D.deliveriesReady(db))) return { D, ready: false as const };
+  return { D, ready: true as const };
+}
+
+function deliveryError(e: unknown): { status: 400 | 404; error: string } {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (msg === "Not found") return { status: 404, error: msg };
+  return { status: 400, error: msg };
+}
+
+api.get("/deliveries/access", async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const user = c.get("user");
+    const body: Record<string, unknown> = {
+      can_view: roleAtLeast(user.role, ROLE_PERMS.viewDeliveries),
+      can_receive: roleAtLeast(user.role, ROLE_PERMS.receiveDeliveries),
+      can_schedule: roleAtLeast(user.role, ROLE_PERMS.scheduleDeliveries),
+      can_pickup: roleAtLeast(user.role, ROLE_PERMS.pickupDeliveries),
+      can_manage: roleAtLeast(user.role, ROLE_PERMS.manageDeliveries),
+    };
+    if (user.role === "admin") body.sms_enabled = await opened.D.deliveriesSmsOn(c.env.DB);
+    return c.json(body);
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries/flag", requireRoles(["admin"]), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    return c.json({ sms_enabled: await opened.D.deliveriesSmsOn(c.env.DB) });
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.put("/deliveries/flag", requireRoles(["admin"]), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ sms_enabled?: boolean }>();
+    return c.json(await opened.D.setDeliveriesSms(c.env.DB, c.get("user"), Boolean(body.sms_enabled)));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries/spots", requireRoles(ROLE_PERMS.viewDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const user = c.get("user");
+    const all = c.req.query("all") === "1" && roleAtLeast(user.role, ROLE_PERMS.manageDeliveries);
+    return c.json(await opened.D.listSpots(c.env.DB, all));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/spots", requireRoles(ROLE_PERMS.receiveDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ label?: string }>();
+    return c.json(await opened.D.addSpot(c.env.DB, c.get("user"), body.label));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/spots/:id/retire", requireRoles(ROLE_PERMS.manageDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    return c.json(await opened.D.retireSpot(c.env.DB, c.get("user"), Number(c.req.param("id"))));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries/people", requireRoles(ROLE_PERMS.pickupDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    return c.json(await opened.D.searchPeople(c.env.DB, c.req.query("q") || ""));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries/st/locations", requireRoles(ROLE_PERMS.receiveDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const q = (c.req.query("q") || "").trim();
+    try {
+      const out = await searchMillerLocations(c.env, c.env.DB, q);
+      return c.json(out);
+    } catch (e) {
+      return c.json({ hits: [], error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries/st/jobs", requireRoles(ROLE_PERMS.receiveDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const lid = Number(c.req.query("location_id") || 0);
+    const cid = Number(c.req.query("customer_id") || 0);
+    try {
+      const tenantId = await stTenantId(c.env, c.env.DB);
+      if (!tenantId) return c.json({ jobs: [], error: "ServiceTitan not configured" });
+      const jobs =
+        lid > 0
+          ? await findOpenJobsAtLocation(c.env, c.env.DB, tenantId, lid, null, cid > 0 ? cid : null)
+          : [];
+      return c.json({ jobs });
+    } catch (e) {
+      return c.json({ jobs: [], error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.get("/deliveries", requireRoles(ROLE_PERMS.viewDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const id = Number(c.req.query("id") || 0);
+    return c.json(
+      await opened.D.listDeliveries(c.env, c.env.DB, {
+        view: c.req.query("view") || "open",
+        q: c.req.query("q") || "",
+        id: id > 0 ? id : undefined,
+      })
+    );
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries", requireRoles(ROLE_PERMS.receiveDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const user = c.get("user");
+    const body = await c.req.json<Record<string, unknown>>();
+    const out = await opened.D.receiveDelivery(c.env, c.env.DB, user, body);
+    if (!out.already) {
+      scheduleWaitUntil(
+        c,
+        opened.D.notifyDeliveryReceived(c.env, c.env.DB, out.id, user).catch(() => {})
+      );
+    }
+    return c.json({ ok: true, id: out.id }, 201);
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/schedule", requireRoles(ROLE_PERMS.scheduleDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ scheduled_for?: string | null }>();
+    return c.json(
+      await opened.D.scheduleDelivery(c.env.DB, c.get("user"), Number(c.req.param("id")), body.scheduled_for ?? null)
+    );
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/unschedule", requireRoles(ROLE_PERMS.scheduleDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    return c.json(await opened.D.unscheduleDelivery(c.env.DB, c.get("user"), Number(c.req.param("id"))));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/picked-up", requireRoles(ROLE_PERMS.pickupDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ picked_up_by_user_id?: number }>();
+    return c.json(
+      await opened.D.pickupDelivery(c.env.DB, c.get("user"), Number(c.req.param("id")), body.picked_up_by_user_id)
+    );
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/undo-pickup", requireRoles(ROLE_PERMS.manageDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    return c.json(await opened.D.undoPickup(c.env.DB, c.get("user"), Number(c.req.param("id"))));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/spot", requireRoles(ROLE_PERMS.manageDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ spot_id?: number; new_spot_label?: string }>();
+    return c.json(await opened.D.moveDeliverySpot(c.env.DB, c.get("user"), Number(c.req.param("id")), body));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/deliveries/:id/void", requireRoles(ROLE_PERMS.receiveDeliveries), async (c) => {
+  try {
+    const opened = await openDeliveries(c.env.DB);
+    if (!opened.ready) {
+      return c.json({ error: "Run migration 109_part_deliveries.sql (after Chris says Y)." }, 503);
+    }
+    const body = await c.req.json<{ reason?: string }>();
+    return c.json(await opened.D.voidDelivery(c.env.DB, c.get("user"), Number(c.req.param("id")), body.reason));
+  } catch (e) {
+    const err = deliveryError(e);
+    return c.json({ error: err.error }, err.status);
+  }
+});
+
+api.post("/parts-orders/:id/still-needed", async (c) => {
+  const user = c.get("user");
+  await ensurePartsOrderTables(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ answer?: string }>();
+  const answer = String(body.answer || "").trim().toLowerCase();
+  if (answer !== "yes" && answer !== "no") {
+    return c.json({ error: "Answer yes or no" }, 400);
+  }
+  const row = await c.env.DB.prepare(`SELECT * FROM parts_order_requests WHERE id = ?`)
+    .bind(id)
+    .first<{
+      id: number;
+      user_id: number;
+      status: string;
+      eta_on: string | null;
+      arriving_at: string | null;
+    }>();
+  if (!row) return c.json({ error: "Not found" }, 404);
+  if (row.user_id !== user.id) return c.json({ error: "Only the requester can answer" }, 403);
+  if (row.status !== "ordered" && row.status !== "arriving") {
+    return c.json({ error: "This request is not an open backorder" }, 400);
+  }
+  if (!etaIsStale(etaYmdFromOrder(row), chicagoTodayYmd())) {
+    return c.json({ error: "The ETA is not more than 14 days old" }, 400);
+  }
+  const note = answer === "yes" ? "Still needed: yes" : "Still needed: no";
+  await logPartsOrderEvent(c.env.DB, {
+    requestId: id,
+    actorId: user.id,
+    eventType: "still_needed",
+    fromStatus: row.status,
+    toStatus: row.status,
+    note,
+  });
+  return c.json({ ok: true, status: row.status, note });
+});
+
+// â€”â€”â€” Field parts delivery runs (accountability when tech needs materials brought out) â€”â€”â€”
 
 const PARTS_RUN_REASONS = [
   { id: "forgot_load", label: "Forgot to load from the shop" },
   { id: "stock_out", label: "Used the last one / truck stock empty" },
   { id: "wrong_part", label: "Wrong part was loaded" },
   { id: "scope_changed", label: "Job needs changed mid-call" },
-  { id: "unknown_need", label: "Didn’t know it would be needed" },
+  { id: "unknown_need", label: "Didnâ€™t know it would be needed" },
   { id: "other", label: "Other" },
 ] as const;
 
@@ -19386,13 +25217,28 @@ async function loadPartsRunLines(db: D1Database, runId: number) {
   try {
     const rows = await db
       .prepare(
-        `SELECT * FROM parts_run_lines WHERE run_id = ? ORDER BY line_no, id`
+        `SELECT l.*,
+            (SELECT b.qty FROM stock_balances b
+             JOIN stock_locations s ON s.id = b.location_id
+             WHERE b.part_id = l.part_id AND s.type = 'warehouse' AND s.active = 1
+             ORDER BY s.id LIMIT 1) AS warehouse_qty
+         FROM parts_run_lines l
+         WHERE l.run_id = ?
+         ORDER BY l.line_no, l.id`
       )
       .bind(runId)
       .all();
     return rows.results || [];
   } catch {
-    return [];
+    try {
+      const rows = await db
+        .prepare(`SELECT * FROM parts_run_lines WHERE run_id = ? ORDER BY line_no, id`)
+        .bind(runId)
+        .all();
+      return rows.results || [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -19409,7 +25255,8 @@ async function withPartsRunLines<T extends { id: number }>(
 }
 
 /**
- * Move stock warehouse → truck (or issue from warehouse) for a delivered parts run.
+ * Move stock warehouse -> truck (or issue from warehouse) for a delivered parts run.
+ * A short warehouse count is blocked and logged. Counts never go negative.
  */
 async function transferPartsRunInventory(
   db: D1Database,
@@ -19421,120 +25268,8 @@ async function transferPartsRunInventory(
   },
   actorUserId: number,
   techName: string
-): Promise<{ transferred: number; errors: string[] }> {
-  await ensureStockLocations(db);
-  const wh = await db
-    .prepare(
-      `SELECT id FROM stock_locations WHERE type = 'warehouse' AND active = 1 LIMIT 1`
-    )
-    .first<{ id: number }>();
-  if (!wh) {
-    return { transferred: 0, errors: ["No warehouse location configured"] };
-  }
-
-  let destLocId: number | null = null;
-  let destLabel = `tech ${techName}`;
-  if (run.vehicle_id) {
-    const v = await db
-      .prepare(`SELECT id, unit_number FROM vehicles WHERE id = ?`)
-      .bind(run.vehicle_id)
-      .first<{ id: number; unit_number: string }>();
-    if (v) {
-      destLocId = await ensureVehicleStockLocation(db, v.id, v.unit_number, {
-        seedTruckParts: false,
-      });
-      destLabel = `Unit ${v.unit_number}`;
-    }
-  }
-
-  const lines = (await loadPartsRunLines(db, run.id)) as Array<{
-    id: number;
-    part_id: number | null;
-    part_code: string | null;
-    part_name: string;
-    qty: number;
-    transferred: number;
-  }>;
-
-  const errors: string[] = [];
-  let transferred = 0;
-  const note = `Parts run #${run.id}: ${techName} · ${run.part_needed.slice(0, 60)} → ${destLabel}`;
-
-  for (const line of lines) {
-    if (line.transferred) {
-      transferred += 1;
-      continue;
-    }
-    let partId = line.part_id ? Number(line.part_id) : 0;
-    if (!partId && line.part_code) {
-      const hit = await resolvePartByCode(db, line.part_code);
-      if (hit) {
-        partId = hit.id;
-        await db
-          .prepare(`UPDATE parts_run_lines SET part_id = ? WHERE id = ?`)
-          .bind(partId, line.id)
-          .run();
-      }
-    }
-    if (!partId) {
-      errors.push(
-        `${line.part_code || line.part_name}: not found in inventory catalog (add part # or skip transfer)`
-      );
-      await db
-        .prepare(
-          `UPDATE parts_run_lines SET transfer_note = ? WHERE id = ?`
-        )
-        .bind("No catalog match", line.id)
-        .run();
-      continue;
-    }
-    const qty = Math.max(0.01, Number(line.qty) || 1);
-    try {
-      if (destLocId) {
-        await transferStock(db, partId, wh.id, destLocId, qty, actorUserId, note);
-      } else {
-        // No truck — issue out of warehouse (still documents custody leave)
-        await adjustStockQty(
-          db,
-          partId,
-          wh.id,
-          -qty,
-          actorUserId,
-          "issue",
-          note
-        );
-      }
-      await db
-        .prepare(
-          `UPDATE parts_run_lines SET transferred = 1, transfer_note = ?, part_id = ? WHERE id = ?`
-        )
-        .bind(destLocId ? `→ ${destLabel}` : "issued from warehouse", partId, line.id)
-        .run();
-      transferred += 1;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      errors.push(`${line.part_code || line.part_name}: ${msg}`);
-      await db
-        .prepare(`UPDATE parts_run_lines SET transfer_note = ? WHERE id = ?`)
-        .bind(msg.slice(0, 200), line.id)
-        .run();
-    }
-  }
-
-  if (transferred > 0) {
-    try {
-      await db
-        .prepare(
-          `UPDATE parts_run_requests SET inventory_transferred = 1, updated_at = datetime('now') WHERE id = ?`
-        )
-        .bind(run.id)
-        .run();
-    } catch {
-      /* column may be missing on very old */
-    }
-  }
-
-  return { transferred, errors };
+) {
+  return applyPartsRunTransfer(db, run, actorUserId, techName);
 }
 
 function isPartsRunDispatcher(role: string): boolean {
@@ -19580,6 +25315,8 @@ api.get("/parts-runs", async (c) => {
   const view = (c.req.query("view") || "mine").toLowerCase();
 
   try {
+    const stock_moves_enabled =
+      (await getSetting(c.env.DB, "parts_run_stock_moves", "0")) === "1";
     if (view === "report") {
       if (!isPartsRunDispatcher(user.role) && user.role !== "viewer") {
         return c.json({ error: "Not allowed" }, 403);
@@ -19624,6 +25361,7 @@ api.get("/parts-runs", async (c) => {
         summary: summary.results || [],
         requests: recentWithLines,
         reasons: PARTS_RUN_REASONS,
+        stock_moves_enabled,
       });
     }
 
@@ -19640,8 +25378,17 @@ api.get("/parts-runs", async (c) => {
          LEFT JOIN users d ON d.id = r.delivered_by_user_id
          LEFT JOIN vehicles v ON v.id = r.vehicle_id
          WHERE r.status IN ('requested', 'en_route')
+            OR (
+              r.status = 'delivered'
+              AND EXISTS (
+                SELECT 1 FROM parts_run_lines l
+                WHERE l.run_id = r.id
+                  AND l.part_id IS NOT NULL
+                  AND IFNULL(l.transferred, 0) = 0
+              )
+            )
          ORDER BY
-           CASE r.status WHEN 'requested' THEN 0 ELSE 1 END,
+           CASE r.status WHEN 'requested' THEN 0 WHEN 'en_route' THEN 1 ELSE 2 END,
            r.created_at ASC
          LIMIT 80`
       ).all();
@@ -19653,10 +25400,11 @@ api.get("/parts-runs", async (c) => {
         requests: withLines,
         reasons: PARTS_RUN_REASONS,
         is_dispatcher: isPartsRunDispatcher(user.role),
+        stock_moves_enabled,
       });
     }
 
-    // mine — personal log + counts
+    // mine â€” personal log + counts
     const mine = await c.env.DB.prepare(
       `SELECT r.*, v.unit_number as vehicle_unit,
           d.display_name as delivered_by_name
@@ -19700,6 +25448,7 @@ api.get("/parts-runs", async (c) => {
         open_count: stats?.open_count ?? 0,
       },
       is_dispatcher: isPartsRunDispatcher(user.role),
+      stock_moves_enabled,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -19722,7 +25471,7 @@ api.post("/parts-runs", async (c) => {
   const body = await c.req.json<{
     /** What they need brought out (plain description) */
     part_needed?: string;
-    /** Why it wasn’t already on the truck (plain text) */
+    /** Why it wasnâ€™t already on the truck (plain text) */
     reason_detail?: string;
     /** Free-text reason also accepted as "why" for older clients */
     why_not_on_truck?: string;
@@ -19742,7 +25491,7 @@ api.post("/parts-runs", async (c) => {
     return c.json({ error: "Describe what you need delivered." }, 400);
   }
   if (!reasonDetail || reasonDetail.length < 5) {
-    return c.json({ error: "Say why it wasn’t already on the truck." }, 400);
+    return c.json({ error: "Say why it wasnâ€™t already on the truck." }, 400);
   }
   if (!jobAddress || jobAddress.length < 5) {
     return c.json({ error: "Enter the address where the parts need to go." }, 400);
@@ -19852,7 +25601,11 @@ api.post("/parts-runs/:id/status", async (c) => {
       ? (body.delivery_notes || "").trim() || null
       : null;
 
-  let inventoryResult: { transferred: number; errors: string[] } | null = null;
+  let inventoryResult: {
+    transferred: number;
+    blocked: { part: string; have: number; need: number }[];
+    errors: string[];
+  } | null = null;
 
   if (next === "delivered") {
     await c.env.DB.prepare(
@@ -19867,9 +25620,11 @@ api.post("/parts-runs/:id/status", async (c) => {
       .bind(notes, user.id, id)
       .run();
 
-    // Live inventory: warehouse → truck / issue when marked delivered
-    const doTransfer = body.transfer_inventory !== false;
-    if (doTransfer) {
+    // Live inventory: warehouse â†’ truck / issue when marked delivered
+    const clientOptOut = body.transfer_inventory === false;
+    const moveSetting = await getSetting(c.env.DB, "parts_run_stock_moves", "0");
+    const pendingLines = await loadPartsRunLines(c.env.DB, id);
+    if (!clientOptOut && moveSetting === "1" && pendingLines.length > 0) {
       const tech = await c.env.DB.prepare(
         `SELECT display_name FROM users WHERE id = ?`
       )
@@ -19910,11 +25665,23 @@ api.post("/parts-runs/:id/status", async (c) => {
       .run();
   }
 
+  if (next === "delivered" || next === "cancelled") {
+    try {
+      await c.env.DB.prepare(
+        `UPDATE notifications SET read_at = datetime('now')
+         WHERE read_at IS NULL
+           AND lower(entity_type) IN ('parts_run', 'parts_run_request')
+           AND entity_id = ?
+           AND kind = 'parts_run_request'`
+      )
+        .bind(String(id))
+        .run();
+    } catch {
+      /* inbox clear is optional */
+    }
+  }
+
   if (before.user_id !== user.id && (next === "en_route" || next === "delivered")) {
-    const invNote =
-      inventoryResult && inventoryResult.transferred
-        ? ` · stock moved to truck (${inventoryResult.transferred} line${inventoryResult.transferred === 1 ? "" : "s"})`
-        : "";
     scheduleWaitUntil(
       c,
       notifyUsers(
@@ -19924,7 +25691,7 @@ api.post("/parts-runs/:id/status", async (c) => {
         next === "en_route"
           ? `Parts are on the way · ${before.part_needed.slice(0, 50)}`
           : `Parts delivered · ${before.part_needed.slice(0, 50)}`,
-        (notes || `Updated by ${user.display_name}`) + invNote,
+        notes || `Updated by ${user.display_name}`,
         { type: "parts_run", id }
       ).catch(() => {
         /* ignore */
@@ -19964,7 +25731,7 @@ api.post("/parts-runs/:id/status", async (c) => {
   });
 });
 
-// ——— App feedback / suggestions (everyone can submit; office/admin review) ———
+// â€”â€”â€” App feedback / suggestions (everyone can submit; office/admin review) â€”â€”â€”
 
 let appFeedbackTablesReady = false;
 async function ensureAppFeedbackTables(db: D1Database): Promise<void> {
@@ -20220,21 +25987,44 @@ api.patch("/feedback/:id", async (c) => {
 
 /**
  * PUBLIC ServiceTitan / Zapier assignment hook (no session auth).
- * When a job is assigned after 4:00 PM America/Chicago → one lean SMS to that tech.
- * Optional secret: header X-TA-Assignment-Secret or ?secret= (env ST_ASSIGNMENT_WEBHOOK_SECRET
- * or setting st_assignment_sms_webhook_secret). Empty secret = open (workers.dev HTTPS only).
- * Never texts customers. Never writes to ST.
+ * Requires header X-TA-Assignment-Secret = ST_ASSIGNMENT_WEBHOOK_SECRET (min 32).
+ * Unset = route disabled (401). The cron poll does not use this route.
  */
 app.post("/api/st/assignment-sms", async (c) => {
+  const auditHook = async (outcome: string, summary: string, after?: Record<string, unknown>) => {
+    try {
+      const action = `st_assign_hook_${outcome}`;
+      const noisy = outcome === "disabled" || outcome === "missing_secret" || outcome === "bad_secret";
+      if (noisy) {
+        const row = await c.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM audit_logs
+           WHERE action IN ('st_assign_hook_disabled','st_assign_hook_missing_secret','st_assign_hook_bad_secret')
+             AND created_at >= datetime('now','-60 minutes')`
+        ).first<{ n: number }>();
+        if (Number(row?.n || 0) >= 50) return;
+      }
+      await c.env.DB.prepare(
+        `INSERT INTO audit_logs (user_id, user_display, action, entity_type, entity_id, summary, after_json)
+         VALUES (NULL, 'webhook:st_assignment', ?, 'sms', NULL, ?, ?)`
+      )
+        .bind(action, summary.slice(0, 180), after ? JSON.stringify(after).slice(0, 2000) : null)
+        .run();
+    } catch {
+      /* audit must not change the response */
+    }
+  };
+  const ip = (c.req.header("CF-Connecting-IP") || "").slice(0, 64);
+  const ua = (c.req.header("User-Agent") || "").slice(0, 80);
+  const auth = await assignmentWebhookAuth(c.env, {
+    primary: c.req.header("X-TA-Assignment-Secret"),
+    alt: c.req.header("X-Webhook-Secret"),
+  });
+  if (auth !== "ok") {
+    const outcome = auth === "disabled" ? "disabled" : auth === "missing" ? "missing_secret" : "bad_secret";
+    await auditHook(outcome, outcome, { ip, ua });
+    return c.json({ ok: false, error: "Unauthorized" }, 401);
+  }
   try {
-    const secret =
-      c.req.header("X-TA-Assignment-Secret") ||
-      c.req.header("X-Webhook-Secret") ||
-      c.req.query("secret") ||
-      "";
-    const okSecret = await verifyAssignmentWebhookSecret(c.env.DB, c.env, secret);
-    if (!okSecret) return c.json({ error: "Forbidden" }, 403);
-
     let raw: unknown = null;
     try {
       raw = await c.req.json();
@@ -20242,7 +26032,21 @@ app.post("/api/st/assignment-sms", async (c) => {
       raw = null;
     }
     const events = parseAssignmentWebhookPayload(raw);
+    if (events.length > 20) {
+      await auditHook("bad_request", "too many events", { count: events.length });
+      return c.json({ ok: false, reason: "too_many_events" }, 400);
+    }
+    const cap = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM sms_log
+       WHERE context LIKE 'st_assign:%' AND status IN ('sent','queued','failed')
+         AND created_at >= datetime('now','-60 minutes')`
+    ).first<{ n: number }>();
+    if (Number(cap?.n || 0) >= 40) {
+      await auditHook("rate_limited", "hourly cap");
+      return c.json({ ok: false, reason: "rate_limit_hour" }, 429);
+    }
     if (!events.length) {
+      await auditHook("ok", "empty payload", { processed: 0, sent: 0, skipped: 0 });
       return c.json({ ok: true, processed: 0, message: "No assignment events in payload" });
     }
 
@@ -20255,10 +26059,12 @@ app.post("/api/st/assignment-sms", async (c) => {
         ...r,
       });
     }
+    const sent = results.filter((r) => Boolean((r as { sent?: boolean }).sent)).length;
+    const skipped = results.filter((r) => Boolean((r as { skipped?: boolean }).skipped)).length;
+    await auditHook("ok", `processed ${results.length}`, { processed: results.length, sent, skipped });
     return c.json({ ok: true, processed: results.length, results });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // Never crash the webhook partner
     return c.json({ ok: false, error: msg }, 200);
   }
 });
@@ -20266,8 +26072,9 @@ app.post("/api/st/assignment-sms", async (c) => {
 /**
  * PUBLIC Twilio inbound webhook (no session auth).
  * Point Messaging Service / phone number webhook POST to /api/sms/inbound.
- * Emergency keyword → SMS Adam + Chris (+ on_call) + customer ack.
+ * Emergency keyword â†’ SMS Adam + Chris (+ on_call) + customer ack.
  */
+app.post("/api/sms/agent-send", (c) => handleAgentSmsSend(c));
 app.post("/api/sms/inbound", async (c) => {
   const twimlEmpty =
     '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
@@ -20278,13 +26085,67 @@ app.post("/api/sms/inbound", async (c) => {
     });
 
   try {
-    const form = await c.req.parseBody();
+    const form = await c.req.parseBody({ all: true });
+    const params: Record<string, string | string[]> = {};
+    for (const [key, value] of Object.entries(form)) {
+      if (typeof value === "string") params[key] = value;
+      else if (Array.isArray(value)) {
+        params[key] = value.filter((v): v is string => typeof v === "string");
+      }
+    }
     const get = (k: string) => {
-      const v = form[k];
+      const v = params[k];
       if (typeof v === "string") return v;
       if (Array.isArray(v) && typeof v[0] === "string") return v[0];
       return "";
     };
+    const token = (c.env.TWILIO_AUTH_TOKEN || "").trim();
+    const signature = c.req.header("X-Twilio-Signature") || "";
+    const urls = [
+      c.req.url,
+      "https://total-assurance-fleet.totalassurance.workers.dev/api/sms/inbound",
+    ];
+    const base = String(c.env.APP_BASE_URL || "").trim().replace(/\/$/, "");
+    if (base) urls.push(`${base}/api/sms/inbound`);
+    let verified = false;
+    if (token && signature) {
+      for (const url of urls) {
+        if (await twilioSignatureValid(token, url, params, signature)) {
+          verified = true;
+          break;
+        }
+      }
+    }
+    if (!verified) {
+      const fromRawEarly = get("From");
+      const bodyEarly = get("Body").trim().slice(0, 1500);
+      await logSms(c.env.DB, {
+        from_user_id: null,
+        to_user_id: null,
+        to_phone: normalizePhone(get("To")) || "+13614466925",
+        body: bodyEarly || "(empty)",
+        status: "received",
+        provider_sid: get("MessageSid") || get("SmsSid") || null,
+        error: fromRawEarly ? `from:${fromRawEarly}`.slice(0, 80) : null,
+        context: "inbound_unverified",
+      });
+      try {
+        const row = await c.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM audit_logs
+           WHERE action = 'sms_inbound_bad_signature'
+             AND created_at >= datetime('now','-60 minutes')`
+        ).first<{ n: number }>();
+        if (Number(row?.n || 0) < 50) {
+          await c.env.DB.prepare(
+            `INSERT INTO audit_logs (user_id, user_display, action, entity_type, summary)
+             VALUES (NULL, 'system', 'sms_inbound_bad_signature', 'sms', 'inbound signature rejected')`
+          ).run();
+        }
+      } catch {
+        /* audit must not change the webhook response */
+      }
+      return respondOk();
+    }
     const fromRaw = get("From");
     const toRaw = get("To");
     const bodyRaw = get("Body");
@@ -20303,7 +26164,7 @@ app.post("/api/sms/inbound", async (c) => {
       "+13614466925";
     const body = bodyRaw.trim().slice(0, 1500);
 
-    await logSms(c.env.DB, {
+    const smsLogId = await logSms(c.env.DB, {
       from_user_id: null,
       to_user_id: null,
       to_phone: toPhone,
@@ -20313,6 +26174,26 @@ app.post("/api/sms/inbound", async (c) => {
       error: fromPhone ? `from:${fromPhone}` : fromRaw ? `from_raw:${fromRaw}` : null,
       context: "inbound",
     });
+
+    try {
+      await recordInboundOptKeyword(c.env.DB, fromPhone, body);
+    } catch {
+      /* opt-out mirror must not change the webhook response */
+    }
+
+    // Jeff Hilliard / Atlas: one-shot wake when Eric Gonzalez texts back (no poll).
+    const ericWake = maybePingAtlasEricSmsReply(c.env, {
+      fromPhone,
+      fromRaw,
+      body: body || "",
+      smsLogId,
+    });
+    try {
+      if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(ericWake);
+      else void ericWake;
+    } catch {
+      void ericWake;
+    }
 
     const isEmergency = /\bemerg(?:ency)?\b/i.test(body);
     if (!isEmergency || !fromPhone) {
@@ -20426,7 +26307,7 @@ app.post("/api/sms/inbound", async (c) => {
 
 app.route("/api", api);
 
-// SPA fallback via assets binding — never cache HTML so phones always get the latest shell
+// SPA fallback via assets binding â€” never cache HTML so phones always get the latest shell
 app.all("*", async (c) => {
   if (c.req.path.startsWith("/api/")) {
     return c.json({ error: "Not found" }, 404);
@@ -20473,11 +26354,16 @@ export default {
     return app.fetch(request, env, ctx);
   },
   /**
-   * Morning (13:00 UTC): shop bring-in + weekly checks + PTO + ST materials.
-   * Evening (every 20 min ~4–10:40pm CT): after-hours ST assignment SMS poll.
+   * 5:00am America/Chicago (10:00 or 11:00 UTC): yesterday's truck restock lists, then stop.
+   * Morning (13:00 UTC): shop bring-in + weekly checks + PTO + ST materials. Not the restock list.
+   * Evening (every 20 min, about 4:00-10:40pm CT): after-hours ST assignment SMS poll.
+   * Clock watch (every 5 min, all day): no-clock-in texts stay weekday 7:00 AM-6:00 PM Chicago.
+   * Left-on-job runs any hour. Flag default off, so that cron returns before any text.
+   * This cron returns before shop bring-in, materials, and assignment texts.
    */
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const cron = String((event as { cron?: string }).cron || "");
+    const isClockinNudge = cron === "*/5 * * * *" || cron === "*/5 12-23 * * *";
     const isEveningAssignPoll =
       cron.includes("21-23") ||
       cron.includes("0-3") ||
@@ -20485,6 +26371,52 @@ export default {
 
     ctx.waitUntil(
       (async () => {
+        if (isClockinNudge) {
+          try {
+            await runClockinNudges(env, env.DB);
+          } catch {
+            /* clock-in nudge is best-effort and never throws into the cron */
+          }
+          try {
+            await pingStalePartOrders(env.DB);
+          } catch {
+            /* in-app backorder ping only */
+          }
+          try {
+            await runReviewTextTick(env, env.DB);
+          } catch {
+            /* review text is best-effort and never throws into the cron */
+          }
+          return;
+        }
+        // 5:00am Chicago only. Do not run the 8:00am shop pack on these ticks.
+        if (cron === "0 10 * * *" || cron === "0 11 * * *") {
+          if (isRestockBuildCron(cron, new Date())) {
+            try {
+              await buildYesterdayRestock(env.DB);
+            } catch {
+              /* restock list is best-effort */
+            }
+          }
+          return;
+        }
+        // Keep today's jobs painted for the shop day (read-only ST).
+        try {
+          await warmTodayDayBoard(env, env.DB);
+        } catch {
+          /* best-effort */
+        }
+        try {
+          await pingStalePartOrders(env.DB);
+        } catch {
+          /* in-app backorder ping only */
+        }
+        try {
+          const { pingUnscheduledPartFinder } = await import("./partFinder");
+          await pingUnscheduledPartFinder(env.DB);
+        } catch {
+          /* best-effort manager check */
+        }
         if (isEveningAssignPoll) {
           try {
             await pollAfterHoursAssignments(env, env.DB);
@@ -20517,6 +26449,11 @@ export default {
           await cronSyncStMaterialsInsertOnly(env, env.DB);
         } catch {
           /* best-effort ST materials insert_only; never overwrite */
+        }
+        try {
+          await syncQueuedClockEvents(env, env.DB, { limit: 50 });
+        } catch {
+          /* best-effort clock->ST appointment status flush */
         }
         // Morning cron may also refresh assignment snapshot (no SMS before 4pm)
         try {

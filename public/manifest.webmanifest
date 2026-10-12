@@ -3,7 +3,7 @@
   "short_name": "Field App",
   "start_url": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "background_color": "#000000",
   "theme_color": "#000000",
   "description": "Field, warehouse, trucks, and shop tools for Total Assurance A/C & Heating",

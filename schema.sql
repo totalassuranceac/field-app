@@ -26,8 +26,19 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  view_as_user_id INTEGER REFERENCES users(id),
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS view_as_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  admin_user_id INTEGER NOT NULL,
+  admin_display TEXT NOT NULL,
+  target_user_id INTEGER NOT NULL,
+  target_display TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ended_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS employees (

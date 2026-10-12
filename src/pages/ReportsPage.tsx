@@ -13,6 +13,78 @@ interface Issue {
   description: string | null;
 }
 
+/** Nearby /downtime/summary row. Hours down over 30 days, not a day count. */
+interface DownSummary {
+  vehicle_id: number;
+  unit_number: string;
+  total_hours_30d: number | string | null;
+  currently_down: number | string | null;
+}
+
+/** Nearby /inspections/weekly-status row. */
+interface WeeklyFleet {
+  vehicle_id: number;
+  unit_number: string;
+  status: string;
+  open_repairs: number | string | null;
+}
+
+interface FleetExportRow {
+  unit_number: string;
+  status: string;
+  out_of_service_days_30d: number | null;
+  open_repair_count: number | null;
+}
+
+function numOrNull(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function csvCell(value: string | number | null | undefined): string {
+  const s = value == null ? "" : String(value);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function buildFleetExport(weekly: WeeklyFleet[] | null, down: DownSummary[] | null): FleetExportRow[] {
+  const map = new Map<string, FleetExportRow>();
+  const keyOf = (id: number | null | undefined, unit: string) =>
+    id != null && Number.isFinite(Number(id)) ? `id:${Number(id)}` : `u:${unit}`;
+
+  for (const row of weekly || []) {
+    const unit = String(row.unit_number || "").trim();
+    if (!unit) continue;
+    map.set(keyOf(row.vehicle_id, unit), {
+      unit_number: unit,
+      status: String(row.status || ""),
+      out_of_service_days_30d: null,
+      open_repair_count: numOrNull(row.open_repairs),
+    });
+  }
+
+  for (const row of down || []) {
+    const unit = String(row.unit_number || "").trim();
+    if (!unit) continue;
+    const key = keyOf(row.vehicle_id, unit);
+    const prev = map.get(key) || {
+      unit_number: unit,
+      status: "",
+      out_of_service_days_30d: null,
+      open_repair_count: null,
+    };
+    const hours = numOrNull(row.total_hours_30d);
+    if (hours != null) prev.out_of_service_days_30d = Math.round((hours / 24) * 10) / 10;
+    if (!prev.status && numOrNull(row.currently_down)) prev.status = "out_of_service";
+    map.set(key, prev);
+  }
+
+  return [...map.values()].sort((a, b) =>
+    a.unit_number.localeCompare(b.unit_number, undefined, { numeric: true })
+  );
+}
+
 /** N/A = ignore. Only missing / not_working need shop work. Working = good. */
 function camNeedsWork(v: Vehicle): boolean {
   return v.dash_cam_status === "missing" || v.dash_cam_status === "not_working";
@@ -59,6 +131,9 @@ export function ReportsPage() {
   const [expired, setExpired] = useState<Vehicle[]>([]);
   const [equipment, setEquipment] = useState<Vehicle[]>([]);
   const [allActive, setAllActive] = useState<Vehicle[]>([]);
+  const [weeklyFleet, setWeeklyFleet] = useState<WeeklyFleet[] | null>(null);
+  const [downSummary, setDownSummary] = useState<DownSummary[] | null>(null);
+  const [fleetExtras, setFleetExtras] = useState<"loading" | "ready" | "missing">("loading");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -75,6 +150,16 @@ export function ReportsPage() {
         setAllActive(active.vehicles);
       })
       .catch((e) => setError(e.message));
+    Promise.allSettled([
+      api<{ vehicles: WeeklyFleet[] }>("/inspections/weekly-status"),
+      api<{ summary: DownSummary[] }>("/downtime/summary"),
+    ]).then(([weekly, down]) => {
+      const weeklyRows = weekly.status === "fulfilled" ? weekly.value.vehicles || [] : null;
+      const downRows = down.status === "fulfilled" ? down.value.summary || [] : null;
+      setWeeklyFleet(weeklyRows);
+      setDownSummary(downRows);
+      setFleetExtras(weeklyRows || downRows ? "ready" : "missing");
+    });
   }, []);
 
   const equipSorted = useMemo(() => {
@@ -102,12 +187,46 @@ export function ReportsPage() {
   );
   const needsWorkCount = equipSorted.length;
   const activeCount = allActive.filter((v) => v.status === "active").length;
+  const fleetRows = useMemo(
+    () => buildFleetExport(weeklyFleet, downSummary),
+    [weeklyFleet, downSummary]
+  );
+  const fleetHasDays = fleetRows.some((row) => row.out_of_service_days_30d != null);
+  const fleetHasRepairs = fleetRows.some((row) => row.open_repair_count != null);
+  const fleetAttention = fleetRows.filter(
+    (row) =>
+      row.status === "out_of_service" ||
+      (row.out_of_service_days_30d != null && row.out_of_service_days_30d > 0) ||
+      (row.open_repair_count != null && row.open_repair_count > 0)
+  );
+
+  function downloadFleetCsv() {
+    const headers = ["unit_number", "status"];
+    if (fleetHasDays) headers.push("out_of_service_days_30d");
+    if (fleetHasRepairs) headers.push("open_repair_count");
+    const lines = [
+      headers.join(","),
+      ...fleetRows.map((row) => {
+        const cells = [csvCell(row.unit_number), csvCell(row.status)];
+        if (fleetHasDays) cells.push(csvCell(row.out_of_service_days_30d));
+        if (fleetHasRepairs) cells.push(csvCell(row.open_repair_count));
+        return cells.join(",");
+      }),
+    ];
+    const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "fleet-oos-repairs.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div>
       <div className="page-header">
         <div>
-          <h1>Reports</h1>
+          <h1>Fuel &amp; fleet exports</h1>
           <p>Printable work and compliance lists · CSV export for the office</p>
         </div>
         <div className="toolbar no-print">
@@ -117,12 +236,60 @@ export function ReportsPage() {
           <a className="btn secondary btn-sm" href="/api/reports/issues.csv">
             Repairs CSV
           </a>
+          {fleetRows.length > 0 && (
+            <button className="btn secondary btn-sm" type="button" onClick={downloadFleetCsv}>
+              Fleet CSV
+            </button>
+          )}
           <button className="btn btn-sm" type="button" onClick={() => window.print()}>
             Print
           </button>
         </div>
       </div>
+      {fleetExtras === "missing" && (
+        <p className="muted" style={{ marginTop: 0 }}>
+          Out-of-service days and open repair count are included in the fleet export only when
+          those lists are already loaded.
+        </p>
+      )}
       {error && <div className="error">{error}</div>}
+
+      {fleetRows.length > 0 && (fleetHasDays || fleetHasRepairs) && (
+        <div className="card" style={{ marginBottom: "1rem" }}>
+          <h2>Out of service and open repairs</h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: "0.9rem" }}>
+            Days are the last 30 days from downtime hours. Open repairs are the current shop
+            count. Fleet CSV includes every non-retired unit when that list loaded.
+          </p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Unit</th>
+                  <th>Status</th>
+                  {fleetHasDays ? <th>Out-of-service days (30d)</th> : null}
+                  {fleetHasRepairs ? <th>Open repairs</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {fleetAttention.map((row) => (
+                  <tr key={row.unit_number}>
+                    <td>
+                      <strong>{row.unit_number}</strong>
+                    </td>
+                    <td>{row.status ? row.status.replace(/_/g, " ") : "-"}</td>
+                    {fleetHasDays ? <td>{row.out_of_service_days_30d ?? ""}</td> : null}
+                    {fleetHasRepairs ? <td>{row.open_repair_count ?? ""}</td> : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!fleetAttention.length && (
+              <div className="empty">No units down and no open repairs in the loaded lists.</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Mechanic priority: install / repair cams and GPS */}
       <div className="card" style={{ marginBottom: "1rem" }}>

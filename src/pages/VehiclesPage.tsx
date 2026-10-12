@@ -1,4 +1,5 @@
 import { FormEvent, type ReactNode, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { suggestTankCapacity } from "../tankCapacity";
@@ -336,7 +337,10 @@ export function VehiclesPage() {
     <div className="vehicles-page">
       <div className="page-header">
         <div>
-          <h1>Vehicles</h1>
+          <h1>Fleet units</h1>
+          <p className="no-print">
+            <Link to="/audit?entity=vehicle">Change history</Link>
+          </p>
           <p>
             Fleet registry and equipment. Use <strong>Assign</strong> when a tech moves to another
             unit so live map and their app follow the right truck. Registration stickers are

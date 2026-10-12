@@ -226,7 +226,7 @@ export function AlertsPage() {
     <div className="alerts-page">
       <div className="page-header">
         <div>
-          <h1>Fuel alerts</h1>
+          <h1>Fuel problems</h1>
           <p>
             Grouped by unit (oldest receipt first). Open each receipt photo to verify gallons,
             total, and that the odometer story makes sense.

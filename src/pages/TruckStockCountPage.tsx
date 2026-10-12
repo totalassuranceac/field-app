@@ -70,6 +70,13 @@ function statusLabel(s: string): string {
   return s;
 }
 
+function namesMatch(assigned: string | null | undefined, display: string | null | undefined): boolean {
+  const a = (assigned || "").trim().toLowerCase();
+  const b = (display || "").trim().toLowerCase();
+  if (!a || !b) return false;
+  return a === b;
+}
+
 /**
  * Initial truck stock counts: techs fill on phone; office/warehouse can help;
  * warehouse applies numbers into inventory for replenishment.
@@ -102,12 +109,13 @@ export function TruckStockCountPage() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const listStatus = isDriver ? "all" : filter === "active" ? "active" : filter;
   const loadList = useCallback(async () => {
     const d = await api<{ counts: CountSummary[] }>(
-      `/inventory/truck-counts?status=${filter === "active" ? "active" : filter}`
+      `/inventory/truck-counts?status=${listStatus}`
     );
     setList(d.counts || []);
-  }, [filter]);
+  }, [listStatus]);
 
   const loadSheet = useCallback(async (id: number) => {
     const d = await api<{ count: Record<string, unknown>; lines: CountLine[] }>(
@@ -215,6 +223,20 @@ export function TruckStockCountPage() {
     }
     return { filled, total: lines.length, notNeed, blank: Math.max(0, lines.length - filled) };
   }, [lines, drafts]);
+
+  const namedList = useMemo(() => {
+    if (!isDriver) return list;
+    return list.filter((c) => namesMatch(c.assigned_driver, user?.display_name));
+  }, [isDriver, list, user?.display_name]);
+
+  const visibleList = useMemo(() => {
+    if (!isDriver) return list;
+    return namedList.filter((c) => {
+      if (filter === "active") return c.status === "open" || c.status === "submitted";
+      if (filter === "all") return true;
+      return c.status === filter;
+    });
+  }, [filter, isDriver, list, namedList]);
 
   const editable =
     detail &&
@@ -331,7 +353,7 @@ export function TruckStockCountPage() {
 
   async function onApply() {
     if (!openId || !canManage) return;
-    if (!confirm("Apply these counts to truck stock inventory?")) return;
+    if (!confirm("Apply these counts to truck stock? A live truck stays on Live inventory.")) return;
     setBusy(true);
     setError("");
     setOk("");
@@ -371,7 +393,8 @@ export function TruckStockCountPage() {
   }
 
   // ——— Detail form ———
-  if (openId && detail) {
+  const ownSheet = !isDriver || namesMatch(detail?.assigned_driver, user?.display_name);
+  if (openId && detail && ownSheet) {
     const truckLabel = [
       detail.unit_number ? `Unit ${detail.unit_number}` : "Truck",
       [detail.year, detail.make, detail.model].filter(Boolean).join(" "),
@@ -455,6 +478,18 @@ export function TruckStockCountPage() {
                     not_needed: false,
                     notes: "",
                   };
+                  const countedNum = d.not_needed
+                    ? 0
+                    : d.counted_qty.trim() === ""
+                      ? null
+                      : Number(d.counted_qty);
+                  const signed = detail.status === "submitted" || detail.status === "applied";
+                  const disagrees =
+                    signed &&
+                    countedNum != null &&
+                    Number.isFinite(countedNum) &&
+                    Math.abs(countedNum - Number(line.system_qty)) > 0.0001;
+                  const movePart = (line.part_name || "").trim() || String(line.part_id);
                   return (
                     <tr
                       key={line.id}
@@ -466,6 +501,15 @@ export function TruckStockCountPage() {
                         <div className="tsc-part-name">{line.part_name}</div>
                         {line.part_code ? (
                           <div className="muted tsc-part-code">{line.part_code}</div>
+                        ) : null}
+                        {disagrees ? (
+                          <div>
+                            <Link
+                              to={`/inventory/stock-moves?part=${encodeURIComponent(movePart)}`}
+                            >
+                              Stock move
+                            </Link>
+                          </div>
                         ) : null}
                       </td>
                       <td className="tsc-col-qty">
@@ -624,7 +668,7 @@ export function TruckStockCountPage() {
           <p>
             {isDriver
               ? "Open your unit’s sheet, count what’s on the truck, check Skip if you don’t need a part, then sign."
-              : "Hand sheets to techs for the first full truck count. When they submit, apply to inventory so replenishment has a baseline."}
+              : "Hand sheets to techs for the first full truck count. When they submit, apply the sheet. A truck that is already live keeps its count in Live inventory."}
           </p>
         </div>
       </div>
@@ -694,17 +738,19 @@ export function TruckStockCountPage() {
         ))}
       </div>
 
-      {loading && !list.length ? (
+      {loading && !visibleList.length ? (
         <p className="muted">Loading…</p>
-      ) : !list.length ? (
+      ) : !visibleList.length ? (
         <div className="card muted">
-          {isDriver
-            ? "No open truck stock sheets for your unit yet. Ask warehouse or office to open one."
-            : "No sheets yet. Open one for a truck above."}
+          {isDriver && namedList.length === 0
+            ? "No truck is assigned."
+            : isDriver
+              ? "No open truck stock sheets for your unit yet. Ask warehouse or office to open one."
+              : "No sheets yet. Open one for a truck above."}
         </div>
       ) : (
         <ul className="tsc-list">
-          {list.map((c) => (
+          {visibleList.map((c) => (
             <li key={c.id}>
               <Link to={`/truck-stock?id=${c.id}`} className="tsc-list-card">
                 <div className="tsc-list-top">

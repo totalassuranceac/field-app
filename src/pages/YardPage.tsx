@@ -4,7 +4,27 @@ import { api, can } from "../api";
 import { useAuth } from "../auth";
 import { isPersonalVehicleUnit, type Vehicle } from "./VehiclesPage";
 
-type Filter = "all" | "expired" | "expiring" | "equipment";
+type Filter = "all" | "expired" | "expiring" | "registration" | "missing_registration" | "equipment";
+
+function filterFromSearch(): Filter {
+  try {
+    const f = new URLSearchParams(window.location.search).get("filter") || "";
+    if (
+      f === "expired" ||
+      f === "expiring" ||
+      f === "registration" ||
+      f === "missing_registration" ||
+      f === "equipment"
+    ) {
+      return f;
+    }
+    if (f === "reg") return "registration";
+    if (f === "reg_missing") return "missing_registration";
+  } catch {
+    /* ignore */
+  }
+  return "all";
+}
 
 function daysUntil(dateStr: string | null): number | null {
   if (!dateStr) return null;
@@ -33,6 +53,10 @@ function worstStatus(v: Vehicle, soonDays: number): "ok" | "warn" | "bad" {
   // Texas: registration sticker + insurance (no state inspection sticker)
   const dates = [v.registration_expires, v.insurance_expires];
   let worst: "ok" | "warn" | "bad" = "ok";
+  // Missing registration date is attention (TxDMV renewals hide without a date on file)
+  if (!v.registration_expires || !String(v.registration_expires).trim()) {
+    worst = "warn";
+  }
   for (const d of dates) {
     const days = daysUntil(d);
     if (days == null) continue;
@@ -51,7 +75,7 @@ export function YardPage() {
   const { user } = useAuth();
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [soonDays, setSoonDays] = useState(30);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(() => filterFromSearch());
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
@@ -75,7 +99,16 @@ export function YardPage() {
   }
 
   useEffect(() => {
-    load().catch((e) => setError(e.message));
+    load()
+      .then(() => {
+        try {
+          const unitQ = new URLSearchParams(window.location.search).get("unit");
+          if (unitQ) setSearch(unitQ);
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch((e) => setError(e.message));
   }, [filter]);
 
   const sorted = useMemo(() => {
@@ -287,9 +320,10 @@ export function YardPage() {
     <div className="yard-page">
       <div className="page-header yard-page-header">
         <div>
-          <h1>Yard</h1>
+          <h1>Fleet compliance</h1>
           <p>
-            Reg · insurance · cam · GPS. Not working or missing cam/GPS is saved to the{" "}
+            Reg · insurance · cam · GPS. After a TxDMV renewal email, edit{" "}
+            <strong>registration expires</strong> here (date only). Cam/GPS issues go to the{" "}
             <Link to="/issues">shop board</Link> automatically.
           </p>
         </div>
@@ -328,6 +362,8 @@ export function YardPage() {
             ["all", "All"],
             ["expired", "Expired"],
             ["expiring", `≤${soonDays}d`],
+            ["registration", "Reg due/missing"],
+            ["missing_registration", "Missing reg date"],
             ["equipment", "Cam/GPS"],
           ] as const
         ).map(([k, label]) => (
@@ -335,7 +371,17 @@ export function YardPage() {
             key={k}
             type="button"
             className={`chip chip-sm ${filter === k ? "active" : ""}`}
-            onClick={() => setFilter(k)}
+            onClick={() => {
+              setFilter(k);
+              try {
+                const url = new URL(window.location.href);
+                if (k === "all") url.searchParams.delete("filter");
+                else url.searchParams.set("filter", k);
+                window.history.replaceState({}, "", url.toString());
+              } catch {
+                /* ignore */
+              }
+            }}
           >
             {label}
           </button>
@@ -409,7 +455,10 @@ export function YardPage() {
               </div>
               <div className="yard-card-dates">
                 <span>
-                  <strong>Reg</strong> {v.registration_expires || "—"}
+                  <strong>Reg</strong>{" "}
+                  {v.registration_expires || (
+                    <span className="badge badge-sm expiring">Missing date</span>
+                  )}
                   {dateHint(v.registration_expires, soonDays)}
                 </span>
                 <span>
